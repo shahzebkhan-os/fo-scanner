@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  fo-scanner:
+    build: .
+    container_name: fo-scanner
+    ports:
+      - "8000:8000"
+    environment:
+      - INDSTOCKS_TOKEN=${INDSTOCKS_TOKEN:-""}
+    restart: unless-stopped
