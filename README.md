@@ -34,7 +34,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 
 # Create an env file if you have a premium INDmoney token (optional)
 cp .env.example .env
@@ -42,13 +42,16 @@ cp .env.example .env
 
 #### 2. Build Frontend
 ```bash
+cd frontend
 npm install
 npm run build
+cd ..
 ```
 
 #### 3. Run Application
 ```bash
 # Serves both the React frontend and FastAPI backend
+cd backend
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 Visit `http://localhost:8000` to access the scanner.

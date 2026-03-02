@@ -396,15 +396,17 @@ async def get_chain(symbol: str, expiry: str = None):
     }
 
 
-if os.path.isdir("dist"):
-    app.mount("/assets", StaticFiles(directory="dist/assets"), name="assets")
+dist_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+
+if os.path.isdir(dist_path):
+    app.mount("/assets", StaticFiles(directory=os.path.join(dist_path, "assets")), name="assets")
 
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
     if full_path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API route not found")
     
-    index_path = os.path.join("dist", "index.html")
+    index_path = os.path.join(dist_path, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
     return {"error": "Frontend build not found"}
