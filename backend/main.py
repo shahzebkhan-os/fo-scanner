@@ -4,10 +4,12 @@ NSE F&O Option Chain Scanner — Backend v3 (Akamai fix)
 
 import os, time, asyncio, logging
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, time as dtime
 import json
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
+from zoneinfo import ZoneInfo
+import db
 
 import httpx, uvicorn
 from fastapi import FastAPI, HTTPException, Query
@@ -53,10 +55,11 @@ FO_STOCKS = [
 INDEX_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
 
 try:
-    with open("slugs.json", "r") as f:
+    slugs_path = os.path.join(os.path.dirname(__file__), "slugs.json")
+    with open(slugs_path, "r") as f:
         SLUG_MAP = json.load(f)
-except Exception:
-    logging.warning("slugs.json not found, some stocks may fail.")
+except Exception as e:
+    print(f"FAILED TO LOAD slugs.json from {os.path.join(os.path.dirname(__file__), 'slugs.json')}: {e}")
     SLUG_MAP = {
         "NIFTY": "nifty-50-share-price",
         "BANKNIFTY": "nifty-bank-share-price",
@@ -66,8 +69,101 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
+IST = ZoneInfo("Asia/Kolkata")
+
 app = FastAPI(title="NSE F&O Scanner API", version="3.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+@app.on_event("startup")
+async def startup_event():
+    db.init_db()
+    asyncio.create_task(paper_trade_manager())
+
+# ── Market Hours ──────────────────────────────────────────────────────────────
+
+def is_market_open() -> bool:
+    """NSE is open Mon–Fri, 9:15 AM – 3:30 PM IST."""
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    return dtime(9, 15) <= now.time() <= dtime(15, 30)
+
+def market_status() -> dict:
+    now = datetime.now(IST)
+    open_ = is_market_open()
+    return {
+        "open":     open_,
+        "ist_time": now.strftime("%H:%M:%S"),
+        "ist_date": now.strftime("%Y-%m-%d"),
+        "weekday":  now.strftime("%A"),
+        "message":  "Market OPEN" if open_ else "Market CLOSED (opens Mon–Fri 9:15 AM IST)",
+    }
+
+# ── Paper Trading Manager ─────────────────────────────────────────────────────
+
+async def paper_trade_manager():
+    """Background task to manage open paper trades."""
+    log.info("Started Paper Trade Manager background loop.")
+    while True:
+        try:
+            if is_market_open():
+                open_trades = db.get_open_trades()
+                if open_trades:
+                    log.info(f"Checking {len(open_trades)} OPEN paper trades...")
+                    symbols = list(set([t['symbol'] for t in open_trades]))
+                    
+                    sem = asyncio.Semaphore(3)
+                    async def fetch_and_update(sym):
+                        async with sem:
+                            try:
+                                chain_data = await fetch_nse_chain(sym)
+                                return sym, chain_data
+                            except Exception as e:
+                                log.error(f"Failed to fetch {sym} for paper trading: {e}")
+                                return sym, None
+                                
+                    results = await asyncio.gather(*[fetch_and_update(s) for s in symbols])
+                    chain_map = {sym: data for sym, data in results if data}
+                    
+                    for trade in open_trades:
+                        sym = trade['symbol']
+                        chain = chain_map.get(sym)
+                        if not chain: continue
+                        
+                        records = chain.get("records", {}).get("data", [])
+                        spot = chain.get("records", {}).get("underlyingValue")
+                        if not records or not spot: continue
+                        
+                        current_price = None
+                        for row in records:
+                            if row.get("strikePrice") == trade['strike']:
+                                opt_data = row.get("CE") if trade['type'] == "CE" else row.get("PE")
+                                if opt_data:
+                                    current_price = opt_data.get("lastPrice")
+                                break
+                                
+                        if current_price:
+                            db.update_trade(trade['id'], current_price)
+                            pnl_pct = ((current_price - trade['entry_price']) / trade['entry_price']) * 100
+                            
+                            now = datetime.now(IST)
+                            if now.time() >= dtime(15, 15):
+                                db.update_trade(trade['id'], current_price, exit_flag=True, reason="EOD Square Off")
+                                continue
+                                
+                            if pnl_pct <= -20:
+                                db.update_trade(trade['id'], current_price, exit_flag=True, reason="Stop Loss (-20%)")
+                                continue
+                                
+                            if pnl_pct >= 40:
+                                db.update_trade(trade['id'], current_price, exit_flag=True, reason="Take Profit (+40%)")
+                                continue
+            
+            await asyncio.sleep(60)
+            
+        except Exception as e:
+            log.error(f"Paper Trade Manager Error: {e}")
+            await asyncio.sleep(60)
 
 _ind_client: Optional[AsyncSession] = None
 _ind_lock = asyncio.Lock()
@@ -117,7 +213,7 @@ async def fetch_nse_chain(symbol: str) -> dict:
     """
     slug = SLUG_MAP.get(symbol)
     if not slug:
-        log.error(f"  ❌ No INDmoney slug for {symbol}")
+        log.error(f"  ❌ No INDmoney slug for symbol={repr(symbol)}, in dict={symbol in SLUG_MAP}")
         return {}
 
     url = f"https://www.indmoney.com/options/{slug}"
@@ -241,14 +337,18 @@ def score_option(side: dict, spot: float) -> int:
 def compute_stock_score(chain_data: dict, spot: float) -> dict:
     records = chain_data.get("records", {}).get("data", [])
     if not records:
-        return dict(pcr=1.0, iv=0, oi_change=0, vol_spike=0.0, signal="NEUTRAL", score=0)
+        return dict(pcr=1.0, iv=0, oi_change=0, vol_spike=0.0, signal="NEUTRAL", score=0, top_picks=[])
 
     tce_oi = tpe_oi = tce_vol = tpe_vol = 0
     oi_changes = []; atm_iv = 0
     atm_strike = round(spot / 50) * 50
+    all_options = []
 
     for row in records:
         ce = row.get("CE", {}); pe = row.get("PE", {})
+        strike = row.get("strikePrice", 0)
+        if ce: all_options.append({"type": "CE", "strike": strike, "ltp": ce.get("lastPrice", 0), "score": score_option(ce, spot)})
+        if pe: all_options.append({"type": "PE", "strike": strike, "ltp": pe.get("lastPrice", 0), "score": score_option(pe, spot)})
         tce_oi  += ce.get("openInterest", 0)
         tpe_oi  += pe.get("openInterest", 0)
         tce_vol += ce.get("totalTradedVolume", 0)
@@ -269,9 +369,14 @@ def compute_stock_score(chain_data: dict, spot: float) -> dict:
         (20 if signal == "BULLISH" else 15 if signal == "BEARISH" else 5) +
         (15 if 0 < atm_iv < 25 else 5 if atm_iv > 50 else 10)
     ))
+    top_picks = sorted(all_options, key=lambda x: x["score"], reverse=True)[:2]
     return dict(pcr=pcr, iv=round(atm_iv, 1), oi_change=avg_oi,
-                vol_spike=vol_spike, signal=signal, score=score)
+                vol_spike=vol_spike, signal=signal, score=score, top_picks=top_picks)
 
+
+@app.get("/api/debug-slugs")
+async def debug_slugs():
+    return {"slugs_len": len(SLUG_MAP), "RELIANCE_in_map": "RELIANCE" in SLUG_MAP, "keys": list(SLUG_MAP.keys())}
 
 @app.get("/health")
 async def health():
@@ -312,6 +417,16 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 expiries = records.get("expiryDates", [])
                 stats    = compute_stock_score(cj, spot or 1)
                 if spot == 0: return None
+                
+                # Auto-log trades for high-scoring setups during market hours
+                if stats.get("score", 0) >= 80 and is_market_open():
+                    for pick in stats.get("top_picks", []):
+                        opt_type = pick["type"]
+                        strike = pick["strike"]
+                        entry_price = pick["ltp"]
+                        reason = f"Top Pick {opt_type} @ {strike} (Score: {stats['score']})"
+                        db.add_trade(symbol, opt_type, strike, entry_price, reason)
+
                 return {
                     "symbol":     symbol,
                     "ltp":        round(spot, 2),
@@ -328,7 +443,7 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
     result = [r for r in raw if r]
     result.sort(key=lambda x: x["score"], reverse=True)
     log.info(f"=== SCAN DONE: {len(result)} stocks ===")
-    return {"timestamp": datetime.now().isoformat(), "count": len(result), "data": result}
+    return {"timestamp": datetime.now().isoformat(), "market_status": market_status(), "count": len(result), "data": result}
 
 
 @app.get("/api/chain/{symbol}")
@@ -394,6 +509,21 @@ async def get_chain(symbol: str, expiry: str = None):
         "top_picks": top_picks[:4],
         "timestamp": datetime.now().isoformat(),
     }
+
+
+# ── Paper Trading API ────────────────────────────────────────────────────────
+
+@app.get("/api/paper-trades/active")
+async def get_active_trades():
+    return db.get_open_trades()
+
+@app.get("/api/paper-trades/history")
+async def get_trade_history():
+    return db.get_all_trades()
+
+@app.get("/api/paper-trades/stats")
+async def get_trade_statistics():
+    return db.get_trade_stats()
 
 
 dist_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")

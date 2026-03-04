@@ -71,6 +71,12 @@ export default function App() {
   const [hoverRow, setHoverRow] = useState(null);
   const [backendOk, setBackendOk] = useState(null); // null=checking, true, false
 
+  // Paper Trading State
+  const [paperStats, setPaperStats] = useState(null);
+  const [activeTrades, setActiveTrades] = useState([]);
+  const [closedTrades, setClosedTrades] = useState([]);
+  const [loadingPaper, setLoadingPaper] = useState(false);
+
   // ── Check backend health ──
   useEffect(() => {
     fetch(`${API.replace('/api', '/health')}`)
@@ -137,6 +143,89 @@ export default function App() {
     .filter(s => filter === "ALL" || s.signal === filter)
     .filter(s => s.symbol.includes(searchQ.toUpperCase()))
     .sort((a, b) => sortBy === "score" ? b.score - a.score : sortBy === "iv" ? a.iv - b.iv : b.vol_spike - a.vol_spike);
+
+  // ── Load Paper Trades ──
+  const fetchPaperTrades = async () => {
+    setLoadingPaper(true);
+    try {
+      const [st, act, hist] = await Promise.all([
+        fetch(`${API}/paper-trades/stats`).then(r => r.json()),
+        fetch(`${API}/paper-trades/active`).then(r => r.json()),
+        fetch(`${API}/paper-trades/history`).then(r => r.json()),
+      ]);
+      setPaperStats(st);
+      setActiveTrades(act || []);
+      setClosedTrades(hist || []);
+    } catch (e) {
+      console.error("Failed to fetch paper trades", e);
+    } finally {
+      setLoadingPaper(false);
+    }
+  };
+
+  useEffect(() => {
+    if (tab === 'paper') fetchPaperTrades();
+  }, [tab]);
+
+  // ── Download All Top Picks (Scanner) ──
+  const downloadAllPicks = () => {
+    if (!stocks || stocks.length === 0) return;
+    const headers = ['Symbol', 'Underlying_LTP', 'Signal', 'Score', 'Pick_1_Type', 'Pick_1_Strike', 'Pick_1_LTP', 'Pick_2_Type', 'Pick_2_Strike', 'Pick_2_LTP'];
+    const rows = stocks.map(s => {
+      const p1 = s.top_picks && s.top_picks[0] ? s.top_picks[0] : {};
+      const p2 = s.top_picks && s.top_picks[1] ? s.top_picks[1] : {};
+      return [
+        s.symbol,
+        s.ltp,
+        s.signal,
+        s.score,
+        p1.type || '',
+        p1.strike || '',
+        p1.ltp || '',
+        p2.type || '',
+        p2.strike || '',
+        p2.ltp || ''
+      ];
+    });
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `all_top_picks.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // ── Download Top Picks (Tab) ──
+  const downloadPicks = () => {
+    if (!chain || !chain.top_picks || !selected) return;
+    const headers = ['Symbol', 'Expiry', 'Strike', 'Type', 'Option_LTP', 'IV_Pct', 'OI_Chg_Pct', 'Volume', 'Score', 'Underlying_LTP'];
+    const rows = chain.top_picks.map(p => [
+      chain.symbol,
+      chain.expiry,
+      p.strike,
+      p.type,
+      p.ltp,
+      p.iv,
+      (p.oi_chg_pct ?? p.oi_chg ?? 0).toFixed(2),
+      p.volume,
+      p.score,
+      selected.ltp
+    ]);
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `${chain.symbol}_top_picks_ltp_${selected.ltp}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   // ── Styles ──
   const S = {
@@ -216,7 +305,7 @@ python main.py
 
       {/* Nav */}
       <div style={S.nav}>
-        {[['scanner', '▦ STOCK SCANNER'], ['chain', '⊞ OPTION CHAIN'], ['picks', '★ TOP PICKS']].map(([id, label]) => (
+        {[['scanner', '▦ STOCK SCANNER'], ['chain', '⊞ OPTION CHAIN'], ['picks', '★ TOP PICKS'], ['all_picks', '★★ ALL PICKS'], ['paper', '📈 PAPER TRADING']].map(([id, label]) => (
           <button key={id} style={S.navBtn(tab === id)} onClick={() => setTab(id)}>{label}</button>
         ))}
         {selected && (
@@ -275,7 +364,7 @@ python main.py
                   <table style={S.table}>
                     <thead>
                       <tr style={{ background: '#080c10' }}>
-                        {['#', 'SYMBOL', 'LTP', 'CHG%', 'SIGNAL', 'PCR', 'IV%', 'OI CHG%', 'VOL SPIKE', 'SCORE', ''].map(h => (
+                        {['#', 'SYMBOL', 'LTP', 'CHG%', 'SIGNAL', 'PCR', 'IV%', 'OI CHG%', 'VOL SPIKE', 'SCORE', 'TOP PICKS', ''].map(h => (
                           <th key={h} style={S.th}>{h}</th>
                         ))}
                       </tr>
@@ -298,6 +387,17 @@ python main.py
                           <td style={{ ...S.td, color: clr(s.oi_change) }}>{pct(s.oi_change)}</td>
                           <td style={{ ...S.td, color: s.vol_spike > 3 ? '#00cfff' : '#c9d4e0' }}>{s.vol_spike}x</td>
                           <td style={S.td}><ScoreBar score={s.score} /></td>
+                          <td style={S.td}>
+                            <div style={{ display: 'flex', gap: 4, flexDirection: 'column' }}>
+                              {(s.top_picks || []).map((p, j) => (
+                                <div key={j} style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 10 }}>
+                                  <Badge label={p.type} color={p.type === 'CE' ? '#00ff88' : '#ff4d6d'} />
+                                  <span style={{ color: '#f0c040', fontFamily: FONT, fontWeight: 700 }}>{p.strike}</span>
+                                  <span style={{ color: '#c9d4e0', fontFamily: FONT }}>₹{p.ltp}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
                           <td style={{ ...S.td, color: '#00ff88', fontSize: 11 }}>VIEW →</td>
                         </tr>
                       ))}
@@ -384,10 +484,15 @@ python main.py
               <div style={{ textAlign: 'center', padding: 60, color: '#4a6278', fontFamily: FONT }}>← SELECT A STOCK FROM THE SCANNER FIRST</div>
             ) : (
               <>
-                <div style={{ marginBottom: 20, fontFamily: FONT }}>
-                  <span style={{ color: '#4a6278', fontSize: 12 }}>TOP PICKS FOR </span>
-                  <span style={{ color: '#00ff88', fontSize: 16, fontWeight: 700 }}>{chain.symbol}</span>
-                  <span style={{ color: '#4a6278', fontSize: 12 }}> · {chain.expiry}</span>
+                <div style={{ marginBottom: 20, fontFamily: FONT, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <span style={{ color: '#4a6278', fontSize: 12 }}>TOP PICKS FOR </span>
+                    <span style={{ color: '#00ff88', fontSize: 16, fontWeight: 700 }}>{chain.symbol}</span>
+                    <span style={{ color: '#4a6278', fontSize: 12 }}> · {chain.expiry}</span>
+                  </div>
+                  <button onClick={downloadPicks} style={{ ...S.btn(true), padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    ↓ DOWNLOAD CSV
+                  </button>
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px,1fr))', gap: 16, marginBottom: 28 }}>
@@ -435,6 +540,150 @@ python main.py
                         <div style={{ fontSize: 11, color: '#4a6278' }}>{d}</div>
                       </div>
                     ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ── ALL TOP PICKS TAB ── */}
+        {tab === 'all_picks' && (
+          <div className="slide-in">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+              <div style={{ fontFamily: FONT }}>
+                <span style={{ color: '#4a6278', fontSize: 12 }}>ALL TOP PICKS ACROSS </span>
+                <span style={{ color: '#00ff88', fontSize: 16, fontWeight: 700 }}>{stocks.length}</span>
+                <span style={{ color: '#4a6278', fontSize: 12 }}> SCANNED STOCKS</span>
+              </div>
+              <button onClick={downloadAllPicks} style={{ ...S.btn(true), padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                ↓ DOWNLOAD ALL PICKS CSV
+              </button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+              {stocks.filter(s => s.top_picks && s.top_picks.length > 0).map(s => (
+                <div key={s.symbol} style={{ background: '#0a0f15', border: '1px solid #1e2d40', borderRadius: 8, padding: 16 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ color: '#e0eaf5', fontSize: 16, fontWeight: 700, fontFamily: FONT }}>{s.symbol}</span>
+                      <span style={{ color: '#8899aa', fontSize: 12, fontFamily: FONT }}>₹{s.ltp}</span>
+                    </div>
+                    <SignalBadge signal={s.signal} />
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {s.top_picks.map((p, j) => (
+                      <div key={j} style={{ background: '#080c10', border: `1px solid ${p.type === 'CE' ? '#00ff8844' : '#ff4d6d44'}`, borderRadius: 6, padding: '10px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <Badge label={p.type} color={p.type === 'CE' ? '#00ff88' : '#ff4d6d'} />
+                          <span style={{ color: '#f0c040', fontFamily: FONT, fontWeight: 700, fontSize: 14 }}>{p.strike}</span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                          <div style={{ textAlign: 'right' }}>
+                            <div style={{ fontSize: 9, color: '#4a6278', fontFamily: FONT }}>LTP</div>
+                            <div style={{ color: '#c9d4e0', fontFamily: FONT, fontWeight: 700, fontSize: 12 }}>₹{p.ltp}</div>
+                          </div>
+                          <div style={{ textAlign: 'right' }}>
+                            <div style={{ fontSize: 9, color: '#4a6278', fontFamily: FONT }}>SCORE</div>
+                            <div style={{ color: p.score >= 70 ? '#00ff88' : p.score >= 45 ? '#f0c040' : '#ff4d6d', fontFamily: FONT, fontWeight: 700, fontSize: 13 }}>{p.score}</div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button onClick={() => selectStock(s)} style={{ marginTop: 16, width: '100%', ...S.btn(false), padding: '8px', border: '1px solid #1e2d40' }}>
+                    VIEW OPTION CHAIN →
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── PAPER TRADING TAB ── */}
+        {tab === 'paper' && (
+          <div className="slide-in">
+            {loadingPaper && !paperStats ? (
+              <div style={{ textAlign: 'center', padding: 60 }}><Spinner /></div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+                  {[
+                    { label: 'TOTAL TRADES', val: paperStats?.total_trades || 0, color: '#c9d4e0' },
+                    { label: 'WIN RATE', val: `${paperStats?.win_rate_pct || 0}%`, color: (paperStats?.win_rate_pct || 0) >= 50 ? '#00ff88' : '#ff4d6d' },
+                    { label: 'NET PnL', val: `₹${paperStats?.total_pnl || 0}`, color: (paperStats?.total_pnl || 0) >= 0 ? '#00ff88' : '#ff4d6d' },
+                    { label: 'ACTIVE TRADES', val: activeTrades.length, color: '#f0c040' },
+                  ].map(st => (
+                    <div key={st.label} style={{ ...S.card, minWidth: 140, flex: '1 1 auto', padding: '16px' }}>
+                      <div style={{ fontSize: 11, color: '#4a6278', fontFamily: FONT, letterSpacing: '0.1em', marginBottom: 8 }}>{st.label}</div>
+                      <div style={{ fontSize: 28, fontWeight: 700, color: st.color, fontFamily: FONT }}>{st.val}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ marginBottom: 24 }}>
+                  <div style={{ fontFamily: FONT, color: '#e0eaf5', fontSize: 14, fontWeight: 700, marginBottom: 12 }}>
+                    ACTIVE TRADES ({activeTrades.length}) <button onClick={fetchPaperTrades} style={{ ...S.btn(), padding: '2px 8px', marginLeft: 10 }}>⟳ REFRESH</button>
+                  </div>
+                  <div style={{ background: '#0a0f15', border: '1px solid #1e2d40', borderRadius: 8, overflow: 'hidden' }}>
+                    <table style={S.table}>
+                      <thead>
+                        <tr style={{ background: '#080c10' }}>
+                          {['DATE', 'SYMBOL', 'TYPE', 'STRIKE', 'ENTRY PRICE', 'LTP', 'PnL %'].map(h => <th key={h} style={S.th}>{h}</th>)}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {activeTrades.length === 0 ? (
+                          <tr><td colSpan={7} style={{ ...S.td, textAlign: 'center', color: '#4a6278' }}>No active trades currently open.</td></tr>
+                        ) : activeTrades.map(t => {
+                          const ltp = t.current_price || t.entry_price;
+                          const pnlPct = ((ltp - t.entry_price) / t.entry_price) * 100;
+                          return (
+                            <tr key={t.id}>
+                              <td style={{ ...S.td, color: '#8899aa' }}>{t.entry_time.split('T')[1].substring(0, 5)}</td>
+                              <td style={{ ...S.td, color: '#e0eaf5', fontWeight: 700 }}>{t.symbol}</td>
+                              <td style={S.td}><Badge label={t.type} color={t.type === 'CE' ? '#00ff88' : '#ff4d6d'} /></td>
+                              <td style={{ ...S.td, color: '#f0c040' }}>{t.strike}</td>
+                              <td style={{ ...S.td, color: '#c9d4e0' }}>₹{t.entry_price}</td>
+                              <td style={{ ...S.td, color: '#00ff88', fontWeight: 700 }}>₹{ltp.toFixed(2)}</td>
+                              <td style={{ ...S.td, color: clr(pnlPct), fontWeight: 700 }}>{pct(pnlPct)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ fontFamily: FONT, color: '#e0eaf5', fontSize: 14, fontWeight: 700, marginBottom: 12 }}>TRADE HISTORY</div>
+                  <div style={{ background: '#0a0f15', border: '1px solid #1e2d40', borderRadius: 8, overflow: 'auto', maxHeight: 400 }}>
+                    <table style={S.table}>
+                      <thead>
+                        <tr style={{ background: '#080c10', position: 'sticky', top: 0 }}>
+                          {['DATE', 'SYMBOL', 'TYPE', 'STRIKE', 'ENTRY', 'EXIT', 'NET PnL', 'PnL %', 'REASON'].map(h => <th key={h} style={S.th}>{h}</th>)}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {closedTrades.length === 0 ? (
+                          <tr><td colSpan={9} style={{ ...S.td, textAlign: 'center', color: '#4a6278' }}>No completed trades yet.</td></tr>
+                        ) : closedTrades.map(t => (
+                          <tr key={t.id}>
+                            <td style={{ ...S.td, color: '#8899aa' }}>{t.trade_date}</td>
+                            <td style={{ ...S.td, color: '#e0eaf5', fontWeight: 700 }}>{t.symbol}</td>
+                            <td style={S.td}><Badge label={t.type} color={t.type === 'CE' ? '#00ff88' : '#ff4d6d'} /></td>
+                            <td style={{ ...S.td, color: '#f0c040' }}>{t.strike}</td>
+                            <td style={{ ...S.td, color: '#8899aa' }}>₹{t.entry_price}</td>
+                            <td style={{ ...S.td, color: '#c9d4e0' }}>₹{t.exit_price}</td>
+                            <td style={{ ...S.td, color: clr(t.pnl), fontWeight: 700 }}>₹{t.pnl}</td>
+                            <td style={{ ...S.td, color: clr(t.pnl_pct) }}>{pct(t.pnl_pct)}</td>
+                            <td style={{ ...S.td, color: '#4a6278', fontSize: 10 }}>{t.reason}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               </>
