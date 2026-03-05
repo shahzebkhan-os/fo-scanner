@@ -10,7 +10,276 @@ from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
 import db
-from analytics import score_option, compute_stock_score, nearest_atm
+
+# ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
+# Bug 6 fix: tracks which trades have already been entered today
+# Bug 5 fix: separate sets for trades vs alerts so thresholds are independent
+_traded_today: set  = set()   # "SYMBOL-TYPE-STRIKE-DATE"
+notified_signals: set = set() # "SYMBOL-TYPE-STRIKE-DATE"
+
+def _reset_daily_sets():
+    """Called at the start of each new trading day."""
+    global _traded_today, notified_signals
+    _traded_today.clear()
+    notified_signals.clear()
+
+_last_reset_date = None
+
+def _maybe_reset_daily():
+    global _last_reset_date
+    today = datetime.now(IST).date()
+    if _last_reset_date != today:
+        _last_reset_date = today
+        _reset_daily_sets()
+
+
+# ── Strike interval per symbol (for accurate ATM proximity scoring) ───────────
+# Bug 1 fix: replaces the hardcoded /50 in compute_stock_score
+STRIKE_INTERVALS = {
+    "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25,
+    "RELIANCE": 20, "TCS": 50, "INFY": 20, "HDFCBANK": 10, "ICICIBANK": 10,
+    "SBIN": 5, "ADANIENT": 50, "WIPRO": 5, "AXISBANK": 10, "BAJFINANCE": 50,
+    "HCLTECH": 20, "LT": 20, "KOTAKBANK": 20, "TATAMOTORS": 5, "MARUTI": 100,
+    "SUNPHARMA": 20, "ITC": 5, "ONGC": 5, "POWERGRID": 5, "NTPC": 5,
+    "BPCL": 10, "GRASIM": 20, "TITAN": 50, "INDUSINDBK": 10, "ULTRACEMCO": 50,
+    "HEROMOTOCO": 50, "ASIANPAINT": 50, "MM": 20, "DRREDDY": 50, "DIVISLAB": 50,
+    "CIPLA": 10, "TECHM": 20, "TATASTEEL": 5, "BAJAJFINSV": 20, "NESTLEIND": 100,
+    "HINDALCO": 5, "COALINDIA": 5, "VEDL": 5, "JSWSTEEL": 10, "SAIL": 2,
+    "APOLLOHOSP": 50, "PIDILITIND": 50, "SIEMENS": 50, "HAVELLS": 20, "VOLTAS": 20,
+}
+
+def _get_interval(symbol: str) -> int:
+    return STRIKE_INTERVALS.get(symbol.upper(), 10)
+
+def _nearest_atm(spot: float, symbol: str) -> float:
+    iv = _get_interval(symbol)
+    return round(spot / iv) * iv
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 1.  score_option  — fixed
+# ══════════════════════════════════════════════════════════════════════════════
+# Bugs fixed:
+#   #1  strikePrice was always 0 (ATM proximity always scored 0)
+#   #3  volume baseline 10,000 was meaningless; now uses V/OI ratio
+#   #4  IV scoring rewarded near-zero IV; now rewards 15-40 sweet spot
+
+def score_option(side: dict, spot: float, symbol: str = "") -> int:
+    """
+    Score a single CE or PE option contract [0–100].
+
+    Caller MUST inject strikePrice into the dict before calling:
+        score_option({**ce_dict, "strikePrice": strike}, spot, symbol)
+
+    Components:
+      30 pts  OI momentum   — % OI build-up (requires oi > 100 guard)
+      25 pts  Activity      — V/OI ratio (self-scaling, works for all symbols)
+      20 pts  ATM proximity — decays over per-symbol strike intervals
+      15 pts  IV quality    — rewards 15–40 IV sweet spot
+      10 pts  Liquidity     — non-zero LTP guard
+    """
+    oi     = side.get("openInterest", 0) or 0
+    oi_chg = side.get("changeinOpenInterest", 0) or 0
+    vol    = side.get("totalTradedVolume", 0) or 0
+    iv     = side.get("impliedVolatility", 0) or 0
+    ltp    = side.get("lastPrice", 0) or 0
+    strike = side.get("strikePrice", 0) or 0   # ← Bug 1 fix: caller must inject this
+
+    score = 0
+
+    # 1. OI momentum: % build-up
+    if oi > 100:                                        # minimum OI guard avoids ÷0 noise
+        oi_pct = (oi_chg / oi) * 100
+        score += int(min(30, max(0, oi_pct * 1.5)))    # 20% build-up → 30 pts
+
+    # 2. Activity: V/OI ratio — self-scaling across all symbols  (Bug 3 fix)
+    if oi > 0:
+        v_oi = vol / oi
+        score += int(min(25, v_oi * 20))                # V/OI=1.25 → full 25 pts
+
+    # 3. ATM proximity using per-symbol interval  (Bug 1 fix)
+    if spot > 0 and strike > 0:
+        interval   = _get_interval(symbol) if symbol else 10
+        bands_away = abs(spot - strike) / max(interval, 1)
+        prox       = max(0.0, 1.0 - bands_away / 6.0)  # 0 pts beyond 6 strikes away
+        score     += int(prox * 20)
+
+    # 4. IV quality — sweet spot 15–40  (Bug 4 fix)
+    if iv > 0:
+        if 15 <= iv <= 40:
+            score += 15
+        elif iv < 15:
+            score += int(iv / 15 * 10)                  # ramping: near-zero IV = near-zero pts
+        else:
+            score += max(0, int(15 - (iv - 40) * 0.35)) # penalise very high IV gradually
+
+    # 5. Liquidity guard — zero-price = untradeable
+    if ltp > 0:
+        score += 10
+
+    return min(100, max(0, score))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2.  compute_stock_score  — fixed
+# ══════════════════════════════════════════════════════════════════════════════
+# Bugs fixed:
+#   #1  ATM used round(spot/50)*50 — now uses per-symbol interval
+#   #2  vol_spike divided only by CE OI — now uses total OI
+#   #5  Signal was PCR-only and BEARISH scored less than BULLISH
+
+def compute_stock_score(chain_data: dict, spot: float, symbol: str = "") -> dict:
+    """
+    Returns composite stock-level analysis dict:
+        pcr, iv, oi_change, vol_spike (V/OI), signal, score [0-100],
+        top_picks, signal_reasons
+    """
+    records = chain_data.get("records", {}).get("data", [])
+
+    _empty = dict(
+        pcr=1.0, iv=0, oi_change=0, vol_spike=0.0,
+        signal="NEUTRAL", score=0, top_picks=[], signal_reasons=[]
+    )
+    if not records or spot <= 0:
+        return _empty
+
+    # Bug 1 fix: per-symbol ATM + band
+    atm_strike = _nearest_atm(spot, symbol)
+    interval   = _get_interval(symbol)
+    atm_band   = interval * 3                       # ±3 strikes = near-the-money zone
+
+    tce_oi = tpe_oi = tce_vol = tpe_vol = 0
+    tce_oi_chg = tpe_oi_chg = 0
+    oi_changes: list = []
+    atm_iv_ce = atm_iv_pe = 0.0
+    all_options: list = []
+
+    for row in records:
+        ce     = row.get("CE", {}) or {}
+        pe     = row.get("PE", {}) or {}
+        strike = row.get("strikePrice", 0) or 0
+
+        # Bug 1 fix: inject strikePrice so score_option can use it
+        ce_scored = {**ce, "strikePrice": strike}
+        pe_scored = {**pe, "strikePrice": strike}
+
+        ce_oi  = ce.get("openInterest", 0) or 0
+        pe_oi  = pe.get("openInterest", 0) or 0
+        ce_vol = ce.get("totalTradedVolume", 0) or 0
+        pe_vol = pe.get("totalTradedVolume", 0) or 0
+        ce_chg = ce.get("changeinOpenInterest", 0) or 0
+        pe_chg = pe.get("changeinOpenInterest", 0) or 0
+
+        tce_oi     += ce_oi;    tpe_oi     += pe_oi
+        tce_vol    += ce_vol;   tpe_vol    += pe_vol
+        tce_oi_chg += ce_chg;   tpe_oi_chg += pe_chg
+
+        for oi, chg in [(ce_oi, ce_chg), (pe_oi, pe_chg)]:
+            if oi > 100:
+                oi_changes.append(chg / oi * 100)
+
+        if abs(strike - atm_strike) <= atm_band:
+            if ce.get("impliedVolatility"):
+                atm_iv_ce = float(ce["impliedVolatility"])
+            if pe.get("impliedVolatility"):
+                atm_iv_pe = float(pe["impliedVolatility"])
+
+        # Bug 1 fix: pass symbol so score_option uses correct interval
+        ce_s = score_option(ce_scored, spot, symbol)
+        pe_s = score_option(pe_scored, spot, symbol)
+
+        # Bug 6 pre-condition: only keep liquid options in top_picks
+        if ce.get("lastPrice", 0) > 0:
+            all_options.append({"type": "CE", "strike": strike,
+                                 "ltp": ce["lastPrice"], "score": ce_s})
+        if pe.get("lastPrice", 0) > 0:
+            all_options.append({"type": "PE", "strike": strike,
+                                 "ltp": pe["lastPrice"], "score": pe_s})
+
+    # ── Derived metrics ───────────────────────────────────────────────────────
+
+    pcr       = round(tpe_oi / tce_oi, 3) if tce_oi > 0 else 1.0
+    avg_oi    = round(sum(oi_changes) / len(oi_changes), 2) if oi_changes else 0.0
+    total_oi  = tce_oi + tpe_oi
+    total_vol = tce_vol + tpe_vol
+
+    # Bug 2 fix: divide by TOTAL OI, not just CE OI
+    vol_spike = round(total_vol / max(1, total_oi), 3)
+
+    # ATM IV: prefer average of CE+PE, fallback to whichever exists
+    if atm_iv_ce and atm_iv_pe:
+        atm_iv = round((atm_iv_ce + atm_iv_pe) / 2, 1)
+    else:
+        atm_iv = round(atm_iv_ce or atm_iv_pe, 1)
+
+    # ── Signal: multi-factor voting  (Bug 5 fix) ─────────────────────────────
+    bullish_votes = bearish_votes = 0
+    reasons: list = []
+
+    # Factor 1 — PCR
+    if pcr > 1.4:
+        bullish_votes += 2
+        reasons.append(f"PCR {pcr} → heavy put writing (bullish)")
+    elif pcr > 1.1:
+        bullish_votes += 1
+        reasons.append(f"PCR {pcr} mildly elevated (bullish lean)")
+    elif pcr < 0.7:
+        bearish_votes += 2
+        reasons.append(f"PCR {pcr} → heavy call writing (bearish)")
+    elif pcr < 0.9:
+        bearish_votes += 1
+        reasons.append(f"PCR {pcr} suppressed (bearish lean)")
+
+    # Factor 2 — Net OI change direction
+    if tce_oi_chg > 0 and tpe_oi_chg < 0:
+        bearish_votes += 1
+        reasons.append("CE OI building + PE OI unwinding → bearish pressure")
+    elif tpe_oi_chg > 0 and tce_oi_chg < 0:
+        bullish_votes += 1
+        reasons.append("PE OI building + CE OI unwinding → bullish support")
+    elif tpe_oi_chg > 0 and tce_oi_chg > 0:
+        reasons.append("Both sides building OI → range-bound / straddle territory")
+
+    # Factor 3 — Volume dominance
+    if total_vol > 0:
+        ce_dom = tce_vol / total_vol
+        pe_dom = tpe_vol / total_vol
+        if ce_dom > 0.62:
+            bearish_votes += 1
+            reasons.append(f"CE volume {ce_dom:.0%} dominant → bearish activity")
+        elif pe_dom > 0.62:
+            bullish_votes += 1
+            reasons.append(f"PE volume {pe_dom:.0%} dominant → bullish activity")
+
+    if   bullish_votes > bearish_votes: signal = "BULLISH"
+    elif bearish_votes > bullish_votes: signal = "BEARISH"
+    else:                               signal = "NEUTRAL"
+
+    confidence = max(bullish_votes, bearish_votes)
+
+    # ── Composite score  (Bug 5 fix: BULLISH and BEARISH weighted equally) ───
+    activity_score = min(30, vol_spike / 1.5 * 30)           # V/OI component
+    oi_mom_score   = min(20, abs(avg_oi) * 1.5)              # OI momentum
+    iv_score       = (20 if 15 <= atm_iv <= 40 else          # IV quality
+                      int(atm_iv / 15 * 15) if 0 < atm_iv < 15 else
+                      max(0, int(20 - (atm_iv - 40) * 0.4)) if atm_iv > 40 else 5)
+    signal_score   = confidence * 8                          # 0/8/16/24 pts — same for BULL/BEAR
+
+    score = min(100, max(0, int(activity_score + oi_mom_score + iv_score + signal_score)))
+
+    # Top picks: sorted by option score, liquid only
+    top_picks = sorted(all_options, key=lambda x: x["score"], reverse=True)[:2]
+
+    return dict(
+        pcr            = pcr,
+        iv             = atm_iv,
+        oi_change      = avg_oi,
+        vol_spike      = vol_spike,
+        signal         = signal,
+        score          = score,
+        top_picks      = top_picks,
+        signal_reasons = reasons,
+    )
 
 import httpx, uvicorn
 from fastapi import FastAPI, HTTPException, Query
@@ -134,74 +403,114 @@ def market_status() -> dict:
 
 # ── Paper Trading Manager ─────────────────────────────────────────────────────
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 3.  paper_trade_manager  — fixed
+# ══════════════════════════════════════════════════════════════════════════════
+# Bugs fixed:
+#   #10  Flat % SL/TP ignores option price; cheap OTM gets stopped every candle
+#        Now: OTM (<₹20) uses wider SL; once +25% hit, trailing stop activates
+
 async def paper_trade_manager():
-    """Background task to manage open paper trades."""
+    """Background task to manage open paper trades with adaptive SL/TP."""
     log.info("Started Paper Trade Manager background loop.")
     while True:
         try:
+            _maybe_reset_daily()
+
             if not is_market_open():
-                await asyncio.sleep(300)
+                await asyncio.sleep(300)    # 5 min sleep when market is closed
                 continue
 
-            open_trades = db.get_open_trades()
+            open_trades   = db.get_open_trades()
             tracked_picks = db.get_tracked_picks()
-            all_to_check = open_trades + tracked_picks
+            all_to_check  = open_trades + tracked_picks
+
             if all_to_check:
-                    log.info(f"Checking {len(open_trades)} OPEN paper trades and {len(tracked_picks)} TRACKED picks...")
-                    symbols = list(set([t['symbol'] for t in all_to_check]))
-                    
-                    sem = asyncio.Semaphore(3)
-                    async def fetch_and_update(sym):
-                        async with sem:
-                            try:
-                                chain_data = await fetch_nse_chain(sym)
-                                return sym, chain_data
-                            except Exception as e:
-                                log.error(f"Failed to fetch {sym} for paper trading: {e}")
-                                return sym, None
-                                
-                    results = await asyncio.gather(*[fetch_and_update(s) for s in symbols])
-                    chain_map = {sym: data for sym, data in results if data}
-                    
-                    for trade in all_to_check:
-                        sym = trade['symbol']
-                        chain = chain_map.get(sym)
-                        if not chain: continue
-                        
-                        records = chain.get("records", {}).get("data", [])
-                        spot = chain.get("records", {}).get("underlyingValue")
-                        if not records or not spot: continue
-                        
-                        current_price = None
-                        for row in records:
-                            if row.get("strikePrice") == trade['strike']:
-                                opt_data = row.get("CE") if trade['type'] == "CE" else row.get("PE")
-                                if opt_data:
-                                    current_price = opt_data.get("lastPrice")
-                                break
-                                
-                        if current_price:
-                            if trade['status'] == 'TRACKED':
-                                db.update_tracked_pick(trade['id'], current_price, stock_price=spot)
-                            else:
-                                db.update_trade(trade['id'], current_price)
-                                pnl_pct = ((current_price - trade['entry_price']) / trade['entry_price']) * 100
-                                
-                                now = datetime.now(IST)
-                                if now.time() >= dtime(15, 15):
-                                    db.update_trade(trade['id'], current_price, exit_flag=True, reason="EOD Square Off")
-                                    continue
-                                    
-                                if pnl_pct <= -20:
-                                    db.update_trade(trade['id'], current_price, exit_flag=True, reason="Stop Loss (-20%)")
-                                    continue
-                                    
-                                if pnl_pct >= 40:
-                                    db.update_trade(trade['id'], current_price, exit_flag=True, reason="Take Profit (+40%)")
-                                    continue
-            
+                log.info(f"Checking {len(open_trades)} trades + {len(tracked_picks)} tracked picks...")
+                symbols = list(set([t["symbol"] for t in all_to_check]))
+
+                sem = asyncio.Semaphore(3)
+                async def fetch_and_update(sym):
+                    async with sem:
+                        try:
+                            return sym, await fetch_nse_chain(sym)
+                        except Exception as e:
+                            log.error(f"Failed to fetch {sym}: {e}")
+                            return sym, None
+
+                results   = await asyncio.gather(*[fetch_and_update(s) for s in symbols])
+                chain_map = {sym: data for sym, data in results if data}
+
+                for trade in all_to_check:
+                    sym   = trade["symbol"]
+                    chain = chain_map.get(sym)
+                    if not chain: continue
+
+                    records = chain.get("records", {}).get("data", [])
+                    spot    = chain.get("records", {}).get("underlyingValue")
+                    if not records or not spot: continue
+
+                    current_price = None
+                    for row in records:
+                        if row.get("strikePrice") == trade["strike"]:
+                            opt_data = row.get(trade["type"])
+                            if opt_data:
+                                current_price = opt_data.get("lastPrice")
+                            break
+
+                    if not current_price:
+                        continue
+
+                    if trade["status"] == "TRACKED":
+                        db.update_tracked_pick(trade["id"], current_price, stock_price=spot)
+                        continue
+
+                    # ── Adaptive SL/TP logic  (Bug 10 fix) ───────────────────
+                    entry = trade["entry_price"]
+                    if entry <= 0:
+                        continue
+
+                    pnl_pct = ((current_price - entry) / entry) * 100
+                    db.update_trade(trade["id"], current_price)
+
+                    now = datetime.now(IST)
+
+                    # EOD square-off at 15:15
+                    if now.time() >= dtime(15, 15):
+                        db.update_trade(trade["id"], current_price,
+                                        exit_flag=True, reason="EOD Square Off")
+                        continue
+
+                    # Determine SL and TP thresholds based on option price
+                    if entry < 20:
+                        # Cheap OTM: wider SL to avoid premature stop-out
+                        sl_pct = -40.0
+                        tp_pct =  80.0
+                    elif entry < 50:
+                        # Mid-range
+                        sl_pct = -25.0
+                        tp_pct =  50.0
+                    else:
+                        # ATM / expensive: tighter SL
+                        sl_pct = -20.0
+                        tp_pct =  40.0
+
+                    # Trailing stop: once +25% hit, floor SL at +10%
+                    if pnl_pct >= 25:
+                        sl_pct = max(sl_pct, 10.0)
+
+                    if pnl_pct <= sl_pct:
+                        db.update_trade(trade["id"], current_price,
+                                        exit_flag=True, reason=f"Stop Loss ({sl_pct:.0f}%)")
+                        continue
+
+                    if pnl_pct >= tp_pct:
+                        db.update_trade(trade["id"], current_price,
+                                        exit_flag=True, reason=f"Take Profit (+{tp_pct:.0f}%)")
+                        continue
+
             await asyncio.sleep(60)
-            
+
         except Exception as e:
             log.error(f"Paper Trade Manager Error: {e}")
             await asyncio.sleep(60)
@@ -406,10 +715,21 @@ async def debug_indstocks(token: str = Query(...)):
         data = r.json().get("data", [])
         return {"raw": data[:10]}
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 4.  /api/scan endpoint  — fixed
+# ══════════════════════════════════════════════════════════════════════════════
+# Bugs fixed:
+#   #6  No dedup → same trade entered on every scan refresh
+#   #7  CE + PE both entered even on directional signal
+#   #9  Stock score and option score conflated at same threshold
+
 @app.get("/api/scan")
 async def scan_all(limit: int = Query(48, ge=1, le=100)):
     all_symbols = INDEX_SYMBOLS + FO_STOCKS
     log.info(f"=== SCAN: {len(all_symbols)} symbols ===")
+
+    _maybe_reset_daily()                        # Bug 6 fix: reset dedup sets on new day
+
     ltp_map = await fetch_indstocks_ltp(all_symbols)
     sem = asyncio.Semaphore(3)
 
@@ -421,44 +741,76 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 records  = cj.get("records", {})
                 spot     = records.get("underlyingValue") or live.get("ltp") or 0
                 expiries = records.get("expiryDates", [])
-                stats    = compute_stock_score(cj, spot or 1, symbol=symbol)
-                if spot == 0: return None
-                
-                # Telegram Alerts & Auto-Log for high-scoring setups
-                if stats.get("score", 0) >= 80 and is_market_open():
-                    for pick in stats.get("top_picks", []):
-                        opt_type = pick["type"]
-                        strike = pick["strike"]
+
+                # Bug 1 fix: pass symbol into compute_stock_score
+                stats = compute_stock_score(cj, spot or 1, symbol=symbol)
+                if spot == 0:
+                    return None
+
+                stock_score  = stats.get("score", 0)
+                signal       = stats.get("signal", "NEUTRAL")
+                top_picks    = stats.get("top_picks", [])
+
+                # ── Auto paper-trade entry  (Bugs 6 & 7 fixed) ───────────────
+                if stock_score >= 80 and is_market_open() and signal != "NEUTRAL":
+                    for pick in top_picks:
+                        # Bug 7 fix: only enter the side matching the signal
+                        if signal == "BULLISH" and pick["type"] != "CE": continue
+                        if signal == "BEARISH" and pick["type"] != "PE": continue
+
+                        opt_type    = pick["type"]
+                        strike      = pick["strike"]
                         entry_price = pick["ltp"]
-                        reason = f"Top Pick {opt_type} @ {strike} (Score: {stats['score']})"
+
+                        # Bug 6 fix: dedup by symbol+type+strike+date
+                        trade_uid = f"{symbol}-{opt_type}-{strike}-{datetime.now(IST).date()}"
+                        if trade_uid in _traded_today:
+                            continue
+                        _traded_today.add(trade_uid)
+
+                        reason = f"Auto: {signal} score={stock_score}"
                         db.add_trade(symbol, opt_type, strike, entry_price, reason)
-                        
-                if stats.get("score", 0) >= 70:
-                    for pick in stats.get("top_picks", []):
+                        log.info(f"  📝 Auto-trade: {symbol} {opt_type} {strike} @ ₹{entry_price}")
+
+                # ── Telegram alerts  (Bug 9 fixed: separate thresholds) ───────
+                # Stock must score ≥ 70, AND the specific option must score ≥ 60
+                if stock_score >= 70:
+                    for pick in top_picks:
+                        # Bug 9 fix: option score threshold is lower than stock threshold
+                        if pick.get("score", 0) < 60:
+                            continue
+
                         opt_type = pick["type"]
-                        strike = pick["strike"]
-                        uid = f"{symbol}-{opt_type}-{strike}-{datetime.now().date()}"
-                        
-                        if pick.get("score", 0) >= 70 and not db.is_signal_notified(uid):
-                            db.mark_signal_notified(uid)
-                            msg = f"🚀 *HIGH CONFIDENCE ALERT*\n\n" \
-                                  f"Symbol: *{symbol}*\n" \
-                                  f"Contract: *{strike} {opt_type}*\n" \
-                                  f"LTP: ₹{pick['ltp']}\n" \
-                                  f"Score: *{pick['score']}*\n\n" \
-                                  f"Signal: {stats.get('signal', 'UNKNOWN')}\n" \
-                                  f"Volume Spike: {stats.get('vol_spike', 0)}x\n"
-                            # Schedule background execution so it doesn't block the scanner
+                        strike   = pick["strike"]
+                        uid      = f"{symbol}-{opt_type}-{strike}-{datetime.now(IST).date()}"
+
+                        if uid not in notified_signals:
+                            notified_signals.add(uid)
+                            reasons_text = "\n".join(
+                                f"  • {r}" for r in stats.get("signal_reasons", [])
+                            ) or "  • No specific reason"
+                            msg = (
+                                f"🚀 *HIGH CONFIDENCE ALERT*\n\n"
+                                f"Symbol: *{symbol}*\n"
+                                f"Contract: *{strike} {opt_type}*\n"
+                                f"LTP: ₹{pick['ltp']}\n"
+                                f"Option Score: *{pick['score']}* | Stock Score: *{stock_score}*\n\n"
+                                f"Signal: *{signal}*\n"
+                                f"PCR: {stats.get('pcr')} | V/OI: {stats.get('vol_spike')}x\n\n"
+                                f"Reasons:\n{reasons_text}"
+                            )
                             asyncio.create_task(send_telegram_alert(msg))
 
                 return {
-                    "symbol":     symbol,
-                    "ltp":        round(spot, 2),
-                    "volume":     live.get("volume", 0),
-                    "change_pct": round(live.get("change", 0), 2),
-                    "expiries":   expiries[:4],
-                    **stats,
+                    "symbol":         symbol,
+                    "ltp":            round(spot, 2),
+                    "volume":         live.get("volume", 0),
+                    "change_pct":     round(live.get("change", 0), 2),
+                    "expiries":       expiries[:4],
+                    "signal_reasons": stats.get("signal_reasons", []),
+                    **{k: v for k, v in stats.items() if k != "signal_reasons"},
                 }
+
             except Exception as e:
                 log.error(f"  {symbol}: {e}")
                 return None
@@ -467,7 +819,12 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
     result = [r for r in raw if r]
     result.sort(key=lambda x: x["score"], reverse=True)
     log.info(f"=== SCAN DONE: {len(result)} stocks ===")
-    return {"timestamp": datetime.now().isoformat(), "market_status": market_status(), "count": len(result), "data": result}
+    return {
+        "timestamp":     datetime.now().isoformat(),
+        "market_status": market_status(),
+        "count":         len(result),
+        "data":          result,
+    }
 
 
 @app.get("/api/chain/{symbol}")
