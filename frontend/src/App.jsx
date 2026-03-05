@@ -84,6 +84,8 @@ export default function App() {
   const [trackedPicks, setTrackedPicks] = useState([]);
   const [loadingPaper, setLoadingPaper] = useState(false);
   const [sortConfig, setSortConfig] = useState({ key: 'entry_time', direction: 'desc' });
+  const [activeSortConfig, setActiveSortConfig] = useState({ key: 'entry_time', direction: 'desc' });
+  const [historySortConfig, setHistorySortConfig] = useState({ key: 'entry_time', direction: 'desc' });
 
   const sortedTrackedPicks = React.useMemo(() => {
     let items = [...trackedPicks];
@@ -113,6 +115,60 @@ export default function App() {
     let direction = 'asc';
     if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
     setSortConfig({ key, direction });
+  };
+
+  const sortedActiveTrades = React.useMemo(() => {
+    let items = [...activeTrades];
+    if (activeSortConfig !== null) {
+      items.sort((a, b) => {
+        let aVal = a[activeSortConfig.key];
+        let bVal = b[activeSortConfig.key];
+        if (activeSortConfig.key === 'ltp') {
+          aVal = a.current_price || a.entry_price;
+          bVal = b.current_price || b.entry_price;
+        } else if (activeSortConfig.key === 'pnlPct') {
+          aVal = (((a.current_price || a.entry_price) - a.entry_price) / a.entry_price) * 100;
+          bVal = (((b.current_price || b.entry_price) - b.entry_price) / b.entry_price) * 100;
+        }
+        if (aVal < bVal) return activeSortConfig.direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return activeSortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return items;
+  }, [activeTrades, activeSortConfig]);
+
+  const requestActiveSort = (key) => {
+    let direction = 'asc';
+    if (activeSortConfig.key === key && activeSortConfig.direction === 'asc') direction = 'desc';
+    setActiveSortConfig({ key, direction });
+  };
+
+  const sortedClosedTrades = React.useMemo(() => {
+    let items = [...closedTrades];
+    if (historySortConfig !== null) {
+      items.sort((a, b) => {
+        let aVal = a[historySortConfig.key];
+        let bVal = b[historySortConfig.key];
+        if (historySortConfig.key === 'date') {
+          aVal = a.exit_time || a.entry_time || '';
+          bVal = b.exit_time || b.entry_time || '';
+        } else if (historySortConfig.key === 'reason') {
+          aVal = a.exit_reason || a.reason || '';
+          bVal = b.exit_reason || b.reason || '';
+        }
+        if (aVal < bVal) return historySortConfig.direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return historySortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return items;
+  }, [closedTrades, historySortConfig]);
+
+  const requestHistorySort = (key) => {
+    let direction = 'asc';
+    if (historySortConfig.key === key && historySortConfig.direction === 'asc') direction = 'desc';
+    setHistorySortConfig({ key, direction });
   };
 
   // ── Check backend health ──
@@ -841,13 +897,19 @@ python main.py
                     <table style={S.table}>
                       <thead>
                         <tr style={{ background: '#080c10' }}>
-                          {['DATE', 'SYMBOL', 'TYPE', 'STRIKE', 'ENTRY PRICE', 'LTP', 'PnL %'].map(h => <th key={h} style={S.th}>{h}</th>)}
+                          <th onClick={() => requestActiveSort('entry_time')} style={{ ...S.th, cursor: 'pointer' }}>DATE {activeSortConfig.key === 'entry_time' ? (activeSortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestActiveSort('symbol')} style={{ ...S.th, cursor: 'pointer' }}>SYMBOL {activeSortConfig.key === 'symbol' ? (activeSortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestActiveSort('type')} style={{ ...S.th, cursor: 'pointer' }}>TYPE {activeSortConfig.key === 'type' ? (activeSortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestActiveSort('strike')} style={{ ...S.th, cursor: 'pointer' }}>STRIKE {activeSortConfig.key === 'strike' ? (activeSortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestActiveSort('entry_price')} style={{ ...S.th, cursor: 'pointer' }}>ENTRY PRICE {activeSortConfig.key === 'entry_price' ? (activeSortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestActiveSort('ltp')} style={{ ...S.th, cursor: 'pointer' }}>LTP {activeSortConfig.key === 'ltp' ? (activeSortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestActiveSort('pnlPct')} style={{ ...S.th, cursor: 'pointer' }}>PnL % {activeSortConfig.key === 'pnlPct' ? (activeSortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {activeTrades.length === 0 ? (
+                        {sortedActiveTrades.length === 0 ? (
                           <tr><td colSpan={7} style={{ ...S.td, textAlign: 'center', color: '#4a6278' }}>No active trades currently open.</td></tr>
-                        ) : activeTrades.map(t => {
+                        ) : sortedActiveTrades.map(t => {
                           const ltp = t.current_price || t.entry_price;
                           const pnlPct = ((ltp - t.entry_price) / t.entry_price) * 100;
                           return (
@@ -873,13 +935,21 @@ python main.py
                     <table style={S.table}>
                       <thead>
                         <tr style={{ background: '#080c10', position: 'sticky', top: 0 }}>
-                          {['DATE', 'SYMBOL', 'TYPE', 'STRIKE', 'ENTRY', 'EXIT', 'NET PnL', 'PnL %', 'REASON'].map(h => <th key={h} style={S.th}>{h}</th>)}
+                          <th onClick={() => requestHistorySort('date')} style={{ ...S.th, cursor: 'pointer' }}>DATE {historySortConfig.key === 'date' ? (historySortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestHistorySort('symbol')} style={{ ...S.th, cursor: 'pointer' }}>SYMBOL {historySortConfig.key === 'symbol' ? (historySortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestHistorySort('type')} style={{ ...S.th, cursor: 'pointer' }}>TYPE {historySortConfig.key === 'type' ? (historySortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestHistorySort('strike')} style={{ ...S.th, cursor: 'pointer' }}>STRIKE {historySortConfig.key === 'strike' ? (historySortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestHistorySort('entry_price')} style={{ ...S.th, cursor: 'pointer' }}>ENTRY {historySortConfig.key === 'entry_price' ? (historySortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestHistorySort('exit_price')} style={{ ...S.th, cursor: 'pointer' }}>EXIT {historySortConfig.key === 'exit_price' ? (historySortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestHistorySort('pnl_abs')} style={{ ...S.th, cursor: 'pointer' }}>NET PnL {historySortConfig.key === 'pnl_abs' ? (historySortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestHistorySort('pnl_pct')} style={{ ...S.th, cursor: 'pointer' }}>PnL % {historySortConfig.key === 'pnl_pct' ? (historySortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestHistorySort('reason')} style={{ ...S.th, cursor: 'pointer' }}>REASON {historySortConfig.key === 'reason' ? (historySortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {closedTrades.length === 0 ? (
+                        {sortedClosedTrades.length === 0 ? (
                           <tr><td colSpan={9} style={{ ...S.td, textAlign: 'center', color: '#4a6278' }}>No completed trades yet.</td></tr>
-                        ) : closedTrades.map(t => (
+                        ) : sortedClosedTrades.map(t => (
                           <tr key={t.id}>
                             <td style={{ ...S.td, color: '#8899aa' }}>{(t.exit_time || t.entry_time || '').split('T')[0]}</td>
                             <td style={{ ...S.td, color: '#e0eaf5', fontWeight: 700 }}>{t.symbol}</td>
