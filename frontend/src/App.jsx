@@ -20,6 +20,7 @@ const TABS = [
   { id: "uoa", label: "UOA", icon: "🎯" },
   { id: "straddle", label: "Straddle", icon: "⚖" },
   { id: "portfolio", label: "P&L", icon: "💰" },
+  { id: "manual", label: "Trade", icon: "🚀" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
 
@@ -56,7 +57,7 @@ export default function App() {
       if (e.target.tagName === "INPUT") return;
       const keys = {
         r: "scanner", c: "chain", g: "greeks", h: "heatmap",
-        s: "sector", u: "uoa", p: "portfolio", ",": "settings"
+        s: "sector", u: "uoa", p: "portfolio", m: "manual", ",": "settings"
       };
       if (keys[e.key]) setTab(keys[e.key]);
     };
@@ -956,6 +957,199 @@ function StraddleTab({ theme }) {
             )}
           </Card>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Manual Trade Tab (Top Signals)
+// ══════════════════════════════════════════════════════════════════════════════
+
+function ManualTradeTab({ theme }) {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [lotSizes, setLotSizes] = useState({});
+  const [submitting, setSubmitting] = useState(null); // stores active symbol submitting
+  const [formFeedback, setFormFeedback] = useState({}); // { symbol: { success: "", error: "" } }
+
+  // We maintain a state of "entry forms" keyed by symbol
+  const [forms, setForms] = useState({});
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [r, ls] = await Promise.all([
+        apiFetch("/api/scan?limit=51"),
+        apiFetch("/api/lot-sizes")
+      ]);
+      const rows = (r.data || []).filter(row => row.score >= 70); // High confidence only
+      setData(rows);
+      setLotSizes(ls);
+
+      // Initialize form states
+      const initialForms = {};
+      rows.forEach(row => {
+        initialForms[row.symbol] = {
+          symbol: row.symbol,
+          type: row.signal === "BULLISH" ? "CE" : "PE",
+          strike: "",
+          entry_price: "",
+          lots: 1,
+          reason: `Top Signal (Score: ${fmt(row.score, 0)})`
+        };
+      });
+      setForms(initialForms);
+    } catch (e) { console.error(e); }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, []);
+
+  const updateForm = (sym, field, val) => {
+    setForms(prev => ({
+      ...prev,
+      [sym]: { ...prev[sym], [field]: val }
+    }));
+  };
+
+  const submitTrade = async (e, row) => {
+    e.preventDefault();
+    const sym = row.symbol;
+    const form = forms[sym];
+    const ls = lotSizes[sym] || 1;
+
+    setFormFeedback(prev => ({ ...prev, [sym]: null }));
+    if (!form.strike || !form.entry_price) {
+      setFormFeedback(prev => ({ ...prev, [sym]: { error: "Strike and entry price required" } }));
+      return;
+    }
+
+    setSubmitting(sym);
+    try {
+      const res = await fetch(`${API}/api/paper-trades`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...form, strike: +form.strike, entry_price: +form.entry_price, lots: +form.lots }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setFormFeedback(prev => ({ ...prev, [sym]: { error: json.detail || "Error" } }));
+      } else {
+        setFormFeedback(prev => ({ ...prev, [sym]: { success: `✅ ${form.lots} lots × ${ls} = ${form.lots * ls} qty` } }));
+        updateForm(sym, "strike", "");
+        updateForm(sym, "entry_price", "");
+      }
+    } catch (ex) {
+      setFormFeedback(prev => ({ ...prev, [sym]: { error: String(ex) } }));
+    }
+    setSubmitting(null);
+  };
+
+  const inp = (extra = {}) => ({
+    style: {
+      background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 6,
+      color: theme.text, padding: "7px 10px", fontSize: 13, width: "100%", boxSizing: "border-box",
+      ...extra
+    }
+  });
+
+  if (loading) return <Loader theme={theme} />;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h2>High Confidence Signals</h2>
+        <button onClick={load} style={{ padding: "6px 14px", borderRadius: 6, background: theme.accent, color: "#fff", border: "none", cursor: "pointer" }}>⟳ Refresh</button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16 }}>
+        {data.length === 0 && <div style={{ color: theme.muted }}>No active high-confidence signals.</div>}
+        {data.map(row => {
+          const form = forms[row.symbol] || {};
+          const ls = lotSizes[row.symbol] || 1;
+          const qty = (form.lots || 1) * ls;
+          const capital = form.entry_price ? ((+form.entry_price) * qty).toLocaleString("en-IN") : "—";
+          const feedback = formFeedback[row.symbol] || {};
+          const isSubmitting = submitting === row.symbol;
+
+          return (
+            <Card key={row.symbol} theme={theme} style={{ borderLeft: `4px solid ${signalColor(row.signal)}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 700 }}>{row.symbol}</div>
+                  <div style={{ color: theme.muted, fontSize: 12 }}>Score: {fmt(row.score, 0)}/100</div>
+                </div>
+                <div style={{
+                  background: signalBg(row.signal), color: signalColor(row.signal),
+                  padding: "4px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700
+                }}>
+                  {row.signal}
+                </div>
+              </div>
+
+              {/* Data Preview */}
+              <div style={{ display: "flex", gap: 12, fontSize: 12, marginBottom: 16, borderBottom: `1px solid ${theme.border}`, paddingBottom: 12 }}>
+                <div>LTP: <b>{fmt(row.ltp)}</b></div>
+                <div>Vol: <b>{row.volume}x</b></div>
+                <div>PCR: <b style={{ color: row.pcr > 1 ? theme.green : row.pcr < 0.7 ? theme.red : theme.text }}>{fmt(row.pcr)}</b></div>
+                <div>OI Δ: <b style={{ color: row.oi_change >= 0 ? theme.green : theme.red }}>{fmt(row.oi_change, 1)}%</b></div>
+              </div>
+
+              {/* Quick Entry Form */}
+              <form onSubmit={(e) => submitTrade(e, row)}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 10, color: theme.muted, marginBottom: 2 }}>TYPE</div>
+                    <div style={{ display: "flex", gap: 2 }}>
+                      {["CE", "PE"].map(t => (
+                        <button key={t} type="button" onClick={() => updateForm(row.symbol, "type", t)}
+                          style={{
+                            flex: 1, padding: "5px 0", borderRadius: 4, fontWeight: 700, fontSize: 12, cursor: "pointer", border: "none",
+                            background: form.type === t ? (t === "CE" ? theme.green : theme.red) : theme.border,
+                            color: form.type === t ? "#fff" : theme.muted,
+                          }}>{t}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ flex: 1.5 }}>
+                    <div style={{ fontSize: 10, color: theme.muted, marginBottom: 2 }}>STRIKE</div>
+                    <input {...inp({ padding: "5px 8px" })} type="number" step="50" placeholder="Strike"
+                      value={form.strike || ""} onChange={e => updateForm(row.symbol, "strike", e.target.value)} required />
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 10, color: theme.muted, marginBottom: 2 }}>PRICE (₹)</div>
+                    <input {...inp({ padding: "5px 8px" })} type="number" step="0.05" placeholder="Limit"
+                      value={form.entry_price || ""} onChange={e => updateForm(row.symbol, "entry_price", e.target.value)} required />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 10, color: theme.muted, marginBottom: 2 }}>LOTS ({ls})</div>
+                    <input {...inp({ padding: "5px 8px" })} type="number" min="1" step="1"
+                      value={form.lots || 1} onChange={e => updateForm(row.symbol, "lots", e.target.value)} required />
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, color: theme.muted, marginBottom: 12 }}>
+                  <span>Capital: <b style={{ color: theme.accent }}>₹{capital}</b></span>
+                  <span>Qty: <b>{qty}</b></span>
+                </div>
+
+                {feedback.error && <div style={{ color: theme.red, fontSize: 11, marginBottom: 8 }}>⚠ {feedback.error}</div>}
+                {feedback.success && <div style={{ color: theme.green, fontSize: 11, marginBottom: 8 }}>{feedback.success}</div>}
+
+                <button type="submit" disabled={isSubmitting} style={{
+                  width: "100%", background: isSubmitting ? theme.muted : theme.accent, color: "#fff", border: "none",
+                  borderRadius: 6, padding: "8px", fontWeight: 700, fontSize: 13, cursor: isSubmitting ? "not-allowed" : "pointer",
+                }}>
+                  {isSubmitting ? "Submitting..." : `Enter ${form.type} Trade`}
+                </button>
+              </form>
+            </Card>
+          );
+        })}
       </div>
     </div>
   );
