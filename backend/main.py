@@ -10,6 +10,7 @@ from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
 import db
+from analytics import score_option, compute_stock_score, nearest_atm
 
 import httpx, uvicorn
 from fastapi import FastAPI, HTTPException, Query
@@ -28,8 +29,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 INDSTOCKS_BASE  = "https://api.indstocks.com/v1"
 NSE_BASE        = "https://www.nseindia.com"
 
-# Prevent spamming duplicate Telegram alerts
-notified_signals = set()
+# Telegram alerts are deduplicated via db.is_signal_notified / mark_signal_notified
 
 async def send_telegram_alert(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
@@ -100,13 +100,17 @@ log = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
 
-app = FastAPI(title="NSE F&O Scanner API", version="3.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+from contextlib import asynccontextmanager
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     db.init_db()
-    asyncio.create_task(paper_trade_manager())
+    task = asyncio.create_task(paper_trade_manager())
+    yield
+    task.cancel()
+
+app = FastAPI(title="NSE F&O Scanner API", version="3.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ── Market Hours ──────────────────────────────────────────────────────────────
 
@@ -135,11 +139,14 @@ async def paper_trade_manager():
     log.info("Started Paper Trade Manager background loop.")
     while True:
         try:
-            if is_market_open():
-                open_trades = db.get_open_trades()
-                tracked_picks = db.get_tracked_picks()
-                all_to_check = open_trades + tracked_picks
-                if all_to_check:
+            if not is_market_open():
+                await asyncio.sleep(300)
+                continue
+
+            open_trades = db.get_open_trades()
+            tracked_picks = db.get_tracked_picks()
+            all_to_check = open_trades + tracked_picks
+            if all_to_check:
                     log.info(f"Checking {len(open_trades)} OPEN paper trades and {len(tracked_picks)} TRACKED picks...")
                     symbols = list(set([t['symbol'] for t in all_to_check]))
                     
@@ -327,8 +334,6 @@ async def fetch_indstocks_ltp(symbols: list) -> dict:
     if not INDSTOCKS_TOKEN or INDSTOCKS_TOKEN == "PASTE_YOUR_NEW_TOKEN_HERE":
         log.warning("IndStocks token not set — skipping live LTP")
         return {}
-    
-    with open('/tmp/indstocks_token.txt', 'w') as f: f.write(INDSTOCKS_TOKEN)
 
     headers = {"Authorization": f"Bearer {INDSTOCKS_TOKEN}"}
     results = {}
@@ -355,60 +360,6 @@ async def fetch_indstocks_ltp(symbols: list) -> dict:
     return results
 
 
-def score_option(side: dict, spot: float) -> int:
-    oi     = side.get("openInterest", 0)
-    oi_chg = side.get("changeinOpenInterest", 0)
-    vol    = side.get("totalTradedVolume", 0)
-    iv     = side.get("impliedVolatility", 0)
-    strike = side.get("strikePrice", 0)
-    score  = 0
-    score += min(30, max(0, (oi_chg / oi * 100) if oi > 0 else 0) * 2)
-    score += min(20, vol / 10_000 * 20)
-    if iv > 0:
-        score += max(0, 20 - iv * 0.3)
-    if spot > 0 and strike > 0:
-        score += max(0, 30 - abs(spot - strike) / spot * 100 * 6)
-    return min(100, int(score))
-
-
-def compute_stock_score(chain_data: dict, spot: float) -> dict:
-    records = chain_data.get("records", {}).get("data", [])
-    if not records:
-        return dict(pcr=1.0, iv=0, oi_change=0, vol_spike=0.0, signal="NEUTRAL", score=0, top_picks=[])
-
-    tce_oi = tpe_oi = tce_vol = tpe_vol = 0
-    oi_changes = []; atm_iv = 0
-    atm_strike = round(spot / 50) * 50
-    all_options = []
-
-    for row in records:
-        ce = row.get("CE", {}); pe = row.get("PE", {})
-        strike = row.get("strikePrice", 0)
-        if ce: all_options.append({"type": "CE", "strike": strike, "ltp": ce.get("lastPrice", 0), "score": score_option(ce, spot)})
-        if pe: all_options.append({"type": "PE", "strike": strike, "ltp": pe.get("lastPrice", 0), "score": score_option(pe, spot)})
-        tce_oi  += ce.get("openInterest", 0)
-        tpe_oi  += pe.get("openInterest", 0)
-        tce_vol += ce.get("totalTradedVolume", 0)
-        tpe_vol += pe.get("totalTradedVolume", 0)
-        for s in [ce, pe]:
-            oi = s.get("openInterest", 0)
-            if oi > 0:
-                oi_changes.append(s.get("changeinOpenInterest", 0) / oi * 100)
-        if abs(row.get("strikePrice", 0) - atm_strike) < 60:
-            atm_iv = ce.get("impliedVolatility") or pe.get("impliedVolatility") or 0
-
-    pcr       = round(tpe_oi / tce_oi, 2) if tce_oi > 0 else 1.0
-    avg_oi    = round(sum(oi_changes) / len(oi_changes), 2) if oi_changes else 0
-    vol_spike = round((tce_vol + tpe_vol) / max(1, tce_oi) * 10, 2)
-    signal    = "BULLISH" if pcr > 1.3 else "BEARISH" if pcr < 0.8 else "NEUTRAL"
-    score     = min(100, int(
-        (vol_spike * 8) + (abs(avg_oi) * 2) +
-        (20 if signal == "BULLISH" else 15 if signal == "BEARISH" else 5) +
-        (15 if 0 < atm_iv < 25 else 5 if atm_iv > 50 else 10)
-    ))
-    top_picks = sorted(all_options, key=lambda x: x["score"], reverse=True)[:2]
-    return dict(pcr=pcr, iv=round(atm_iv, 1), oi_change=avg_oi,
-                vol_spike=vol_spike, signal=signal, score=score, top_picks=top_picks)
 
 
 @app.get("/api/debug-slugs")
@@ -440,7 +391,9 @@ async def debug_symbol(symbol: str):
 
 
 @app.get("/api/debug-indstocks")
-async def debug_indstocks():
+async def debug_indstocks(token: str = Query(...)):
+    if token != os.getenv("DEBUG_TOKEN", ""):
+        raise HTTPException(status_code=403, detail="Forbidden")
     global INDSTOCKS_TOKEN
     headers = {"Authorization": f"Bearer {INDSTOCKS_TOKEN}"}
     import httpx
@@ -468,7 +421,7 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 records  = cj.get("records", {})
                 spot     = records.get("underlyingValue") or live.get("ltp") or 0
                 expiries = records.get("expiryDates", [])
-                stats    = compute_stock_score(cj, spot or 1)
+                stats    = compute_stock_score(cj, spot or 1, symbol=symbol)
                 if spot == 0: return None
                 
                 # Telegram Alerts & Auto-Log for high-scoring setups
@@ -486,8 +439,8 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                         strike = pick["strike"]
                         uid = f"{symbol}-{opt_type}-{strike}-{datetime.now().date()}"
                         
-                        if pick.get("score", 0) >= 70 and uid not in notified_signals:
-                            notified_signals.add(uid)
+                        if pick.get("score", 0) >= 70 and not db.is_signal_notified(uid):
+                            db.mark_signal_notified(uid)
                             msg = f"🚀 *HIGH CONFIDENCE ALERT*\n\n" \
                                   f"Symbol: *{symbol}*\n" \
                                   f"Contract: *{strike} {opt_type}*\n" \
@@ -550,7 +503,7 @@ async def get_chain(symbol: str, expiry: str = None):
                 "oi_chg":     ce_c,
                 "oi_chg_pct": round(ce_c / max(1, ce_oi) * 100, 1),
                 "volume":     ce.get("totalTradedVolume", 0),
-                "score":      score_option(ce, spot),
+                "score":      score_option({**ce, "strikePrice": strike}, spot, symbol),
             },
             "PE": {
                 "ltp":        pe.get("lastPrice", 0),
@@ -559,7 +512,7 @@ async def get_chain(symbol: str, expiry: str = None):
                 "oi_chg":     pe_c,
                 "oi_chg_pct": round(pe_c / max(1, pe_oi) * 100, 1),
                 "volume":     pe.get("totalTradedVolume", 0),
-                "score":      score_option(pe, spot),
+                "score":      score_option({**pe, "strikePrice": strike}, spot, symbol),
             },
         })
 
@@ -590,7 +543,7 @@ async def get_active_trades():
 
 @app.get("/api/paper-trades/history")
 async def get_trade_history():
-    return db.get_all_trades()
+    return db.get_closed_trades()
 
 @app.get("/api/paper-trades/stats")
 async def get_trade_statistics():
@@ -636,6 +589,7 @@ async def untrack_pick(trade_id: int):
     success = db.delete_tracked_pick(trade_id)
     if success:
         return {"status": "success", "message": "Option untracked."}
+    else:
         return {"status": "error", "message": "Failed to untrack option or it does not exist."}
 
 @app.delete("/api/tracked-picks")

@@ -63,6 +63,11 @@ def init_db():
                 oi_change   REAL,
                 vol_spike   REAL
             );
+
+            CREATE TABLE IF NOT EXISTS notified_signals (
+                uid         TEXT PRIMARY KEY,
+                notified_at TEXT NOT NULL
+            );
         """)
     print(f"✅ DB initialised at {DB_PATH}")
 
@@ -360,6 +365,19 @@ def get_scan_history(symbol: str = None, days: int = 30) -> list[dict]:
                 (f"-{days} days",),
             ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+def is_signal_notified(uid: str) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("SELECT 1 FROM notified_signals WHERE uid = ?", (uid,)).fetchone()
+        return bool(row)
+
+def mark_signal_notified(uid: str):
+    now = datetime.now(IST).isoformat()
+    with get_conn() as conn:
+        conn.execute("INSERT OR IGNORE INTO notified_signals (uid, notified_at) VALUES (?, ?)", (uid, now))
 
 
 # ── CLI — quick inspection ────────────────────────────────────────────────────

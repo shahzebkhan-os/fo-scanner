@@ -4,5 +4,7 @@ dist/
 .env
 __pycache__/
 *.pyc
-.DS_Store*.db
+.DS_Store
+*.db
+*.plist
 *.csv

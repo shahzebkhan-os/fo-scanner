@@ -482,7 +482,7 @@ python main.py
                   ))}
                   <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
                     <span style={{ fontSize: 10, color: '#4a6278', fontFamily: FONT }}>SORT:</span>
-                    {[['score', 'SCORE'], ['iv', 'LOW IV'], ['vol_spike', 'VOL SPIKE']].map(([k, l]) => (
+                    {[['score', 'SCORE'], ['iv', 'LOW IV'], ['vol_spike', 'V/OI RATIO']].map(([k, l]) => (
                       <button key={k} style={S.btn(sortBy === k)} onClick={() => setSortBy(k)}>{l}</button>
                     ))}
                   </div>
@@ -492,7 +492,7 @@ python main.py
                   <table style={S.table}>
                     <thead>
                       <tr style={{ background: '#080c10' }}>
-                        {['#', 'SYMBOL', 'LTP', 'CHG%', 'SIGNAL', 'PCR', 'IV%', 'OI CHG%', 'VOL SPIKE', 'SCORE', 'TOP PICKS', ''].map(h => (
+                        {['#', 'SYMBOL', 'LTP', 'CHG%', 'SIGNAL', 'PCR', 'IV%', 'OI CHG%', 'V/OI', 'SCORE', 'TOP PICKS', ''].map(h => (
                           <th key={h} style={S.th}>{h}</th>
                         ))}
                       </tr>
@@ -881,17 +881,18 @@ python main.py
                           <tr><td colSpan={9} style={{ ...S.td, textAlign: 'center', color: '#4a6278' }}>No completed trades yet.</td></tr>
                         ) : closedTrades.map(t => (
                           <tr key={t.id}>
-                            <td style={{ ...S.td, color: '#8899aa' }}>{t.trade_date}</td>
+                            <td style={{ ...S.td, color: '#8899aa' }}>{(t.exit_time || t.entry_time || '').split('T')[0]}</td>
                             <td style={{ ...S.td, color: '#e0eaf5', fontWeight: 700 }}>{t.symbol}</td>
                             <td style={S.td}><Badge label={t.type} color={t.type === 'CE' ? '#00ff88' : '#ff4d6d'} /></td>
                             <td style={{ ...S.td, color: '#f0c040' }}>{t.strike}</td>
                             <td style={{ ...S.td, color: '#8899aa' }}>₹{t.entry_price}</td>
-                            <td style={{ ...S.td, color: '#c9d4e0' }}>₹{t.exit_price}</td>
-                            <td style={{ ...S.td, color: clr(t.pnl_abs), fontWeight: 700 }}>₹{t.pnl_abs?.toFixed(2) || 0}</td>
+                            <td style={{ ...S.td, color: '#c9d4e0' }}>{t.exit_price != null ? `₹${t.exit_price}` : '-'}</td>
+                            <td style={{ ...S.td, color: clr(t.pnl_abs), fontWeight: 700 }}>{t.pnl_abs != null ? (t.pnl_abs > 0 ? `+₹${t.pnl_abs.toFixed(2)}` : `-₹${Math.abs(t.pnl_abs).toFixed(2)}`) : '0.00'}</td>
                             <td style={{ ...S.td, color: clr(t.pnl_pct) }}>{pct(t.pnl_pct)}</td>
                             <td style={{ ...S.td, color: '#4a6278', fontSize: 10 }}>{t.exit_reason || t.reason}</td>
                           </tr>
-                        ))}
+                        ))
+                        }
                       </tbody>
                     </table>
                   </div>
