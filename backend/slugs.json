@@ -1,6 +1,8 @@
 {
+  "NIFTY": "nifty-50-share-price",
+  "BANKNIFTY": "bank-nifty-share-price",
   "RELIANCE": "reliance-industries-ltd-share-price",
-  "TCS": "tcs-share-price",
+  "TCS": "tata-consultancy-services-ltd-share-price",
   "INFY": "infosys-ltd-share-price",
   "HDFCBANK": "hdfc-bank-ltd-share-price",
   "ICICIBANK": "icici-bank-ltd-share-price",
@@ -43,8 +45,5 @@
   "PIDILITIND": "pidilite-industries-ltd-share-price",
   "SIEMENS": "siemens-ltd-share-price",
   "HAVELLS": "havells-india-ltd-share-price",
-  "VOLTAS": "voltas-ltd-share-price",
-  "NIFTY": "nifty-50-share-price",
-  "BANKNIFTY": "nifty-bank-share-price",
-  "FINNIFTY": "nifty-fin-service-share-price"
+  "VOLTAS": "voltas-ltd-share-price"
 }
