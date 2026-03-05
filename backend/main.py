@@ -793,7 +793,7 @@ async def debug_slugs():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "3.0", "time": datetime.now().isoformat()}
+    return {"status": "ok", "version": "4.0", "time": datetime.now().isoformat()}
 
 
 
@@ -890,7 +890,7 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
 
                 # ── Telegram alerts  (Bug 9 fixed: separate thresholds) ───────
                 # Stock must score ≥ 70, AND the specific option must score ≥ 60
-                if stock_score >= 70:
+                if stock_score >= 90:
                     for pick in top_picks:
                         # Bug 9 fix: option score threshold is lower than stock threshold
                         if pick.get("score", 0) < 60:

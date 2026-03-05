@@ -43,6 +43,7 @@ export default function App() {
   const [dark, setDark] = useState(() => localStorage.getItem("theme") !== "light");
   const [chainSymbol, setChainSymbol] = useState("NIFTY");
   const [marketStatus, setMarketStatus] = useState(null);
+  const [scanData, setScanData] = useState([]);  // lifted for CSV export
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
@@ -110,10 +111,9 @@ export default function App() {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => {
-            const rows = filteredResults.length ? filteredResults : scanResults;
-            if (!rows.length) return;
+            if (!scanData.length) return;
             const cols = ["symbol", "signal", "score", "ltp", "change_pct", "volume", "pcr", "iv", "oi_change", "vol_spike"];
-            const csv = [cols.join(","), ...rows.map(r => cols.map(c => r[c] ?? "").join(","))].join("\n");
+            const csv = [cols.join(","), ...scanData.map(r => cols.map(c => r[c] ?? "").join(","))].join("\n");
             const a = document.createElement("a");
             a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
             a.download = `fo_scanner_${new Date().toISOString().slice(0, 10)}.csv`;
@@ -157,7 +157,7 @@ export default function App() {
 
       {/* Content */}
       <main style={{ padding: 16, maxWidth: 1400, margin: "0 auto" }}>
-        {tab === "scanner" && <ScannerTab theme={theme} onChain={goChain} />}
+        {tab === "scanner" && <ScannerTab theme={theme} onChain={goChain} onData={setScanData} />}
         {tab === "chain" && <ChainTab theme={theme} symbol={chainSymbol} setSymbol={setChainSymbol} />}
         {tab === "greeks" && <GreeksTab theme={theme} />}
         {tab === "heatmap" && <HeatmapTab theme={theme} />}
@@ -234,7 +234,7 @@ function SymbolInput({ value, onChange, onSubmit, theme }) {
 // Scanner Tab
 // ══════════════════════════════════════════════════════════════════════════════
 
-function ScannerTab({ theme, onChain }) {
+function ScannerTab({ theme, onChain, onData }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("ALL");
@@ -246,7 +246,9 @@ function ScannerTab({ theme, onChain }) {
     setLoading(true);
     try {
       const r = await apiFetch("/api/scan?limit=51");
-      setData(r.data || []);
+      const rows = r.data || [];
+      setData(rows);
+      if (onData) onData(rows);
     } catch (e) { console.error(e); }
     setLoading(false);
   }, []);
