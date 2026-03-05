@@ -109,12 +109,21 @@ export default function App() {
           )}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <a href={`${API}/api/paper-trades/export`} style={{
-            color: theme.muted, textDecoration: "none",
+          <button onClick={() => {
+            const rows = filteredResults.length ? filteredResults : scanResults;
+            if (!rows.length) return;
+            const cols = ["symbol", "signal", "score", "ltp", "change_pct", "volume", "pcr", "iv", "oi_change", "vol_spike"];
+            const csv = [cols.join(","), ...rows.map(r => cols.map(c => r[c] ?? "").join(","))].join("\n");
+            const a = document.createElement("a");
+            a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
+            a.download = `fo_scanner_${new Date().toISOString().slice(0, 10)}.csv`;
+            a.click();
+          }} style={{
+            color: theme.muted, background: "none", cursor: "pointer",
             padding: "4px 10px", border: `1px solid ${theme.border}`, borderRadius: 4, fontSize: 11
           }}>
             ↓ CSV
-          </a>
+          </button>
           <button onClick={() => setDark(d => !d)}
             style={{
               background: "none", border: `1px solid ${theme.border}`,
