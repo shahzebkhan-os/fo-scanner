@@ -983,7 +983,7 @@ function ManualTradeTab({ theme }) {
         apiFetch("/api/scan?limit=51"),
         apiFetch("/api/lot-sizes")
       ]);
-      const rows = (r.data || []).filter(row => row.score >= 70); // High confidence only
+      const rows = (r.candidates || r.data || []).filter(row => row.score >= 70); // High confidence only
       setData(rows);
       setLotSizes(ls);
 
