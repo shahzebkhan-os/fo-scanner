@@ -1,441 +1,564 @@
 """
-db.py — SQLite Paper Trade Database
-=====================================
-Handles all persistence for the paper trading system.
-Tables:
-  trades      — all paper trades (open + closed)
-  scan_log    — historical scan results for backtesting
-
-Usage:
-  import db
-  db.init_db()
-  db.add_trade("NIFTY", "CE", 22500, 120.5, "Auto: score=85")
-  db.get_open_trades()
-  db.get_trade_stats()
+db.py — Enhanced SQLite Database Layer v4
+New tables vs v3:
+  - oi_history        : 15-min OI snapshots per strike (powers heatmap, IVR, UOA)
+  - iv_history        : daily IV per symbol (powers IV Rank / IVR)
+  - notifications     : persisted alert dedup (survives restarts)
+  - trade_notes       : journal notes per trade
+  - bulk_deals        : NSE bulk/block deal cache
+  - settings          : per-symbol config (alert threshold, watchlist, capital)
 """
 
-import sqlite3
-import os
-from datetime import datetime
+import sqlite3, os, json
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
+from typing import Optional
 
-IST      = ZoneInfo("Asia/Kolkata")
-DB_PATH  = os.path.join(os.path.dirname(__file__), "trades.db")
+DB_PATH = os.path.join(os.path.dirname(__file__), "scanner.db")
+IST = ZoneInfo("Asia/Kolkata")
 
 
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row   # rows behave like dicts
+def _conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
 def init_db():
-    """Create tables if they don't exist."""
-    with get_conn() as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS trades (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol          TEXT    NOT NULL,
-                type            TEXT    NOT NULL,        -- CE or PE
-                strike          REAL    NOT NULL,
-                entry_price     REAL    NOT NULL,
-                current_price   REAL,
-                exit_price      REAL,
-                entry_time      TEXT    NOT NULL,
-                exit_time       TEXT,
-                exit_reason     TEXT,
-                reason          TEXT,                    -- why trade was logged
-                status          TEXT    DEFAULT 'OPEN',  -- OPEN / CLOSED
-                expiry          TEXT,
-                pnl_pct         REAL    DEFAULT 0.0,
-                pnl_abs         REAL    DEFAULT 0.0
-            );
+    with _conn() as c:
+        # ── Existing tables (unchanged schema) ───────────────────────────────
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol       TEXT    NOT NULL,
+            type         TEXT    NOT NULL,
+            strike       REAL    NOT NULL,
+            entry_price  REAL    NOT NULL,
+            current_price REAL,
+            exit_price   REAL,
+            status       TEXT    DEFAULT 'OPEN',
+            reason       TEXT,
+            entry_time   TEXT    DEFAULT (datetime('now')),
+            exit_time    TEXT,
+            pnl          REAL,
+            pnl_pct      REAL,
+            lot_size     INTEGER DEFAULT 0
+        );
 
-            CREATE TABLE IF NOT EXISTS scan_log (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol      TEXT    NOT NULL,
-                scan_time   TEXT    NOT NULL,
-                spot        REAL,
-                score       INTEGER,
-                signal      TEXT,
-                pcr         REAL,
-                iv          REAL,
-                oi_change   REAL,
-                vol_spike   REAL
-            );
+        CREATE TABLE IF NOT EXISTS tracked_picks (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol       TEXT    NOT NULL,
+            type         TEXT    NOT NULL,
+            strike       REAL    NOT NULL,
+            entry_price  REAL    NOT NULL,
+            current_price REAL,
+            score        INTEGER DEFAULT 0,
+            stock_price  REAL    DEFAULT 0,
+            lot_size     INTEGER DEFAULT 0,
+            status       TEXT    DEFAULT 'TRACKED',
+            tracked_at   TEXT    DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_picks_unique ON tracked_picks (symbol, type, strike, date(tracked_at));
 
-            CREATE TABLE IF NOT EXISTS notified_signals (
-                uid         TEXT PRIMARY KEY,
-                notified_at TEXT NOT NULL
-            );
+        -- ── New: OI snapshots every 15 min ───────────────────────────────
+        CREATE TABLE IF NOT EXISTS oi_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT    NOT NULL,
+            expiry      TEXT    NOT NULL,
+            strike      REAL    NOT NULL,
+            opt_type    TEXT    NOT NULL,   -- CE or PE
+            oi          REAL    DEFAULT 0,
+            oi_chg      REAL    DEFAULT 0,
+            volume      REAL    DEFAULT 0,
+            iv          REAL    DEFAULT 0,
+            ltp         REAL    DEFAULT 0,
+            snap_time   TEXT    DEFAULT (datetime('now')),
+            snap_date   TEXT    DEFAULT (date('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_oi_history_sym_date
+            ON oi_history(symbol, snap_date, strike, opt_type);
+
+        -- ── New: Daily IV per symbol for IVR calculation ─────────────────
+        CREATE TABLE IF NOT EXISTS iv_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT    NOT NULL,
+            iv          REAL    NOT NULL,
+            snap_date   TEXT    DEFAULT (date('now')),
+            UNIQUE(symbol, snap_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_iv_history_sym
+            ON iv_history(symbol, snap_date);
+
+        -- ── New: Persisted alert dedup (survives server restarts) ─────────
+        CREATE TABLE IF NOT EXISTS notifications (
+            uid         TEXT    PRIMARY KEY,
+            sent_at     TEXT    DEFAULT (datetime('now'))
+        );
+
+        -- ── New: Per-trade journal notes ──────────────────────────────────
+        CREATE TABLE IF NOT EXISTS trade_notes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id    INTEGER NOT NULL REFERENCES paper_trades(id),
+            note        TEXT    NOT NULL,
+            created_at  TEXT    DEFAULT (datetime('now'))
+        );
+
+        -- ── New: NSE Bulk / Block deals cache ────────────────────────────
+        CREATE TABLE IF NOT EXISTS bulk_deals (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            deal_date   TEXT    NOT NULL,
+            symbol      TEXT    NOT NULL,
+            client      TEXT,
+            deal_type   TEXT,   -- BUY or SELL
+            quantity    REAL    DEFAULT 0,
+            price       REAL    DEFAULT 0,
+            fetched_at  TEXT    DEFAULT (datetime('now')),
+            UNIQUE(deal_date, symbol, client, deal_type)
+        );
+
+        -- ── New: Per-symbol settings & watchlist ─────────────────────────
+        CREATE TABLE IF NOT EXISTS settings (
+            key         TEXT    PRIMARY KEY,
+            value       TEXT    NOT NULL,
+            updated_at  TEXT    DEFAULT (datetime('now'))
+        );
+
+        -- ── New: Partial exits for scale-out strategy ────────────────────
+        CREATE TABLE IF NOT EXISTS partial_exits (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id    INTEGER NOT NULL REFERENCES paper_trades(id),
+            exit_price  REAL    NOT NULL,
+            lots_exited INTEGER DEFAULT 1,
+            pnl         REAL,
+            reason      TEXT,
+            exit_time   TEXT    DEFAULT (datetime('now'))
+        );
         """)
-    print(f"✅ DB initialised at {DB_PATH}")
+    print("✅ DB initialised (v4)")
 
 
-# ── Trade CRUD ────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Paper Trades
+# ══════════════════════════════════════════════════════════════════════════════
 
-def add_trade(symbol: str, opt_type: str, strike: float,
-              entry_price: float, reason: str = "", expiry: str = "") -> int:
-    """Log a new paper trade. Returns the new trade id."""
-    now = datetime.now(IST).isoformat()
-    with get_conn() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO trades
-              (symbol, type, strike, entry_price, current_price,
-               entry_time, status, reason, expiry)
-            VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
-            """,
-            (symbol, opt_type, strike, entry_price, entry_price, now, reason, expiry),
-        )
-        return cur.lastrowid
+def add_trade(symbol, opt_type, strike, entry_price, reason="", lot_size=0):
+    with _conn() as c:
+        c.execute("""
+            INSERT INTO paper_trades (symbol, type, strike, entry_price, reason, lot_size)
+            VALUES (?,?,?,?,?,?)
+        """, (symbol, opt_type, float(strike), float(entry_price), reason, lot_size))
+    return True
 
+def get_open_trades():
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY entry_time DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
 
-def update_trade(trade_id: int, current_price: float,
-                 exit_flag: bool = False, reason: str = ""):
-    """Update current price, and optionally close the trade."""
-    with get_conn() as conn:
-        # Fetch entry price for P&L calc
-        row = conn.execute(
-            "SELECT entry_price FROM trades WHERE id = ?", (trade_id,)
-        ).fetchone()
-        if not row:
-            return
+def get_closed_trades():
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM paper_trades WHERE status='CLOSED' ORDER BY entry_time DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
 
-        entry_price = row["entry_price"]
-        pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price else 0
-        pnl_abs = current_price - entry_price
+def get_all_trades():
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM paper_trades ORDER BY entry_time DESC LIMIT 500"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+def update_trade(trade_id, current_price, exit_flag=False, reason=""):
+    with _conn() as c:
+        row = c.execute("SELECT * FROM paper_trades WHERE id=?", (trade_id,)).fetchone()
+        if not row: return
+        entry = row["entry_price"]
+        pnl_pct = ((current_price - entry) / entry * 100) if entry > 0 else 0
+        lot_size = row["lot_size"] or 1
+        pnl_abs  = (current_price - entry) * lot_size
 
         if exit_flag:
-            now = datetime.now(IST).isoformat()
-            conn.execute(
-                """
-                UPDATE trades
-                SET current_price = ?,
-                    exit_price    = ?,
-                    exit_time     = ?,
-                    exit_reason   = ?,
-                    status        = 'CLOSED',
-                    pnl_pct       = ?,
-                    pnl_abs       = ?
-                WHERE id = ?
-                """,
-                (current_price, current_price, now, reason, pnl_pct, pnl_abs, trade_id),
-            )
+            c.execute("""
+                UPDATE paper_trades
+                SET current_price=?, exit_price=?, status='CLOSED',
+                    exit_time=datetime('now'), pnl=?, pnl_pct=?, reason=?
+                WHERE id=?
+            """, (current_price, current_price, round(pnl_abs,2), round(pnl_pct,2), reason, trade_id))
         else:
-            conn.execute(
-                """
-                UPDATE trades
-                SET current_price = ?,
-                    pnl_pct       = ?,
-                    pnl_abs       = ?
-                WHERE id = ?
-                """,
-                (current_price, pnl_pct, pnl_abs, trade_id),
-            )
+            c.execute("""
+                UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?
+            """, (current_price, round(pnl_abs,2), round(pnl_pct,2), trade_id))
 
-
-def get_open_trades() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM trades WHERE status = 'OPEN' ORDER BY entry_time DESC"
+def get_trade_stats():
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM paper_trades WHERE status='CLOSED'"
         ).fetchall()
-        return [dict(r) for r in rows]
+    trades = [dict(r) for r in rows]
+    if not trades:
+        return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0,
+                "avg_pnl_pct": 0, "total_pnl": 0, "best": None, "worst": None,
+                "by_signal": {}, "equity_curve": []}
 
+    wins   = [t for t in trades if (t["pnl"] or 0) > 0]
+    losses = [t for t in trades if (t["pnl"] or 0) <= 0]
 
-def get_all_trades() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM trades ORDER BY entry_time DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
+    # Equity curve: cumulative PnL sorted by exit_time
+    sorted_trades = sorted(trades, key=lambda x: x.get("exit_time") or "")
+    cumulative = 0
+    equity_curve = []
+    for t in sorted_trades:
+        cumulative += (t["pnl"] or 0)
+        equity_curve.append({
+            "date":       t.get("exit_time", "")[:10],
+            "cumulative": round(cumulative, 2),
+            "trade_pnl":  round(t.get("pnl") or 0, 2),
+            "symbol":     t["symbol"]
+        })
 
+    # Max drawdown
+    peak = 0; max_dd = 0; running = 0
+    for t in sorted_trades:
+        running += (t["pnl"] or 0)
+        if running > peak: peak = running
+        dd = peak - running
+        if dd > max_dd: max_dd = dd
 
-def get_closed_trades() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM trades WHERE status = 'CLOSED' ORDER BY exit_time DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def get_trades_by_symbol(symbol: str) -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM trades WHERE symbol = ? ORDER BY entry_time DESC",
-            (symbol.upper(),),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def add_tracked_pick(symbol: str, type_: str, strike: float, entry_price: float, score: int, stock_price: float = 0.0, lot_size: int = 0) -> bool:
-    """Adds a new manually tracked pick."""
-    with get_conn() as conn:
-        now = datetime.now(IST).date().isoformat()
-        exists = conn.execute(
-            "SELECT id FROM trades WHERE symbol=? AND type=? AND strike=? AND status='TRACKED' AND date(entry_time)=?",
-            (symbol, type_, strike, now)
-        ).fetchone()
-        if exists:
-            return False
-            
-        conn.execute(
-            """
-            INSERT INTO trades
-              (symbol, type, strike, entry_price, entry_time, status, reason, stock_price, lot_size, score)
-            VALUES (?, ?, ?, ?, ?, 'TRACKED', 'Manual Track', ?, ?, ?)
-            """,
-            (symbol, type_, strike, entry_price, datetime.now(IST).isoformat(), stock_price, lot_size, score),
-        )
-        return True
-
-
-def get_tracked_picks() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM trades WHERE status = 'TRACKED' ORDER BY entry_time DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-def update_tracked_pick(trade_id: int, current_price: float, stock_price: float = None):
-    with get_conn() as conn:
-        row = conn.execute("SELECT entry_price FROM trades WHERE id=?", (trade_id,)).fetchone()
-        if not row: return
-        entry_price = row[0]
-        pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price else 0
-        pnl_abs = current_price - entry_price
-        
-        if stock_price is not None:
-            conn.execute(
-                """
-                UPDATE trades
-                SET current_price = ?,
-                    pnl_pct       = ?,
-                    pnl_abs       = ?,
-                    stock_price   = ?
-                WHERE id = ?
-                """,
-                (current_price, pnl_pct, pnl_abs, stock_price, trade_id),
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE trades
-                SET current_price = ?,
-                    pnl_pct       = ?,
-                    pnl_abs       = ?
-                WHERE id = ?
-                """,
-                (current_price, pnl_pct, pnl_abs, trade_id),
-            )
-
-def delete_tracked_pick(trade_id: int) -> bool:
-    """Removes a tracked pick from the database."""
-    with get_conn() as conn:
-        cursor = conn.execute("DELETE FROM trades WHERE id = ? AND status = 'TRACKED'", (trade_id,))
-        return cursor.rowcount > 0
-
-def delete_all_tracked_picks() -> bool:
-    """Removes all tracked picks from the database."""
-    with get_conn() as conn:
-        conn.execute("DELETE FROM trades WHERE status = 'TRACKED'")
-        return True
-
-def get_trade_stats() -> dict:
-    """Compute win/loss statistics across all closed trades."""
-    closed = get_closed_trades()
-    open_  = get_open_trades()
-
-    if not closed:
-        return {
-            "total_closed":  0,
-            "total_open":    len(open_),
-            "winners":       0,
-            "losers":        0,
-            "win_rate_pct":  0.0,
-            "avg_pnl_pct":   0.0,
-            "avg_win_pct":   0.0,
-            "avg_loss_pct":  0.0,
-            "total_pnl_pct": 0.0,
-            "best_trade":    None,
-            "worst_trade":   None,
-            "by_reason":     {},
-        }
-
-    winners = [t for t in closed if t["pnl_pct"] > 0]
-    losers  = [t for t in closed if t["pnl_pct"] <= 0]
-
-    avg_pnl  = sum(t["pnl_pct"] for t in closed) / len(closed)
-    avg_win  = sum(t["pnl_pct"] for t in winners) / len(winners) if winners else 0
-    avg_loss = sum(t["pnl_pct"] for t in losers)  / len(losers)  if losers  else 0
-    win_rate = len(winners) / len(closed) * 100
-
-    best  = max(closed, key=lambda x: x["pnl_pct"])
-    worst = min(closed, key=lambda x: x["pnl_pct"])
-
-    # Breakdown by exit reason
-    by_reason: dict = {}
-    for t in closed:
-        r = t.get("exit_reason") or "Unknown"
-        # Normalise
-        if "Stop" in r:   key = "Stop Loss"
-        elif "Target" in r: key = "Target Hit"
-        elif "EOD" in r:  key = "EOD Square Off"
-        else:             key = r
-        if key not in by_reason:
-            by_reason[key] = {"count": 0, "avg_pnl": 0.0, "pnls": []}
-        by_reason[key]["count"] += 1
-        by_reason[key]["pnls"].append(t["pnl_pct"])
-
-    for key in by_reason:
-        pnls = by_reason[key]["pnls"]
-        by_reason[key]["avg_pnl"] = round(sum(pnls) / len(pnls), 2)
-        del by_reason[key]["pnls"]
-
-    # Per-symbol stats
-    by_symbol: dict = {}
-    for t in closed:
-        s = t["symbol"]
-        if s not in by_symbol:
-            by_symbol[s] = {"trades": 0, "wins": 0, "pnl_sum": 0.0}
-        by_symbol[s]["trades"]  += 1
-        by_symbol[s]["pnl_sum"] += t["pnl_pct"]
-        if t["pnl_pct"] > 0:
-            by_symbol[s]["wins"] += 1
-    for s in by_symbol:
-        st = by_symbol[s]
-        st["win_rate_pct"] = round(st["wins"] / st["trades"] * 100, 1)
-        st["avg_pnl_pct"]  = round(st["pnl_sum"] / st["trades"], 2)
-        del st["pnl_sum"]
+    # By symbol breakdown
+    by_symbol = {}
+    for t in trades:
+        sym = t["symbol"]
+        if sym not in by_symbol:
+            by_symbol[sym] = {"trades": 0, "pnl": 0, "wins": 0}
+        by_symbol[sym]["trades"] += 1
+        by_symbol[sym]["pnl"]    += (t["pnl"] or 0)
+        if (t["pnl"] or 0) > 0:
+            by_symbol[sym]["wins"] += 1
+    for sym in by_symbol:
+        n = by_symbol[sym]["trades"]
+        by_symbol[sym]["win_rate"] = round(by_symbol[sym]["wins"] / n * 100, 1) if n else 0
+        by_symbol[sym]["pnl"]      = round(by_symbol[sym]["pnl"], 2)
 
     return {
-        "total_closed":  len(closed),
-        "total_open":    len(open_),
-        "winners":       len(winners),
-        "losers":        len(losers),
-        "win_rate_pct":  round(win_rate, 2),
-        "avg_pnl_pct":   round(avg_pnl, 2),
-        "avg_win_pct":   round(avg_win, 2),
-        "avg_loss_pct":  round(avg_loss, 2),
-        "total_pnl_pct": round(sum(t["pnl_pct"] for t in closed), 2),
-        "best_trade":    best,
-        "worst_trade":   worst,
-        "by_reason":     by_reason,
-        "by_symbol":     by_symbol,
+        "total":       len(trades),
+        "wins":        len(wins),
+        "losses":      len(losses),
+        "win_rate":    round(len(wins) / len(trades) * 100, 1),
+        "avg_pnl_pct": round(sum(t.get("pnl_pct") or 0 for t in trades) / len(trades), 2),
+        "total_pnl":   round(sum(t.get("pnl") or 0 for t in trades), 2),
+        "max_drawdown": round(max_dd, 2),
+        "best":        max(trades, key=lambda x: x.get("pnl") or 0) if trades else None,
+        "worst":       min(trades, key=lambda x: x.get("pnl") or 0) if trades else None,
+        "by_symbol":   by_symbol,
+        "equity_curve": equity_curve,
     }
 
 
-# ── Scan Log ──────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Tracked Picks
+# ══════════════════════════════════════════════════════════════════════════════
 
-def log_scan(symbol: str, spot: float, score: int, signal: str,
-             pcr: float, iv: float, oi_change: float, vol_spike: float):
-    """Save a scan result for historical analysis / backtesting."""
-    now = datetime.now(IST).isoformat()
-    with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO scan_log
-              (symbol, scan_time, spot, score, signal, pcr, iv, oi_change, vol_spike)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (symbol, now, spot, score, signal, pcr, iv, oi_change, vol_spike),
+def add_tracked_pick(symbol, opt_type, strike, entry_price, score, stock_price=0, lot_size=0):
+    try:
+        with _conn() as c:
+            c.execute("""
+                INSERT INTO tracked_picks
+                    (symbol, type, strike, entry_price, score, stock_price, lot_size)
+                VALUES (?,?,?,?,?,?,?)
+            """, (symbol, opt_type, float(strike), float(entry_price), score, stock_price, lot_size))
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+def get_tracked_picks():
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM tracked_picks WHERE status='TRACKED' ORDER BY tracked_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+def update_tracked_pick(pick_id, current_price, stock_price=0):
+    with _conn() as c:
+        c.execute("""
+            UPDATE tracked_picks SET current_price=?, stock_price=? WHERE id=?
+        """, (current_price, stock_price, pick_id))
+
+def delete_tracked_pick(pick_id):
+    with _conn() as c:
+        c.execute("DELETE FROM tracked_picks WHERE id=?", (pick_id,))
+    return True
+
+def delete_all_tracked_picks():
+    with _conn() as c:
+        c.execute("DELETE FROM tracked_picks")
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Trade Notes (Journal)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def add_trade_note(trade_id: int, note: str):
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO trade_notes (trade_id, note) VALUES (?,?)",
+            (trade_id, note)
+        )
+    return True
+
+def get_trade_notes(trade_id: int):
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM trade_notes WHERE trade_id=? ORDER BY created_at DESC",
+            (trade_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OI History (15-min snapshots)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_oi_snapshot(symbol: str, expiry: str, records: list):
+    """Bulk-insert one full chain snapshot. Call every 15 minutes."""
+    today = date.today().isoformat()
+    now   = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    rows  = []
+    for row in records:
+        strike = row.get("strikePrice", 0)
+        for side in ["CE", "PE"]:
+            sd = row.get(side, {})
+            if not sd: continue
+            rows.append((
+                symbol, expiry, strike, side,
+                sd.get("openInterest", 0),
+                sd.get("changeinOpenInterest", 0),
+                sd.get("totalTradedVolume", 0),
+                sd.get("impliedVolatility", 0),
+                sd.get("lastPrice", 0),
+                now, today
+            ))
+    if rows:
+        with _conn() as c:
+            c.executemany("""
+                INSERT INTO oi_history
+                    (symbol, expiry, strike, opt_type, oi, oi_chg, volume, iv, ltp, snap_time, snap_date)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """, rows)
+
+def get_oi_timeline(symbol: str, strike: float, opt_type: str, days: int = 5) -> list:
+    """
+    Return intraday OI timeline for a specific strike.
+    Used for the OI heatmap and buildup charts.
+    """
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT snap_time, oi, oi_chg, volume, iv, ltp
+            FROM oi_history
+            WHERE symbol=? AND strike=? AND opt_type=?
+              AND snap_date >= date('now', ? || ' days')
+            ORDER BY snap_time ASC
+        """, (symbol, strike, opt_type, f"-{days}")).fetchall()
+    return [dict(r) for r in rows]
+
+def get_oi_heatmap(symbol: str, snap_date: str = None) -> list:
+    """
+    Returns all OI snapshots for a symbol on a given date
+    (defaults to today). Used to build the OI buildup heatmap.
+    """
+    snap_date = snap_date or date.today().isoformat()
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT strike, opt_type, snap_time, oi, volume
+            FROM oi_history
+            WHERE symbol=? AND snap_date=?
+            ORDER BY strike ASC, snap_time ASC
+        """, (symbol, snap_date)).fetchall()
+    return [dict(r) for r in rows]
+
+def get_volume_baseline(symbol: str, strike: float, opt_type: str, days: int = 5) -> float:
+    """
+    Returns average daily volume for a strike over past N days.
+    Used by UOA detector to flag unusual activity.
+    """
+    with _conn() as c:
+        row = c.execute("""
+            SELECT AVG(daily_vol) as avg_vol FROM (
+                SELECT snap_date, MAX(volume) as daily_vol
+                FROM oi_history
+                WHERE symbol=? AND strike=? AND opt_type=?
+                  AND snap_date < date('now')
+                  AND snap_date >= date('now', ? || ' days')
+                GROUP BY snap_date
+            )
+        """, (symbol, strike, opt_type, f"-{days}")).fetchone()
+    return float(row["avg_vol"] or 0)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IV History (for IV Rank)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_daily_iv(symbol: str, iv: float):
+    """Upsert today's IV for a symbol."""
+    if iv <= 0: return
+    with _conn() as c:
+        c.execute("""
+            INSERT INTO iv_history (symbol, iv, snap_date)
+            VALUES (?, ?, date('now'))
+            ON CONFLICT(symbol, snap_date) DO UPDATE SET iv=excluded.iv
+        """, (symbol, iv))
+
+def get_iv_rank(symbol: str, lookback_days: int = 252) -> dict:
+    """
+    IVR = (current_iv - 52w_low) / (52w_high - 52w_low) × 100
+    Returns: { current_iv, iv_rank, iv_52w_high, iv_52w_low, days_available }
+    """
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT iv FROM iv_history
+            WHERE symbol=? AND snap_date >= date('now', ? || ' days')
+            ORDER BY snap_date DESC
+        """, (symbol, f"-{lookback_days}")).fetchall()
+
+    if not rows:
+        return {"current_iv": 0, "iv_rank": 0, "iv_52w_high": 0, "iv_52w_low": 0, "days_available": 0}
+
+    ivs         = [r["iv"] for r in rows]
+    current_iv  = ivs[0]
+    iv_high     = max(ivs)
+    iv_low      = min(ivs)
+    iv_range    = iv_high - iv_low
+    iv_rank     = round((current_iv - iv_low) / iv_range * 100, 1) if iv_range > 0 else 50.0
+
+    return {
+        "current_iv":    round(current_iv, 1),
+        "iv_rank":       iv_rank,
+        "iv_52w_high":   round(iv_high, 1),
+        "iv_52w_low":    round(iv_low, 1),
+        "days_available": len(ivs),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Notifications (persisted dedup)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def is_notified(uid: str) -> bool:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM notifications WHERE uid=?", (uid,)
+        ).fetchone()
+    return row is not None
+
+def mark_notified(uid: str):
+    with _conn() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO notifications (uid) VALUES (?)", (uid,)
+        )
+
+def cleanup_old_notifications(days: int = 7):
+    """Prune alerts older than N days to keep DB small."""
+    with _conn() as c:
+        c.execute(
+            "DELETE FROM notifications WHERE sent_at < datetime('now', ? || ' days')",
+            (f"-{days}",)
         )
 
 
-def get_scan_history(symbol: str = None, days: int = 30) -> list[dict]:
-    """Fetch scan log for a symbol over the last N days."""
-    with get_conn() as conn:
+# ══════════════════════════════════════════════════════════════════════════════
+# Bulk Deals
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_bulk_deals(deals: list):
+    with _conn() as c:
+        c.executemany("""
+            INSERT OR IGNORE INTO bulk_deals
+                (deal_date, symbol, client, deal_type, quantity, price)
+            VALUES (?,?,?,?,?,?)
+        """, [(d["date"], d["symbol"], d.get("client",""), d["type"],
+               d.get("quantity",0), d.get("price",0)) for d in deals])
+
+def get_bulk_deals(symbol: str = None, days: int = 5) -> list:
+    with _conn() as c:
         if symbol:
-            rows = conn.execute(
-                """
-                SELECT * FROM scan_log
-                WHERE symbol = ?
-                  AND scan_time >= datetime('now', ?)
-                ORDER BY scan_time DESC
-                """,
-                (symbol.upper(), f"-{days} days"),
-            ).fetchall()
+            rows = c.execute("""
+                SELECT * FROM bulk_deals
+                WHERE symbol=? AND deal_date >= date('now', ? || ' days')
+                ORDER BY deal_date DESC
+            """, (symbol, f"-{days}")).fetchall()
         else:
-            rows = conn.execute(
-                """
-                SELECT * FROM scan_log
-                WHERE scan_time >= datetime('now', ?)
-                ORDER BY scan_time DESC
-                """,
-                (f"-{days} days",),
-            ).fetchall()
-        return [dict(r) for r in rows]
+            rows = c.execute("""
+                SELECT * FROM bulk_deals
+                WHERE deal_date >= date('now', ? || ' days')
+                ORDER BY deal_date DESC
+            """, (f"-{days}",)).fetchall()
+    return [dict(r) for r in rows]
 
 
-# ── Notifications ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Settings
+# ══════════════════════════════════════════════════════════════════════════════
 
-def is_signal_notified(uid: str) -> bool:
-    with get_conn() as conn:
-        row = conn.execute("SELECT 1 FROM notified_signals WHERE uid = ?", (uid,)).fetchone()
-        return bool(row)
+def get_setting(key: str, default=None):
+    with _conn() as c:
+        row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    if row is None:
+        return default
+    try:
+        return json.loads(row["value"])
+    except Exception:
+        return row["value"]
 
-def mark_signal_notified(uid: str):
-    now = datetime.now(IST).isoformat()
-    with get_conn() as conn:
-        conn.execute("INSERT OR IGNORE INTO notified_signals (uid, notified_at) VALUES (?, ?)", (uid, now))
+def set_setting(key: str, value):
+    with _conn() as c:
+        c.execute("""
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+        """, (key, json.dumps(value)))
+
+def get_watchlist() -> list:
+    return get_setting("watchlist", [])
+
+def set_watchlist(symbols: list):
+    set_setting("watchlist", symbols)
+
+def get_capital() -> float:
+    return float(get_setting("capital", 100000))
+
+def set_capital(amount: float):
+    set_setting("capital", amount)
+
+def get_symbol_threshold(symbol: str) -> int:
+    thresholds = get_setting("symbol_thresholds", {})
+    return thresholds.get(symbol.upper(), 75)
+
+def set_symbol_threshold(symbol: str, threshold: int):
+    thresholds = get_setting("symbol_thresholds", {})
+    thresholds[symbol.upper()] = threshold
+    set_setting("symbol_thresholds", thresholds)
 
 
-# ── CLI — quick inspection ────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Partial Exits
+# ══════════════════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
-    import sys
-    init_db()
+def add_partial_exit(trade_id: int, exit_price: float, lots: int, pnl: float, reason: str):
+    with _conn() as c:
+        c.execute("""
+            INSERT INTO partial_exits (trade_id, exit_price, lots_exited, pnl, reason)
+            VALUES (?,?,?,?,?)
+        """, (trade_id, exit_price, lots, round(pnl, 2), reason))
 
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "stats"
-
-    if cmd == "stats":
-        stats = get_trade_stats()
-        print(f"\n📊 Trade Statistics")
-        print(f"   Closed trades : {stats['total_closed']}")
-        print(f"   Open trades   : {stats['total_open']}")
-        print(f"   Win rate      : {stats['win_rate_pct']}%")
-        print(f"   Avg P&L       : {stats['avg_pnl_pct']:+.1f}%")
-        print(f"   Avg Win       : {stats['avg_win_pct']:+.1f}%")
-        print(f"   Avg Loss      : {stats['avg_loss_pct']:+.1f}%")
-        print(f"   Total P&L     : {stats['total_pnl_pct']:+.1f}%")
-        if stats["best_trade"]:
-            b = stats["best_trade"]
-            print(f"   Best trade    : {b['symbol']} {b['type']} {b['strike']} → {b['pnl_pct']:+.1f}%")
-        print(f"\n   By exit reason:")
-        for reason, data in stats.get("by_reason", {}).items():
-            print(f"     {reason:<20}: {data['count']} trades  avg {data['avg_pnl']:+.1f}%")
-        print(f"\n   By symbol:")
-        for sym, data in sorted(stats.get("by_symbol", {}).items(),
-                                key=lambda x: x[1]["avg_pnl_pct"], reverse=True):
-            print(f"     {sym:<14}: {data['trades']} trades  WR {data['win_rate_pct']}%  avg {data['avg_pnl_pct']:+.1f}%")
-
-    elif cmd == "open":
-        trades = get_open_trades()
-        print(f"\n📋 Open Trades ({len(trades)})")
-        for t in trades:
-            pnl = t.get("pnl_pct", 0)
-            print(f"  {'✅' if pnl >= 0 else '🔴'} {t['symbol']:<10} {t['type']} "
-                  f"Strike={t['strike']}  Entry=₹{t['entry_price']}  "
-                  f"Current=₹{t.get('current_price',0)}  P&L={pnl:+.1f}%")
-
-    elif cmd == "history":
-        trades = get_all_trades()
-        print(f"\n📋 All Trades ({len(trades)})")
-        for t in trades:
-            status = "🟢" if t["status"] == "OPEN" else ("✅" if t["pnl_pct"] > 0 else "❌")
-            print(f"  {status} [{t['id']:>3}] {t['symbol']:<10} {t['type']} "
-                  f"Strike={t['strike']}  Entry=₹{t['entry_price']}  "
-                  f"P&L={t['pnl_pct']:+.1f}%  {t['status']}  {t.get('exit_reason','')}")
-
-    elif cmd == "clear":
-        confirm = input("⚠️  This will DELETE all trades. Type YES to confirm: ")
-        if confirm == "YES":
-            with get_conn() as conn:
-                conn.execute("DELETE FROM trades")
-                conn.execute("DELETE FROM scan_log")
-            print("✅ All trades cleared.")
-        else:
-            print("Cancelled.")
-
-    else:
-        print(f"Usage: python db.py [stats|open|history|clear]")
+def get_partial_exits(trade_id: int) -> list:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM partial_exits WHERE trade_id=? ORDER BY exit_time",
+            (trade_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
