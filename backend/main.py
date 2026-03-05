@@ -22,8 +22,24 @@ load_dotenv()
 
 # Secure token logic: fallback to empty instead of hardcoding production secrets
 INDSTOCKS_TOKEN = os.getenv("INDSTOCKS_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 INDSTOCKS_BASE  = "https://api.indstocks.com/v1"
 NSE_BASE        = "https://www.nseindia.com"
+
+# Prevent spamming duplicate Telegram alerts
+notified_signals = set()
+
+async def send_telegram_alert(message: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.post(url, json=payload, timeout=5)
+        except Exception as e:
+            log.error(f"Telegram Alert Failed: {e}")
 
 NSE_HEADERS = {
     "User-Agent":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -53,6 +69,19 @@ FO_STOCKS = [
     "PIDILITIND","SIEMENS","HAVELLS","VOLTAS",
 ]
 INDEX_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+
+LOT_SIZES = {
+    "NIFTY": 75, "BANKNIFTY": 30, "FINNIFTY": 65, "MIDCPNIFTY": 120,
+    "RELIANCE": 500, "TCS": 175, "INFY": 400, "HDFCBANK": 550, "ICICIBANK": 700,
+    "SBIN": 750, "ADANIENT": 300, "WIPRO": 3000, "AXISBANK": 625, "BAJFINANCE": 750,
+    "HCLTECH": 350, "LT": 175, "KOTAKBANK": 2000, "TATAMOTORS": 1425, "MARUTI": 50,
+    "SUNPHARMA": 350, "ITC": 1600, "ONGC": 2250, "POWERGRID": 1900, "NTPC": 1500,
+    "BPCL": 1975, "GRASIM": 250, "TITAN": 175, "INDUSINDBK": 700, "ULTRACEMCO": 50,
+    "HEROMOTOCO": 150, "ASIANPAINT": 250, "MM": 350, "DRREDDY": 625,
+    "BAJAJFINSV": 250, "HINDALCO": 700, "TATASTEEL": 5500, "DIVISLAB": 100, "CIPLA": 375,
+    "TECHM": 600, "NESTLEIND": 500, "COALINDIA": 1350, "VEDL": 1150, "JSWSTEEL": 675, "SAIL": 4700,
+    "APOLLOHOSP": 125, "PIDILITIND": 500, "SIEMENS": 175, "HAVELLS": 500, "VOLTAS": 375
+}
 
 try:
     slugs_path = os.path.join(os.path.dirname(__file__), "slugs.json")
@@ -108,9 +137,11 @@ async def paper_trade_manager():
         try:
             if is_market_open():
                 open_trades = db.get_open_trades()
-                if open_trades:
-                    log.info(f"Checking {len(open_trades)} OPEN paper trades...")
-                    symbols = list(set([t['symbol'] for t in open_trades]))
+                tracked_picks = db.get_tracked_picks()
+                all_to_check = open_trades + tracked_picks
+                if all_to_check:
+                    log.info(f"Checking {len(open_trades)} OPEN paper trades and {len(tracked_picks)} TRACKED picks...")
+                    symbols = list(set([t['symbol'] for t in all_to_check]))
                     
                     sem = asyncio.Semaphore(3)
                     async def fetch_and_update(sym):
@@ -125,7 +156,7 @@ async def paper_trade_manager():
                     results = await asyncio.gather(*[fetch_and_update(s) for s in symbols])
                     chain_map = {sym: data for sym, data in results if data}
                     
-                    for trade in open_trades:
+                    for trade in all_to_check:
                         sym = trade['symbol']
                         chain = chain_map.get(sym)
                         if not chain: continue
@@ -143,21 +174,24 @@ async def paper_trade_manager():
                                 break
                                 
                         if current_price:
-                            db.update_trade(trade['id'], current_price)
-                            pnl_pct = ((current_price - trade['entry_price']) / trade['entry_price']) * 100
-                            
-                            now = datetime.now(IST)
-                            if now.time() >= dtime(15, 15):
-                                db.update_trade(trade['id'], current_price, exit_flag=True, reason="EOD Square Off")
-                                continue
+                            if trade['status'] == 'TRACKED':
+                                db.update_tracked_pick(trade['id'], current_price, stock_price=spot)
+                            else:
+                                db.update_trade(trade['id'], current_price)
+                                pnl_pct = ((current_price - trade['entry_price']) / trade['entry_price']) * 100
                                 
-                            if pnl_pct <= -20:
-                                db.update_trade(trade['id'], current_price, exit_flag=True, reason="Stop Loss (-20%)")
-                                continue
-                                
-                            if pnl_pct >= 40:
-                                db.update_trade(trade['id'], current_price, exit_flag=True, reason="Take Profit (+40%)")
-                                continue
+                                now = datetime.now(IST)
+                                if now.time() >= dtime(15, 15):
+                                    db.update_trade(trade['id'], current_price, exit_flag=True, reason="EOD Square Off")
+                                    continue
+                                    
+                                if pnl_pct <= -20:
+                                    db.update_trade(trade['id'], current_price, exit_flag=True, reason="Stop Loss (-20%)")
+                                    continue
+                                    
+                                if pnl_pct >= 40:
+                                    db.update_trade(trade['id'], current_price, exit_flag=True, reason="Take Profit (+40%)")
+                                    continue
             
             await asyncio.sleep(60)
             
@@ -293,6 +327,9 @@ async def fetch_indstocks_ltp(symbols: list) -> dict:
     if not INDSTOCKS_TOKEN or INDSTOCKS_TOKEN == "PASTE_YOUR_NEW_TOKEN_HERE":
         log.warning("IndStocks token not set — skipping live LTP")
         return {}
+    
+    with open('/tmp/indstocks_token.txt', 'w') as f: f.write(INDSTOCKS_TOKEN)
+
     headers = {"Authorization": f"Bearer {INDSTOCKS_TOKEN}"}
     results = {}
     async with httpx.AsyncClient(timeout=12) as client:
@@ -383,6 +420,8 @@ async def health():
     return {"status": "ok", "version": "3.0", "time": datetime.now().isoformat()}
 
 
+
+
 @app.get("/api/debug/{symbol}")
 async def debug_symbol(symbol: str):
     symbol = symbol.upper()
@@ -399,6 +438,20 @@ async def debug_symbol(symbol: str):
     except Exception as e:
         return {"symbol": symbol, "status": "error", "error": str(e)}
 
+
+@app.get("/api/debug-indstocks")
+async def debug_indstocks():
+    global INDSTOCKS_TOKEN
+    headers = {"Authorization": f"Bearer {INDSTOCKS_TOKEN}"}
+    import httpx
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{INDSTOCKS_BASE}/market/instruments",
+            params={"search": "SBIN", "exchange": "NFO"},
+            headers=headers,
+        )
+        data = r.json().get("data", [])
+        return {"raw": data[:10]}
 
 @app.get("/api/scan")
 async def scan_all(limit: int = Query(48, ge=1, le=100)):
@@ -418,7 +471,7 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 stats    = compute_stock_score(cj, spot or 1)
                 if spot == 0: return None
                 
-                # Auto-log trades for high-scoring setups during market hours
+                # Telegram Alerts & Auto-Log for high-scoring setups
                 if stats.get("score", 0) >= 80 and is_market_open():
                     for pick in stats.get("top_picks", []):
                         opt_type = pick["type"]
@@ -426,6 +479,24 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                         entry_price = pick["ltp"]
                         reason = f"Top Pick {opt_type} @ {strike} (Score: {stats['score']})"
                         db.add_trade(symbol, opt_type, strike, entry_price, reason)
+                        
+                if stats.get("score", 0) >= 70:
+                    for pick in stats.get("top_picks", []):
+                        opt_type = pick["type"]
+                        strike = pick["strike"]
+                        uid = f"{symbol}-{opt_type}-{strike}-{datetime.now().date()}"
+                        
+                        if pick.get("score", 0) >= 70 and uid not in notified_signals:
+                            notified_signals.add(uid)
+                            msg = f"🚀 *HIGH CONFIDENCE ALERT*\n\n" \
+                                  f"Symbol: *{symbol}*\n" \
+                                  f"Contract: *{strike} {opt_type}*\n" \
+                                  f"LTP: ₹{pick['ltp']}\n" \
+                                  f"Score: *{pick['score']}*\n\n" \
+                                  f"Signal: {stats.get('signal', 'UNKNOWN')}\n" \
+                                  f"Volume Spike: {stats.get('vol_spike', 0)}x\n"
+                            # Schedule background execution so it doesn't block the scanner
+                            asyncio.create_task(send_telegram_alert(msg))
 
                 return {
                     "symbol":     symbol,
@@ -526,6 +597,74 @@ async def get_trade_statistics():
     return db.get_trade_stats()
 
 
+# ── Backtester API ────────────────────────────────────────────────────────────
+
+from pydantic import BaseModel
+from typing import List
+
+class BacktestRequest(BaseModel):
+    mode: str = "live"
+    symbols: List[str] = []
+    tp: float = 40.0
+    sl: float = 20.0
+    score: float = 75.0
+
+class TrackPickRequest(BaseModel):
+    symbol: str
+    type: str
+    strike: float
+    entry_price: float
+    score: int
+    stock_price: float = 0.0
+
+@app.post("/api/track-pick")
+async def track_pick(req: TrackPickRequest):
+    lot_size = LOT_SIZES.get(req.symbol, 0)
+    success = db.add_tracked_pick(req.symbol, req.type, req.strike, req.entry_price, req.score, req.stock_price, lot_size)
+    if success:
+        return {"status": "success", "message": "Option tracked."}
+    else:
+        return {"status": "error", "message": "Already tracking this option today."}
+
+@app.get("/api/tracked-picks")
+async def get_tracked_picks():
+    picks = db.get_tracked_picks()
+    return {"status": "ok", "data": picks}
+
+@app.delete("/api/track-pick/{trade_id}")
+async def untrack_pick(trade_id: int):
+    success = db.delete_tracked_pick(trade_id)
+    if success:
+        return {"status": "success", "message": "Option untracked."}
+        return {"status": "error", "message": "Failed to untrack option or it does not exist."}
+
+@app.delete("/api/tracked-picks")
+async def untrack_all_picks():
+    success = db.delete_all_tracked_picks()
+    if success:
+        return {"status": "success", "message": "All tracked options removed."}
+    else:
+        return {"status": "error", "message": "Failed to untrack all options."}
+
+@app.post("/api/backtest")
+async def run_backtest(req: BacktestRequest):
+    import sys, os
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+        
+    import backtest as Backtest
+    
+    if req.mode == "db":
+        log.info(f"=== BACKTEST: Replaying trades from DB (TP={req.tp}% SL={req.sl}%) ===")
+        trades = await Backtest.backtest_from_db(tp=req.tp, sl=req.sl)
+    else:
+        log.info(f"=== BACKTEST: Live Scan (Score >={req.score} TP={req.tp}% SL={req.sl}%) ===")
+        syms = req.symbols if req.symbols else INDEX_SYMBOLS + FO_STOCKS[:10]
+        trades = await Backtest.backtest_live_signals(syms, score_threshold=req.score, tp=req.tp, sl=req.sl)
+        
+    return Backtest.generate_report(trades, tp=req.tp, sl=req.sl)
+
 dist_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 
 if os.path.isdir(dist_path):
@@ -554,3 +693,5 @@ if __name__ == "__main__":
 ╚══════════════════════════════════════════════════════╝
 """)
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False, log_level="info")
+
+# End of file

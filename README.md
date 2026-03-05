@@ -1,311 +1,94 @@
-# 📈 NSE F&O Option Chain Scanner
+# 📈 NSE F&O Option Chain Algorithmic Scanner
 
-A local Python backend that scans all NSE F&O stocks in real time, scores every option strike, and surfaces the best CE/PE opportunities ranked by a multi-factor signal model.
+A powerful, full-stack algorithmic trading dashboard for the National Stock Exchange (NSE). It continuously scans the options chain of all 180+ F&O stocks and indices in real time, applies a proprietary scoring model to identify high-probability breakout trades, executes active paper-trades using a background engine, provides native historical backtesting capabilities, and routes high-confidence signals directly to a Telegram bot and browser alerts.
 
-> ⚠️ **For educational purposes only. Not financial advice.**
+> ⚠️ **For educational purposes only. Not financial advice. Paper trading is simulated.**
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Key Features
+
+*   **Real-Time Algorithmic Scanner:** Fetches live chain data directly from the NSE API to rank the strength of every single Strike Price based on Put-Call Ratio (PCR), Open Interest (OI) changes, Volume spikes, and ATM Implied Volatility (IV).
+*   **Active DB Algo Trades (Paper Trading):** Background Python loops automatically "buy" and "sell" Top Picks matching specific algorithmic thresholds, enforcing strict Take Profit (TP) and Stop Loss (SL) risk management, storing the results in SQLite.
+*   **Live Tracked Picks:** A manual watchlist table where users can actively track manual picks. Updates real-time prices for PnL tracking and formats monetary returns correctly against NSE lot sizes.
+*   **Historical Backtester:** Replays the algorithmic score history to simulate trading sessions across varying TP/SL/Score conditions, reporting exact Win Rates, Net PnL, Profit Factors, and charting the exit reasons.
+*   **Audio & Visual Alerts:** Emits immediate visual HTML5 Toasts and a high-pitched ring when the scanner locates a `Score >= 70`.
+*   **Telegram Integration:** Directly dispatches push notifications containing actionable breakdown setups to your phone seamlessly in the background.
+
+---
+
+## 🏗️ System Architecture: What Each File Does
+
+The software operates via a decoupled architecture featuring a FastAPI Python Backend and a React JS Frontend.
+
+### Backend Application
+*   **`backend/main.py`**: The core heartbeat of the application. It runs the FastAPI server to serve static assets and APIs. It manages background asynchronous loops to fetch NSE data, calculates the Option Scores using statistical analysis (combining PCR, Volume, OI, and IV), runs the automated Paper Trade auto-exiting loop, and manages the Telegram HTTP hooks.
+*   **`backend/db.py`**: The SQLite database driver. Manages the `trades.db` files. Contains logical functions to `add_trade`, update Live Tracked options, compute abstract PnL, and transition trades from `OPEN` to `CLOSED`.
+*   **`backend/Backtest.py`**: The mathematical simulation engine. Reads historical data to test various user-input strategies (like strict `%` Stop-Loss). Computes and aggregates the total system PnL, Win Rates, and Loss Rates into a digestible JSON array for the React visualizer.
+
+### Utility Scripts
+*   **`fetch_lot_sizes.py`**: Connects to the AngelOne OpenAPIScripMaster to download the authoritative absolute truth array of all current NSE Lot Sizes (since the Exchange often crashes or expands lot boundaries), writing them directly into the Python matrices.
+*   **`backfill_db.py`**: A database operation script to correct historical log flaws or recalculate old PnL histories if lot-sizes/scores change retrospectively.
+*   **`start.sh`**: The orchestrator script. Safely kills old hung processes, boots the Python Uvicorn engine, and simultaneously starts the Vite React frontend so the application binds seamlessly for the user.
+
+### Frontend Application
+*   **`frontend/src/App.jsx`**: A React application built with Vite containing sophisticated tables, data visualizations, routing elements, sorting functions, Audio alerts, and floating HTML DOM notifications dynamically updating as the backend scans.
+
+---
+
+## 🧠 Algorithmic Scoring Logic
+
+Every F&O asset gets an intrinsic **Score (0–100)** calculated during every iteration. 
+
+### Step 1: The Global Signal (Stock Level)
+Before targeting specific strikes, the system grades the *entire* stock option chain:
+1.  **Volume Spike:** Is the total chain volume massively spiking compared to existing Open Interest? High volume relative to OI means institutional movement.
+2.  **PCR (Put-Call Ratio):** A contrarian indicator. If the crowd is massively loading puts (PCR > 1.3), it often indicates a potential Short Squeeze upwards (Bullish). If heavily loaded into Calls (PCR < 0.8), it acts as gravity downwards (Bearish).
+3.  **ATM IV Levels:** IV operates as the 'premium cost'. 15-25% indicates cheap, healthy pricing. Extremely high IVs (>50%) severely penalize the score because premiums become aggressively prone to crushing.
+4.  **Overall OI Change:** Averaging Open Interest additions flags new money committing to directional bets.
+
+### Step 2: Individual Strike Scoring (Contract Level)
+If the Stock scores over 50, the algorithm ranks every single CE/PE strike price inside that chain up to 100 points:
+*   **Strike OI Change (Max 30pts):** Massive explosion of OI at *one exact strike* defines breakout positioning.
+*   **Proximity to Money (Max 30pts):** The closer a strike is to At-The-Money (ATM), the safer and more delta-responsive it is. Deep OTM contracts are harshly docked.
+*   **Contract Volume (Max 20pts):** Discards illiquid chains with wide bid-ask spreads.
+*   **Strike IV (Max 20pts):** Rewards contracts priced fairly relative to implied decay.
+
+The system snags the highest sorted options and forwards them to the Telegram hook and Paper Database as **"Top Picks"**.
+
+---
+
+## 💻 Installation & Quick Start
 
 ```bash
-# 1. Install dependencies
-pip install fastapi uvicorn httpx
+# 1. Clone & Enter the folder
+cd fo-scanner
 
-# 2. Set your IndStocks token
-export INDSTOCKS_TOKEN=your_token_here
+# 2. Add your environment variables to a `.env` in the root backend
+## (See Environment Variables below)
+cp .env.example .env
 
-# 3. Start the backend
-python main.py
-
-# 4. Test it (during market hours)
-curl http://localhost:8000/api/debug/NIFTY
+# 3. Boot the full application Stack (React + Python + DB)
+./start.sh
 ```
 
 **Market Hours:** Monday–Friday, 9:15 AM – 3:30 PM IST  
-All endpoints return a `market_status` field so you always know if the data is live.
+Once active, navigate your browser to `http://localhost:5175`.
 
 ---
 
-## 📡 API Endpoints
+## ⚙️ Environment Variables (`.env`)
 
-| Endpoint | Description |
-|---|---|
-| `GET /health` | Backend status + market hours |
-| `GET /api/market-status` | Current IST time and market open/close |
-| `GET /api/scan` | Scan all F&O stocks, ranked by score |
-| `GET /api/chain/{SYMBOL}` | Full option chain for a stock |
-| `GET /api/chain/{SYMBOL}?expiry=06-Mar-2025` | Chain filtered by expiry |
-| `GET /api/top-picks` | Best single option pick across all stocks |
-| `GET /api/debug/{SYMBOL}` | Diagnose NSE connection for one symbol |
-| `GET /docs` | Interactive API explorer |
-
----
-
-## 🧠 How Stocks Are Scored
-
-Every F&O stock gets a **Stock Score (0–100)** computed from its full option chain. Here is exactly how it works.
-
-### Step 1 — Fetch the Full Chain from NSE
-
-For each stock, the scanner fetches the complete option chain from NSE's API. This gives us all strikes across all expiries with OI, volume, IV, and change data for both CE and PE sides.
-
-### Step 2 — Compute Four Factors
-
----
-
-#### Factor 1: PCR (Put-Call Ratio) — max 20 pts
-
-```
-PCR = Total PE Open Interest / Total CE Open Interest
-```
-
-PCR is used as a **contrarian indicator**:
-
-| PCR Value | Crowd Sentiment | Signal | Points |
-|---|---|---|---|
-| > 1.5 | Too many puts — crowd overly bearish | 🟢 BULLISH | 20 pts |
-| 0.7 – 1.5 | Balanced — no clear edge | 🟡 NEUTRAL | 5 pts |
-| < 0.7 | Too many calls — crowd overly bullish | 🔴 BEARISH | 15 pts |
-
-> **Why contrarian?** When too many traders are positioned one way, the market tends to move against them. High PCR = bears are crowded = fuel for a squeeze upward.
-
----
-
-#### Factor 2: OI Change % — max 25 pts
-
-```
-OI Change % = (Change in OI / Open Interest) × 100
-Averaged across all strikes and both CE + PE sides
-```
-
-Rising open interest means new money is entering the market — this confirms the strength of the current trend.
-
-```
-Score = min(25, |avg OI Change %| × 2)
-```
-
-| OI Change | Meaning | Score |
-|---|---|---|
-| High positive change | New positions being built | Up to 25 pts |
-| Flat | No new conviction | ~5 pts |
-| Falling OI | Positions being closed — weak signal | Near 0 pts |
-
----
-
-#### Factor 3: Volume/OI Ratio (Vol Spike) — max 20 pts
-
-```
-Vol Spike = (Total CE Volume + Total PE Volume) / (Total CE OI + Total PE OI)
-Capped at 10×
-```
-
-This ratio measures how actively the chain is being traded relative to existing positions. A spike means institutional players are making large moves today.
-
-```
-Score = min(20, Vol Spike × 20)
-```
-
-| Ratio | Meaning | Score |
-|---|---|---|
-| > 1.0 | Volume exceeds open interest — very active | High |
-| 0.3 – 1.0 | Normal activity | Medium |
-| < 0.1 | Quiet — low conviction | Low |
-
----
-
-#### Factor 4: ATM Implied Volatility — max 15 pts
-
-The IV of the ATM strike is used as a measure of option cheapness.
-
-| ATM IV | Meaning | Score |
-|---|---|---|
-| 15% – 25% | Cheap options — ideal entry | 15 pts |
-| 25% – 50% | Moderate — acceptable | 10 pts |
-| > 50% | Expensive — high risk | 5 pts |
-| < 15% | Suspiciously low — possibly stale data | 10 pts |
-
----
-
-#### Final Stock Score Formula
-
-```
-Stock Score = PCR Score + OI Change Score + Vol Score + IV Score
-              (Capped at 100)
-```
-
-Stocks with **Score ≥ 70** are considered strong signals worth deeper analysis.
-
----
-
-## 🎯 How Top Picks Are Selected
-
-Once stocks are ranked, the scanner selects the best individual option strike to trade using a separate **Strike Score (0–100)**.
-
-### Strike Scoring — 4 Components
-
----
-
-#### Component 1: OI Change % at This Strike — max 30 pts
-
-```
-Strike OI Change % = (Change in OI at this strike / OI at this strike) × 100
-Score = min(30, OI Change % × 2)
-```
-
-Rising OI at a specific strike is the strongest signal — it means smart money is actively building positions there right now.
-
----
-
-#### Component 2: Volume at This Strike — max 20 pts
-
-```
-Score = min(20, Volume / 100,000 × 20)
-```
-
-100,000 contracts or more = full score. This filters out illiquid strikes where the bid-ask spread is too wide to trade efficiently.
-
----
-
-#### Component 3: IV Level at This Strike — max 20 pts
-
-| IV Range | Score | Reasoning |
-|---|---|---|
-| 15% – 25% | 20 pts | Sweet spot — cheap but real volatility |
-| 25% – 40% | 12 pts | Moderate premium |
-| 40% – 60% | 6 pts | Expensive |
-| > 60% | 2 pts | Very expensive — event risk |
-| < 15% | 10 pts | May be stale or illiquid |
-
----
-
-#### Component 4: ATM Proximity — max 30 pts
-
-```
-Strikes Away = |Spot Price − Strike Price| / Strike Interval
-Score = max(0, 30 − Strikes Away × 5)
-```
-
-The closer the strike to the current spot price, the higher the score. ATM options offer the best combination of delta (directional exposure) and gamma (how fast delta changes).
-
-Strike intervals are dynamically calculated per instrument — not hardcoded:
-
-| Spot Price Range | Interval Used |
-|---|---|
-| > 40,000 (BANKNIFTY range) | 100 |
-| 20,000 – 40,000 (NIFTY range) | 50 |
-| 5,000 – 20,000 | 50 |
-| 2,000 – 5,000 | 20 |
-| 1,000 – 2,000 | 10 |
-| < 1,000 | 5 |
-
----
-
-#### Final Strike Score Formula
-
-```
-Strike Score = OI Change Score + Volume Score + IV Score + ATM Proximity Score
-               (Capped at 100)
-```
-
----
-
-### The Full Top Picks Pipeline
-
-```
-1.  Scan all F&O stocks  →  compute Stock Score for each
-2.  Keep stocks with Stock Score ≥ 50
-3.  For each qualifying stock, fetch the full option chain
-4.  Score every CE and PE strike using the Strike Score formula
-5.  Take the top 2 CE and top 2 PE strikes per stock
-6.  Sort all picks globally by Strike Score descending
-7.  Return the top N picks
-```
-
-The result is a ranked list of the most actionable options across the entire F&O universe, updated every time you call the API.
-
----
-
-## 📊 Reading the Results
-
-### Scanner Response (`/api/scan`)
-
-```json
-{
-  "symbol":     "RELIANCE",
-  "ltp":        1432.50,
-  "signal":     "BULLISH",
-  "pcr":        1.82,
-  "iv":         18.4,
-  "oi_change":  6.3,
-  "vol_spike":  0.74,
-  "score":      78
-}
-```
-
-| Field | What it means |
-|---|---|
-| `signal` | BULLISH / BEARISH / NEUTRAL — derived from PCR (contrarian) |
-| `pcr` | Put-Call Ratio — above 1.5 triggers BULLISH signal |
-| `iv` | ATM implied volatility % |
-| `oi_change` | Average OI change % across all strikes |
-| `vol_spike` | Volume-to-OI ratio — higher means more institutional activity |
-| `score` | Overall stock signal strength 0–100 |
-
----
-
-### Chain Response — Top Pick (`/api/chain/{SYMBOL}`)
-
-```json
-{
-  "type":        "CE",
-  "strike":      1440,
-  "ltp":         28.50,
-  "iv":          19.2,
-  "oi_chg_pct":  12.4,
-  "volume":      185000,
-  "score":       84
-}
-```
-
-| Field | What it means |
-|---|---|
-| `type` | CE (Call Option) or PE (Put Option) |
-| `strike` | The strike price |
-| `ltp` | Last traded price of this option |
-| `iv` | Implied volatility at this specific strike |
-| `oi_chg_pct` | OI change % at this strike — the key signal |
-| `volume` | Contracts traded today at this strike |
-| `score` | Strike signal strength 0–100 |
-
----
-
-## 🔒 Security
-
-- Never commit your `.env` file or token to git
-- Add `.env`, `venv/`, `node_modules/` to `.gitignore`
-- Regenerate your IndStocks token at [indstocks.com/app/api-trading](https://indstocks.com/app/api-trading) if it is ever exposed
-
----
-
-## ⚙️ Environment Variables
+For the application to function perfectly, configure these keys inside a `.env` file within your folder.
 
 | Variable | Description |
 |---|---|
-| `INDSTOCKS_TOKEN` | Your IndStocks JWT token for live LTP data |
+| `INDSTOCKS_TOKEN` | (Optional but recommended) Your IndStocks JWT for real-time underlying Spot LTP fetching fallback. |
+| `TELEGRAM_BOT_TOKEN` | Generated natively via `@BotFather` on Telegram. The bot token authorizing the notification pipeline. |
+| `TELEGRAM_CHAT_ID` | Your personal or group chat destination ID where the Python engine formats the >70 Score setups. |
 
 ---
 
-## 🐛 Troubleshooting
-
-**`strike_count: 0` on debug endpoint**  
-NSE returns empty data outside market hours (9:15 AM – 3:30 PM IST, Mon–Fri). This is expected.
-
-**`403` errors in logs**  
-NSE's Akamai bot protection blocked the session. The scanner auto-refreshes cookies on 403. If it persists, restart the backend.
-
-**IndStocks `401 Unauthorized`**  
-Your token has expired. Regenerate it at indstocks.com.
-
-**`ltp: 0` for all stocks**  
-IndStocks token is not set or invalid. LTP automatically falls back to the NSE spot price from the chain data.
+## 🔒 Limitations & Security
+*   **SQLite DB Persistence:** The entire database sits as a simple local `trades.db` file. No cloud required. Keep backups if using it heavily over months.
+*   **Akamai Anti-Bot Handling:** The NSE applies extreme throttling on scraping its Option Chains. `main.py` utilizes `curl_cffi` to mimic Chrome TLS fingerprints to circumvent basic scraping bans, rotating headers constantly. Overuse (e.g. infinite loops under 1 second apart) can lead to temporary IP blocks.

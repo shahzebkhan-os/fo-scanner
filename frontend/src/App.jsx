@@ -58,7 +58,13 @@ export default function App() {
   const [stocks, setStocks] = useState([]);
   const [selected, setSelected] = useState(null);
   const [chain, setChain] = useState(null);
-  const [expiry, setExpiry] = useState(null);
+  const [expiry, setExpiry] = useState("");
+
+  // Backtester states
+  const [btData, setBtData] = useState(null);
+  const [btLoading, setBtLoading] = useState(false);
+  const [btForm, setBtForm] = useState({ mode: 'db', tp: 40, sl: 20, score: 75 });
+
   const [tab, setTab] = useState("scanner");
   const [filter, setFilter] = useState("ALL");
   const [sortBy, setSortBy] = useState("score");
@@ -75,7 +81,39 @@ export default function App() {
   const [paperStats, setPaperStats] = useState(null);
   const [activeTrades, setActiveTrades] = useState([]);
   const [closedTrades, setClosedTrades] = useState([]);
+  const [trackedPicks, setTrackedPicks] = useState([]);
   const [loadingPaper, setLoadingPaper] = useState(false);
+  const [sortConfig, setSortConfig] = useState({ key: 'entry_time', direction: 'desc' });
+
+  const sortedTrackedPicks = React.useMemo(() => {
+    let items = [...trackedPicks];
+    if (sortConfig !== null) {
+      items.sort((a, b) => {
+        let aVal = a[sortConfig.key];
+        let bVal = b[sortConfig.key];
+        if (sortConfig.key === 'pnlPct') {
+          aVal = (((a.current_price || a.entry_price) - a.entry_price) / a.entry_price) * 100;
+          bVal = (((b.current_price || b.entry_price) - b.entry_price) / b.entry_price) * 100;
+        } else if (sortConfig.key === 'buy_total') {
+          aVal = a.entry_price * (a.lot_size || 0);
+          bVal = b.entry_price * (b.lot_size || 0);
+        } else if (sortConfig.key === 'ltp_total') {
+          aVal = (a.current_price || a.entry_price) * (a.lot_size || 0);
+          bVal = (b.current_price || b.entry_price) * (b.lot_size || 0);
+        }
+        if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return items;
+  }, [trackedPicks, sortConfig]);
+
+  const requestSort = (key) => {
+    let direction = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
+    setSortConfig({ key, direction });
+  };
 
   // ── Check backend health ──
   useEffect(() => {
@@ -148,18 +186,101 @@ export default function App() {
   const fetchPaperTrades = async () => {
     setLoadingPaper(true);
     try {
-      const [st, act, hist] = await Promise.all([
+      const [st, act, hist, trk] = await Promise.all([
         fetch(`${API}/paper-trades/stats`).then(r => r.json()),
         fetch(`${API}/paper-trades/active`).then(r => r.json()),
         fetch(`${API}/paper-trades/history`).then(r => r.json()),
+        fetch(`${API}/tracked-picks`).then(r => r.json()),
       ]);
       setPaperStats(st);
       setActiveTrades(act || []);
       setClosedTrades(hist || []);
+      setTrackedPicks(trk?.data || []);
     } catch (e) {
       console.error("Failed to fetch paper trades", e);
     } finally {
       setLoadingPaper(false);
+    }
+  };
+
+  const trackPick = async (symbol, pick) => {
+    try {
+      const r = await fetch(`${API}/track-pick`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol, type: pick.type, strike: pick.strike, entry_price: pick.ltp, score: pick.score })
+      });
+      const data = await r.json();
+      if (data.status === "success") {
+        fetchPaperTrades();
+      }
+    } catch (e) {
+      console.error("Failed to track this Option.");
+    }
+  };
+
+  const trackAllPicks = async () => {
+    let count = 0;
+    const targets = [];
+    stocks.forEach(s => {
+      (s.top_picks || []).forEach(p => {
+        if (p.score >= 60) targets.push({ symbol: s.symbol, pick: p });
+      });
+    });
+
+    if (targets.length === 0) return;
+
+    for (const t of targets) {
+      try {
+        const r = await fetch(`${API}/track-pick`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ symbol: t.symbol, type: t.pick.type, strike: t.pick.strike, entry_price: t.pick.ltp, score: t.pick.score })
+        });
+        const data = await r.json();
+        if (data.status === "success") count++;
+      } catch (e) { }
+    }
+    fetchPaperTrades();
+  };
+
+  const untrackPick = async (tradeId) => {
+    try {
+      const r = await fetch(`${API}/track-pick/${tradeId}`, { method: "DELETE" });
+      const data = await r.json();
+      if (data.status === "success") fetchPaperTrades();
+    } catch (e) {
+      console.error("Failed to communicate with server.");
+    }
+  };
+
+  const untrackAllPicks = async () => {
+    if (!confirm("Are you sure you want to stop tracking ALL options?")) return;
+    try {
+      const r = await fetch(`${API}/tracked-picks`, { method: "DELETE" });
+      const data = await r.json();
+      if (data.status === "success") fetchPaperTrades();
+    } catch (e) {
+      console.error("Failed to communicate with server.");
+    }
+  };
+
+  const runBacktest = async () => {
+    setBtLoading(true);
+    setBtData(null);
+    try {
+      const resp = await fetch(`${API}/backtest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: btForm.mode, tp: Number(btForm.tp), sl: Number(btForm.sl), score: Number(btForm.score) })
+      });
+      if (!resp.ok) throw new Error("Backtest failed to run");
+      setBtData(await resp.json());
+    } catch (e) {
+      console.error(e);
+      alert("Error running backtest: " + e.message);
+    } finally {
+      setBtLoading(false);
     }
   };
 
@@ -305,7 +426,14 @@ python main.py
 
       {/* Nav */}
       <div style={S.nav}>
-        {[['scanner', '▦ STOCK SCANNER'], ['chain', '⊞ OPTION CHAIN'], ['picks', '★ TOP PICKS'], ['all_picks', '★★ ALL PICKS'], ['paper', '📈 PAPER TRADING']].map(([id, label]) => (
+        {[
+          { id: 'scanner', label: '▦ STOCK SCANNER' },
+          { id: 'chain', label: '⊞ OPTION CHAIN' },
+          { id: 'picks', label: '★ TOP PICKS' },
+          { id: 'all_picks', label: '★★ ALL PICKS' },
+          { id: 'paper', label: '📈 PAPER TRADING' },
+          { id: 'backtester', label: '🧪 BACKTESTER' }
+        ].map(({ id, label }) => (
           <button key={id} style={S.navBtn(tab === id)} onClick={() => setTab(id)}>{label}</button>
         ))}
         {selected && (
@@ -520,6 +648,11 @@ python main.py
                       <div style={{ marginTop: 16 }}>
                         <div style={{ fontSize: 9, color: '#4a6278', fontFamily: FONT, marginBottom: 6, letterSpacing: '0.1em' }}>SIGNAL SCORE</div>
                         <ScoreBar score={pick.score} />
+                        {pick.score >= 60 && (
+                          <button onClick={() => trackPick(chain.symbol, pick)} style={{ ...S.btn(true), width: '100%', marginTop: 12, padding: 8 }}>
+                            ★ TRACK LIVE CHG%
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -535,7 +668,7 @@ python main.py
                       ['Low IV', 'Cheaper options = better risk/reward ratio'],
                       ['ATM Proximity', 'Near-ATM = best delta, less theta decay'],
                     ].map(([t, d]) => (
-                      <div key={t} style={{ padding: '8px 12px', background: '#080c10', borderRadius: 6, borderLeft: '2px solid #1e3a5f' }}>
+                      <div key={t} style={{ padding: '8px 12px', background: '#080c10', borderLeft: '2px solid #1e3a5f' }}>
                         <div style={{ fontFamily: FONT, fontSize: 11, fontWeight: 600, color: '#c9d4e0', marginBottom: 2 }}>{t}</div>
                         <div style={{ fontSize: 11, color: '#4a6278' }}>{d}</div>
                       </div>
@@ -556,9 +689,14 @@ python main.py
                 <span style={{ color: '#00ff88', fontSize: 16, fontWeight: 700 }}>{stocks.length}</span>
                 <span style={{ color: '#4a6278', fontSize: 12 }}> SCANNED STOCKS</span>
               </div>
-              <button onClick={downloadAllPicks} style={{ ...S.btn(true), padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 6 }}>
-                ↓ DOWNLOAD ALL PICKS CSV
-              </button>
+              <div style={{ display: 'flex', gap: 12 }}>
+                <button onClick={trackAllPicks} style={{ ...S.btn(true, '#00cfff'), padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
+                  ★ TRACK ALL &gt;60 SCORE
+                </button>
+                <button onClick={downloadAllPicks} style={{ ...S.btn(true), padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  ↓ DOWNLOAD ALL PICKS CSV
+                </button>
+              </div>
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
@@ -587,6 +725,11 @@ python main.py
                           <div style={{ textAlign: 'right' }}>
                             <div style={{ fontSize: 9, color: '#4a6278', fontFamily: FONT }}>SCORE</div>
                             <div style={{ color: p.score >= 70 ? '#00ff88' : p.score >= 45 ? '#f0c040' : '#ff4d6d', fontFamily: FONT, fontWeight: 700, fontSize: 13 }}>{p.score}</div>
+                            {p.score >= 60 && (
+                              <button onClick={() => trackPick(s.symbol, p)} style={{ ...S.btn(true, '#00cfff'), fontSize: 9, padding: '2px 6px', marginTop: 4 }}>
+                                TRACK
+                              </button>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -611,9 +754,9 @@ python main.py
               <>
                 <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
                   {[
-                    { label: 'TOTAL TRADES', val: paperStats?.total_trades || 0, color: '#c9d4e0' },
+                    { label: 'CLOSED TRADES', val: paperStats?.total_closed || 0, color: '#c9d4e0' },
                     { label: 'WIN RATE', val: `${paperStats?.win_rate_pct || 0}%`, color: (paperStats?.win_rate_pct || 0) >= 50 ? '#00ff88' : '#ff4d6d' },
-                    { label: 'NET PnL', val: `₹${paperStats?.total_pnl || 0}`, color: (paperStats?.total_pnl || 0) >= 0 ? '#00ff88' : '#ff4d6d' },
+                    { label: 'NET PnL', val: `${(paperStats?.total_pnl_pct || 0) > 0 ? '+' : ''}${paperStats?.total_pnl_pct || 0}%`, color: (paperStats?.total_pnl_pct || 0) >= 0 ? '#00ff88' : '#ff4d6d' },
                     { label: 'ACTIVE TRADES', val: activeTrades.length, color: '#f0c040' },
                   ].map(st => (
                     <div key={st.label} style={{ ...S.card, minWidth: 140, flex: '1 1 auto', padding: '16px' }}>
@@ -624,8 +767,75 @@ python main.py
                 </div>
 
                 <div style={{ marginBottom: 24 }}>
+                  <div style={{ fontFamily: FONT, color: '#00cfff', fontSize: 14, fontWeight: 700, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+                    ★ LIVE TRACKED PICKS ({trackedPicks.length})
+                    <button onClick={fetchPaperTrades} style={{ ...S.btn(), padding: '2px 8px' }}>⟳ REFRESH</button>
+                    {trackedPicks.length > 0 && (
+                      <button onClick={untrackAllPicks} style={{ ...S.btn(false), padding: '2px 8px', borderColor: '#ff4d6d', color: '#ff4d6d' }}>
+                        EXIT ALL TRACKED
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ background: '#0a0f15', border: '1px solid #1e2d40', borderRadius: 8, overflow: 'hidden' }}>
+                    <table style={S.table}>
+                      <thead>
+                        <tr style={{ background: '#080c10' }}>
+                          <th onClick={() => requestSort('entry_time')} style={{ ...S.th, cursor: 'pointer' }}>TRACE {sortConfig.key === 'entry_time' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestSort('symbol')} style={{ ...S.th, cursor: 'pointer' }}>SYMBOL {sortConfig.key === 'symbol' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestSort('score')} style={{ ...S.th, cursor: 'pointer' }}>SCORE {sortConfig.key === 'score' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestSort('stock_price')} style={{ ...S.th, cursor: 'pointer' }}>SPOT {sortConfig.key === 'stock_price' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestSort('lot_size')} style={{ ...S.th, cursor: 'pointer' }}>LOT QTY {sortConfig.key === 'lot_size' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestSort('type')} style={{ ...S.th, cursor: 'pointer' }}>TYPE {sortConfig.key === 'type' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestSort('strike')} style={{ ...S.th, cursor: 'pointer' }}>STRIKE {sortConfig.key === 'strike' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestSort('buy_total')} style={{ ...S.th, cursor: 'pointer' }}>BUY TOTAL {sortConfig.key === 'buy_total' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestSort('ltp_total')} style={{ ...S.th, cursor: 'pointer' }}>CURRENT TOTAL {sortConfig.key === 'ltp_total' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th onClick={() => requestSort('pnlPct')} style={{ ...S.th, cursor: 'pointer' }}>MANUAL PnL% {sortConfig.key === 'pnlPct' ? (sortConfig.direction === 'asc' ? '↑' : '↓') : ''}</th>
+                          <th style={S.th}>ACTION</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedTrackedPicks.length === 0 ? (
+                          <tr><td colSpan={12} style={{ ...S.td, textAlign: 'center', color: '#4a6278' }}>No active tracked picks. Search &gt;60 score Top Picks to add.</td></tr>
+                        ) : sortedTrackedPicks.map(t => {
+                          const ltp = t.current_price || t.entry_price;
+                          const pnlPct = ((ltp - t.entry_price) / t.entry_price) * 100;
+                          const spot = t.stock_price || 0;
+                          const buyTotal = t.entry_price * (t.lot_size || 0);
+                          const ltpTotal = ltp * (t.lot_size || 0);
+                          return (
+                            <tr key={t.id}>
+                              <td style={{ ...S.td, color: '#8899aa' }}>{t.entry_time.split('T')[1].substring(0, 5)}</td>
+                              <td style={{ ...S.td, color: '#00cfff', fontWeight: 700 }}>{t.symbol}</td>
+                              <td style={{ ...S.td }}>
+                                <div style={{ display: 'inline-block', padding: '2px 6px', borderRadius: 4, background: t.score >= 70 ? '#00ff8822' : t.score >= 50 ? '#f0c04022' : '#ff4d6d22', color: t.score >= 70 ? '#00ff88' : t.score >= 50 ? '#f0c040' : '#ff4d6d', fontWeight: 700 }}>
+                                  {t.score || '-'}
+                                </div>
+                              </td>
+                              <td style={{ ...S.td, color: '#c9d4e0' }}>₹{spot.toFixed(2)}</td>
+                              <td style={{ ...S.td, color: '#8899aa' }}>{t.lot_size || '-'}</td>
+                              <td style={S.td}><Badge label={t.type} color={t.type === 'CE' ? '#00ff88' : '#ff4d6d'} /></td>
+                              <td style={{ ...S.td, color: '#f0c040' }}>{t.strike}</td>
+                              <td style={{ ...S.td, color: '#c9d4e0' }}>₹{buyTotal > 0 ? buyTotal.toFixed(2) : t.entry_price.toFixed(2)}</td>
+                              <td style={{ ...S.td, color: '#00cfff', fontWeight: 700 }}>₹{ltpTotal > 0 ? ltpTotal.toFixed(2) : ltp.toFixed(2)}</td>
+                              <td style={{ ...S.td, color: clr(pnlPct), fontWeight: 700 }}>
+                                {pct(pnlPct)} <span style={{ fontSize: '0.85em', opacity: 0.8, marginLeft: 4 }}>({pnlPct >= 0 ? '+' : ''}₹{Math.abs((ltpTotal > 0 ? ltpTotal : ltp) - (buyTotal > 0 ? buyTotal : t.entry_price)).toFixed(2)})</span>
+                              </td>
+                              <td style={S.td}>
+                                <button onClick={() => untrackPick(t.id)} style={{ ...S.btn(false), padding: '4px 8px', fontSize: 10, borderColor: '#ff4d6d', color: '#ff4d6d' }}>
+                                  EXIT TRACK
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 24 }}>
                   <div style={{ fontFamily: FONT, color: '#e0eaf5', fontSize: 14, fontWeight: 700, marginBottom: 12 }}>
-                    ACTIVE TRADES ({activeTrades.length}) <button onClick={fetchPaperTrades} style={{ ...S.btn(), padding: '2px 8px', marginLeft: 10 }}>⟳ REFRESH</button>
+                    ACTIVE DB ALGO TRADES ({activeTrades.length})
                   </div>
                   <div style={{ background: '#0a0f15', border: '1px solid #1e2d40', borderRadius: 8, overflow: 'hidden' }}>
                     <table style={S.table}>
@@ -677,9 +887,9 @@ python main.py
                             <td style={{ ...S.td, color: '#f0c040' }}>{t.strike}</td>
                             <td style={{ ...S.td, color: '#8899aa' }}>₹{t.entry_price}</td>
                             <td style={{ ...S.td, color: '#c9d4e0' }}>₹{t.exit_price}</td>
-                            <td style={{ ...S.td, color: clr(t.pnl), fontWeight: 700 }}>₹{t.pnl}</td>
+                            <td style={{ ...S.td, color: clr(t.pnl_abs), fontWeight: 700 }}>₹{t.pnl_abs?.toFixed(2) || 0}</td>
                             <td style={{ ...S.td, color: clr(t.pnl_pct) }}>{pct(t.pnl_pct)}</td>
-                            <td style={{ ...S.td, color: '#4a6278', fontSize: 10 }}>{t.reason}</td>
+                            <td style={{ ...S.td, color: '#4a6278', fontSize: 10 }}>{t.exit_reason || t.reason}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -687,6 +897,139 @@ python main.py
                   </div>
                 </div>
               </>
+            )}
+          </div>
+        )}
+
+        {/* ── BACKTESTER TAB ── */}
+        {tab === 'backtester' && (
+          <div className="slide-in">
+            <div style={{ background: '#0a0f15', border: '1px solid #1e2d40', borderRadius: 8, padding: 24, marginBottom: 24 }}>
+              <h2 style={{ fontFamily: FONT, color: '#00ff88', marginBottom: 16 }}>Strategy Simulator</h2>
+              <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'center' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ color: '#8899aa', fontSize: 12, fontFamily: FONT }}>TEST MODE</label>
+                  <select
+                    value={btForm.mode} onChange={e => setBtForm({ ...btForm, mode: e.target.value })}
+                    style={{ background: '#0d131a', color: '#fff', border: '1px solid #1e2d40', padding: '8px 12px', borderRadius: 4, fontFamily: FONT, width: 220 }}
+                  >
+                    <option value="db">Replay Past Paper Trades</option>
+                    <option value="live">Scan Now & Test (Top 10)</option>
+                  </select>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ color: '#00ff88', fontSize: 12, fontFamily: FONT }}>TAKE PROFIT %</label>
+                  <input type="number" value={btForm.tp} onChange={e => setBtForm({ ...btForm, tp: e.target.value })} style={{ background: '#0d131a', color: '#00ff88', border: '1px solid #1e2d40', padding: '8px 12px', borderRadius: 4, fontFamily: FONT, width: 100 }} />
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ color: '#ff4d6d', fontSize: 12, fontFamily: FONT }}>STOP LOSS %</label>
+                  <input type="number" value={btForm.sl} onChange={e => setBtForm({ ...btForm, sl: e.target.value })} style={{ background: '#0d131a', color: '#ff4d6d', border: '1px solid #1e2d40', padding: '8px 12px', borderRadius: 4, fontFamily: FONT, width: 100 }} />
+                </div>
+
+                {btForm.mode === 'live' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <label style={{ color: '#f0c040', fontSize: 12, fontFamily: FONT }}>MIN SCORE (0-100)</label>
+                    <input type="number" value={btForm.score} onChange={e => setBtForm({ ...btForm, score: e.target.value })} style={{ background: '#0d131a', color: '#f0c040', border: '1px solid #1e2d40', padding: '8px 12px', borderRadius: 4, fontFamily: FONT, width: 100 }} />
+                  </div>
+                )}
+
+                <button onClick={runBacktest} disabled={btLoading} style={{ ...S.btn('#2196f3'), height: 42, padding: '0 24px', alignSelf: 'flex-end', opacity: btLoading ? 0.5 : 1 }}>
+                  {btLoading ? <Spinner /> : '▶ RUN BACKTEST'}
+                </button>
+              </div>
+            </div>
+
+            {btData && btData.trades && btData.trades.length === 0 && (
+              <div style={{ ...S.card, padding: 32, textAlign: 'center', color: '#8899aa', fontFamily: FONT, marginTop: 24 }}>
+                <span style={{ fontSize: 24, display: 'block', marginBottom: 12 }}>📭</span>
+                No historical trades matched these criteria for the simulation.
+              </div>
+            )}
+
+            {btData && btData.trades && btData.trades.length > 0 && btData.stats && (
+              <div className="slide-in">
+                {/* Metrics Row */}
+                <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+                  {[
+                    { label: 'TOTAL TRADES', val: btData.stats.total_trades, color: '#c9d4e0' },
+                    { label: 'WIN RATE', val: `${btData.stats.win_rate_pct}%`, color: btData.stats.win_rate_pct >= 50 ? '#00ff88' : '#ff4d6d' },
+                    { label: 'NET RETURN', val: `${pct(btData.stats.total_return_pct)}`, color: btData.stats.total_return_pct >= 0 ? '#00ff88' : '#ff4d6d' },
+                    { label: 'PROFIT FACTOR', val: btData.stats.profit_factor, color: btData.stats.profit_factor > 1.2 ? '#00ff88' : '#e0eaf5' },
+                  ].map(st => (
+                    <div key={st.label} style={{ ...S.card, minWidth: 140, flex: '1 1 auto', padding: '16px' }}>
+                      <div style={{ fontSize: 11, color: '#4a6278', fontFamily: FONT, letterSpacing: '0.1em', marginBottom: 8 }}>{st.label}</div>
+                      <div style={{ fontSize: 28, fontWeight: 700, color: st.color, fontFamily: FONT }}>{st.val}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Tables Grid */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 300px', gap: 20 }}>
+                  <div style={{ background: '#0a0f15', border: '1px solid #1e2d40', borderRadius: 8, overflow: 'hidden' }}>
+                    <div style={{ padding: '12px 16px', background: '#080c10', borderBottom: '1px solid #1e2d40', fontFamily: FONT, color: '#e0eaf5', fontSize: 13, fontWeight: 700 }}>
+                      SIMULATED TRADES
+                    </div>
+                    <div style={{ maxHeight: 500, overflowY: 'auto' }}>
+                      <table style={{ ...S.table, margin: 0 }}>
+                        <thead style={{ position: 'sticky', top: 0, background: '#080c10', zIndex: 1 }}>
+                          <tr>
+                            {['SYMBOL', 'STRIKE', 'ENTRY', 'EXIT', 'PnL %', 'REASON'].map(h => <th key={h} style={S.th}>{h}</th>)}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {btData.trades.map((t, i) => (
+                            <tr key={i} style={{ background: i % 2 === 0 ? '#0a0f15' : '#0c1219' }}>
+                              <td style={{ ...S.td, color: '#e0eaf5', fontWeight: 600 }}>{t.symbol} <span style={{ color: t.type === 'CE' ? '#00ff88' : '#ff4d6d' }}>{t.type}</span></td>
+                              <td style={{ ...S.td, color: '#f0c040' }}>{t.strike}</td>
+                              <td style={{ ...S.td, color: '#8899aa' }}>₹{t.entry_price}</td>
+                              <td style={{ ...S.td, color: '#c9d4e0' }}>₹{t.exit_price}</td>
+                              <td style={{ ...S.td, color: clr(t.pnl_pct), fontWeight: 700 }}>{pct(t.pnl_pct)}</td>
+                              <td style={{ ...S.td, color: '#4a6278', fontSize: 10 }}>{t.exit_reason}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Exit Breakdown Sidebar */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    <div style={{ ...S.card, padding: 16 }}>
+                      <h4 style={{ fontFamily: FONT, color: '#e0eaf5', fontSize: 12, marginBottom: 16 }}>EXIT BREAKDOWN</h4>
+                      {btData.stats.exit_breakdown.map((ex, i) => (
+                        <div key={i} style={{ marginBottom: 12 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontFamily: FONT, color: '#8899aa', marginBottom: 4 }}>
+                            <span>{ex.reason}</span>
+                            <span>{ex.count} ({ex.pct}%)</span>
+                          </div>
+                          <div style={{ width: '100%', height: 4, background: '#111820', borderRadius: 2 }}>
+                            <div style={{ width: `${ex.pct}%`, height: '100%', background: '#4a6278', borderRadius: 2 }} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div style={{ ...S.card, padding: 16 }}>
+                      <h4 style={{ fontFamily: FONT, color: '#e0eaf5', fontSize: 12, marginBottom: 16 }}>AVERAGES</h4>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontFamily: FONT, color: '#00ff88', marginBottom: 8 }}>
+                        <span>Avg Win</span><span>+{btData.stats.avg_win_pct}%</span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontFamily: FONT, color: '#ff4d6d', marginBottom: 8 }}>
+                        <span>Avg Loss</span><span>{btData.stats.avg_loss_pct}%</span>
+                      </div>
+                      <div style={{ borderTop: '1px solid #1e2d40', margin: '8px 0' }} />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontFamily: FONT, color: '#e0eaf5' }}>
+                        <span>Best Trade</span><span style={{ color: '#00ff88' }}>+{btData.stats.best_trade_pct}%</span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontFamily: FONT, color: '#e0eaf5', marginTop: 8 }}>
+                        <span>Worst Trade</span><span style={{ color: '#ff4d6d' }}>{btData.stats.worst_trade_pct}%</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             )}
           </div>
         )}
