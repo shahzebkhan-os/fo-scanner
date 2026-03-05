@@ -971,15 +971,27 @@ function PortfolioTab({ theme }) {
   const [openTrades, setOpenTrades] = useState([]);
   const [noteInput, setNoteInput] = useState({});
 
+  // ── Manual Trade Form ──
+  const [showForm, setShowForm] = useState(false);
+  const [lotSizes, setLotSizes] = useState({});
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [formSuccess, setFormSuccess] = useState("");
+  const [form, setForm] = useState({
+    symbol: "NIFTY", type: "CE", strike: "", entry_price: "", lots: 1, reason: "Manual"
+  });
+
   const load = async () => {
     setLoading(true);
     try {
-      const [p, o] = await Promise.all([
+      const [p, o, ls] = await Promise.all([
         apiFetch("/api/portfolio"),
         apiFetch("/api/paper-trades/active"),
+        apiFetch("/api/lot-sizes"),
       ]);
       setData(p);
       setOpenTrades(o);
+      setLotSizes(ls);
     } catch (e) { console.error(e); }
     setLoading(false);
   };
@@ -993,6 +1005,44 @@ function PortfolioTab({ theme }) {
     setNoteInput(prev => ({ ...prev, [tradeId]: "" }));
   };
 
+  const submitTrade = async (e) => {
+    e.preventDefault();
+    setFormError(""); setFormSuccess("");
+    if (!form.strike || !form.entry_price) { setFormError("Strike and entry price are required"); return; }
+    setSubmitting(true);
+    try {
+      const res = await fetch(`${API}/api/paper-trades`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...form, strike: +form.strike, entry_price: +form.entry_price, lots: +form.lots }),
+      });
+      const json = await res.json();
+      if (!res.ok) { setFormError(json.detail || "Error"); }
+      else {
+        const ls = lotSizes[form.symbol] || 1;
+        setFormSuccess(`✅ Trade added! ${form.lots} lot(s) × ${ls} = ${form.lots * ls} qty · ₹${json.capital?.toLocaleString("en-IN")} capital`);
+        setForm(f => ({ ...f, strike: "", entry_price: "", reason: "Manual" }));
+        load(); // refresh positions
+      }
+    } catch (ex) { setFormError(String(ex)); }
+    setSubmitting(false);
+  };
+
+  const lotSize = lotSizes[form.symbol] || 1;
+  const qty = (form.lots || 1) * lotSize;
+  const capital = form.entry_price ? ((+form.entry_price) * qty).toLocaleString("en-IN") : "—";
+
+  const inp = (extra = {}) => ({
+    style: {
+      background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 6,
+      color: theme.text, padding: "7px 10px", fontSize: 13, width: "100%", boxSizing: "border-box",
+      ...extra
+    }
+  });
+
+  const symbols = Object.keys(lotSizes).length ? Object.keys(lotSizes) : ["NIFTY", "BANKNIFTY", "FINNIFTY"];
+
+
   if (loading) return <Loader theme={theme} />;
   if (!data) return null;
 
@@ -1001,8 +1051,103 @@ function PortfolioTab({ theme }) {
 
   return (
     <div>
+      {/* ── Manual Paper Trade Form ── */}
+      <Card theme={theme} style={{ marginBottom: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontWeight: 600, fontSize: 13 }}>📝 Manual Paper Trade</div>
+          <button onClick={() => { setShowForm(f => !f); setFormError(""); setFormSuccess(""); }}
+            style={{
+              background: theme.accent, color: "#fff", border: "none", borderRadius: 5,
+              padding: "5px 14px", fontSize: 12, cursor: "pointer", fontWeight: 600
+            }}>
+            {showForm ? "✕ Close" : "+ New Trade"}
+          </button>
+        </div>
+
+        {showForm && (
+          <form onSubmit={submitTrade} style={{ marginTop: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10 }}>
+              {/* Symbol */}
+              <div>
+                <label style={{ fontSize: 10, color: theme.muted, display: "block", marginBottom: 3 }}>SYMBOL</label>
+                <select {...inp()} value={form.symbol}
+                  onChange={e => setForm(f => ({ ...f, symbol: e.target.value }))}>
+                  {symbols.sort().map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+
+              {/* Type CE/PE */}
+              <div>
+                <label style={{ fontSize: 10, color: theme.muted, display: "block", marginBottom: 3 }}>TYPE</label>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {["CE", "PE"].map(t => (
+                    <button key={t} type="button" onClick={() => setForm(f => ({ ...f, type: t }))}
+                      style={{
+                        flex: 1, padding: "7px 0", borderRadius: 6, fontWeight: 700, fontSize: 13,
+                        cursor: "pointer", border: "none",
+                        background: form.type === t ? (t === "CE" ? theme.green : theme.red) : theme.border,
+                        color: form.type === t ? "#fff" : theme.muted,
+                      }}>{t}</button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Strike */}
+              <div>
+                <label style={{ fontSize: 10, color: theme.muted, display: "block", marginBottom: 3 }}>STRIKE</label>
+                <input {...inp()} type="number" step="50" placeholder="e.g. 24500"
+                  value={form.strike} onChange={e => setForm(f => ({ ...f, strike: e.target.value }))} />
+              </div>
+
+              {/* Entry Price */}
+              <div>
+                <label style={{ fontSize: 10, color: theme.muted, display: "block", marginBottom: 3 }}>ENTRY PRICE (₹)</label>
+                <input {...inp()} type="number" step="0.05" placeholder="e.g. 120.50"
+                  value={form.entry_price} onChange={e => setForm(f => ({ ...f, entry_price: e.target.value }))} />
+              </div>
+
+              {/* Lots */}
+              <div>
+                <label style={{ fontSize: 10, color: theme.muted, display: "block", marginBottom: 3 }}>
+                  LOTS <span style={{ color: theme.accent }}>× {lotSize} = {qty} qty</span>
+                </label>
+                <input {...inp()} type="number" min="1" step="1"
+                  value={form.lots} onChange={e => setForm(f => ({ ...f, lots: e.target.value }))} />
+              </div>
+
+              {/* Reason */}
+              <div>
+                <label style={{ fontSize: 10, color: theme.muted, display: "block", marginBottom: 3 }}>REASON</label>
+                <input {...inp()} type="text" placeholder="Optional note"
+                  value={form.reason} onChange={e => setForm(f => ({ ...f, reason: e.target.value }))} />
+              </div>
+            </div>
+
+            {/* Live preview */}
+            <div style={{ marginTop: 10, fontSize: 12, color: theme.muted, display: "flex", gap: 20 }}>
+              <span>Lot size: <b style={{ color: theme.text }}>{lotSize}</b></span>
+              <span>Qty: <b style={{ color: theme.text }}>{qty}</b></span>
+              <span>Est. capital: <b style={{ color: theme.accent }}>₹{capital}</b></span>
+            </div>
+
+            {formError && <div style={{ marginTop: 8, color: theme.red, fontSize: 12 }}>⚠ {formError}</div>}
+            {formSuccess && <div style={{ marginTop: 8, color: theme.green, fontSize: 12 }}>{formSuccess}</div>}
+
+            <button type="submit" disabled={submitting}
+              style={{
+                marginTop: 14, background: theme.accent, color: "#fff", border: "none",
+                borderRadius: 6, padding: "9px 24px", fontWeight: 700, fontSize: 13,
+                cursor: submitting ? "not-allowed" : "pointer", opacity: submitting ? 0.6 : 1
+              }}>
+              {submitting ? "Adding…" : "Add Trade"}
+            </button>
+          </form>
+        )}
+      </Card>
+
       {/* Summary Cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12, marginBottom: 20 }}>
+
         {[
           ["Total P&L", `₹${stats.total_pnl?.toLocaleString("en-IN") || 0}`, stats.total_pnl >= 0 ? theme.green : theme.red],
           ["Unrealised", `₹${data.unrealised_pnl?.toLocaleString("en-IN") || 0}`, data.unrealised_pnl >= 0 ? theme.green : theme.red],

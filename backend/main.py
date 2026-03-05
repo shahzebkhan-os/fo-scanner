@@ -1022,6 +1022,51 @@ async def get_trade_history():
 async def get_trade_statistics():
     return db.get_trade_stats()
 
+# ── Lot sizes (used by manual trade form) ────────────────────────────────────
+
+@app.get("/api/lot-sizes")
+async def get_lot_sizes():
+    """Returns the lot size for every F&O symbol."""
+    return LOT_SIZES
+
+# ── Manual Paper Trade Entry ──────────────────────────────────────────────────
+
+from pydantic import BaseModel
+
+class ManualTradeRequest(BaseModel):
+    symbol:      str
+    type:        str          # "CE" or "PE"
+    strike:      float
+    entry_price: float
+    lots:        int   = 1
+    reason:      str   = "Manual"
+
+@app.post("/api/paper-trades")
+async def add_manual_trade(req: ManualTradeRequest):
+    """Manually enter a paper trade with lot count."""
+    if req.type not in ("CE", "PE"):
+        raise HTTPException(400, "type must be CE or PE")
+    if req.entry_price <= 0:
+        raise HTTPException(400, "entry_price must be > 0")
+    if req.lots < 1:
+        raise HTTPException(400, "lots must be >= 1")
+
+    lot_size = LOT_SIZES.get(req.symbol, 1)
+    reason   = f"{req.reason} | {req.lots} lot(s) × {lot_size} = {req.lots * lot_size} qty"
+    trade_id = db.add_trade(req.symbol, req.type, req.strike, req.entry_price, reason)
+    return {
+        "status":    "created",
+        "trade_id":  trade_id,
+        "symbol":    req.symbol,
+        "type":      req.type,
+        "strike":    req.strike,
+        "entry":     req.entry_price,
+        "lots":      req.lots,
+        "lot_size":  lot_size,
+        "qty":       req.lots * lot_size,
+        "capital":   round(req.entry_price * req.lots * lot_size, 2),
+    }
+
 
 # ── Backtester API ────────────────────────────────────────────────────────────
 
