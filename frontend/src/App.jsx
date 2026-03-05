@@ -638,7 +638,7 @@ function HeatmapTab({ theme }) {
   useEffect(() => { load(symbol); }, []);
 
   // Group heatmap by strike for bar chart
-  const byStrike: Record<number, { ce_oi: number, pe_oi: number }> = {};
+  const byStrike = {};
   heatmap.forEach(row => {
     if (!byStrike[row.strike]) byStrike[row.strike] = { ce_oi: 0, pe_oi: 0 };
     if (row.opt_type === "CE") byStrike[row.strike].ce_oi = Math.max(byStrike[row.strike].ce_oi, row.oi);
