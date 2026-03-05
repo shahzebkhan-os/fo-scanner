@@ -1424,20 +1424,28 @@ async def refresh_bulk_deals():
 from fastapi.responses import StreamingResponse
 import csv, io
 
+CSV_HEADERS = [
+    "id", "symbol", "type", "strike", "entry_price", "current_price",
+    "exit_price", "status", "pnl", "pnl_pct", "reason", "created_at", "updated_at"
+]
+
 @app.get("/api/paper-trades/export")
 async def export_trades():
-    """Exports all paper trades as a CSV file."""
+    """Exports all paper trades as a CSV file. Returns empty CSV with headers if no trades."""
     trades = db.get_all_trades()
-    if not trades:
-        raise HTTPException(404, "No trades to export")
+    output = io.StringIO()
 
-    output  = io.StringIO()
-    writer  = csv.DictWriter(output, fieldnames=trades[0].keys())
-    writer.writeheader()
-    writer.writerows(trades)
+    if trades:
+        writer = csv.DictWriter(output, fieldnames=trades[0].keys(), extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(trades)
+    else:
+        # Return empty CSV with standard headers so the download still works
+        writer = csv.DictWriter(output, fieldnames=CSV_HEADERS)
+        writer.writeheader()
+
     output.seek(0)
-
-    filename = f"fo_scanner_trades_{date.today().isoformat()}.csv"
+    filename = f"fo_scanner_trades_{datetime.now(IST).strftime('%Y-%m-%d')}.csv"
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
@@ -1782,29 +1790,7 @@ async def refresh_bulk_deals():
 
 # ── CSV Export ────────────────────────────────────────────────────────────────
 
-from fastapi.responses import StreamingResponse
-import csv, io
-
-@app.get("/api/paper-trades/export")
-async def export_trades():
-    """Exports all paper trades as a CSV file."""
-    from datetime import date as _date
-    trades = db.get_all_trades()
-    if not trades:
-        raise HTTPException(404, "No trades to export")
-
-    output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=trades[0].keys())
-    writer.writeheader()
-    writer.writerows(trades)
-    output.seek(0)
-
-    filename = f"fo_scanner_trades_{_date.today().isoformat()}.csv"
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
+# (export_trades is defined above near line 1422; duplicate removed)
 
 
 # ── FII/DII Data ──────────────────────────────────────────────────────────────
