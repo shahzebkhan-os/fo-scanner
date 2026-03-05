@@ -1363,7 +1363,7 @@ async def portfolio_dashboard():
 
     # Unrealised PnL on open positions
     unrealised = sum(
-        (t.get("current_price", t["entry_price"]) - t["entry_price"])
+        ((t.get("current_price") or t["entry_price"]) - t["entry_price"])
         * (t.get("lot_size") or 1)
         for t in open_trades
     )
@@ -1740,7 +1740,7 @@ async def portfolio_dashboard():
     open_trades = db.get_open_trades()
 
     unrealised = sum(
-        (t.get("current_price", t["entry_price"]) - t["entry_price"]) * (t.get("lot_size") or 1)
+        ((t.get("current_price") or t["entry_price"]) - t["entry_price"]) * (t.get("lot_size") or 1)
         for t in open_trades
     )
 
