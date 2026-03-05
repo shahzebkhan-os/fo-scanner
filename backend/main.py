@@ -656,10 +656,90 @@ async def fetch_nse_chain(symbol: str) -> dict:
 
 
 async def fetch_indstocks_ltp(symbols: list) -> dict:
-    if not INDSTOCKS_TOKEN or INDSTOCKS_TOKEN == "PASTE_YOUR_NEW_TOKEN_HERE":
-        log.warning("IndStocks token not set — skipping live LTP")
-        return {}
+    """
+    Fetch live LTP, volume, and % change for all symbols.
+    Primary: NSE market watch (no token needed).
+    Fallback: IndStocks API (if token is configured).
+    """
+    results = await _fetch_nse_market_watch(symbols)
+    if results:
+        return results
 
+    # Fallback to IndStocks
+    if INDSTOCKS_TOKEN and INDSTOCKS_TOKEN not in ("", "PASTE_YOUR_NEW_TOKEN_HERE"):
+        results = await _fetch_indstocks_ltp_v1(symbols)
+
+    return results
+
+
+async def _fetch_nse_market_watch(symbols: list) -> dict:
+    """Fetch live quotes from NSE market watch — no auth required."""
+    # NSE market watch accepts comma-separated symbols
+    INDEX_MAP = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK", "FINNIFTY": "NIFTY FIN SERVICE"}
+    results = {}
+
+    try:
+        # Use a throwaway httpx client with NSE cookies pre-seeded
+        nse_headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.nseindia.com/market-data/live-equity-market",
+        }
+        async with httpx.AsyncClient(timeout=10, headers=nse_headers) as client:
+            # Seed NSE cookies first
+            await client.get("https://www.nseindia.com", timeout=6)
+
+            # Fetch equity market watch (FO stocks)
+            fo_symbols = [s for s in symbols if s not in INDEX_MAP]
+            if fo_symbols:
+                try:
+                    r = await client.get(
+                        "https://www.nseindia.com/api/equity-stockIndices",
+                        params={"index": "SECURITIES IN F&O"},
+                        timeout=8,
+                    )
+                    if r.status_code == 200:
+                        for item in r.json().get("data", []):
+                            sym = item.get("symbol", "")
+                            if sym in symbols:
+                                results[sym] = {
+                                    "ltp":    item.get("lastPrice", 0),
+                                    "volume": item.get("totalTradedVolume", 0),
+                                    "change": item.get("pChange", 0),
+                                }
+                        log.info(f"NSE market watch: {len(results)} FO stock prices")
+                except Exception as e:
+                    log.warning(f"NSE FO stocks fetch error: {e}")
+
+            # Fetch index quotes
+            for sym, index_name in INDEX_MAP.items():
+                if sym not in symbols:
+                    continue
+                try:
+                    r = await client.get(
+                        "https://www.nseindia.com/api/equity-stockIndices",
+                        params={"index": index_name},
+                        timeout=6,
+                    )
+                    if r.status_code == 200:
+                        data = r.json()
+                        meta = data.get("metadata", {})
+                        results[sym] = {
+                            "ltp":    meta.get("last", 0),
+                            "volume": 0,
+                            "change": meta.get("percChange", 0),
+                        }
+                except Exception as e:
+                    log.warning(f"NSE index {sym} fetch error: {e}")
+
+    except Exception as e:
+        log.warning(f"NSE market watch error: {e}")
+
+    return results
+
+
+async def _fetch_indstocks_ltp_v1(symbols: list) -> dict:
+    """Fallback: IndStocks API (kept for backwards compatibility)."""
     headers = {"Authorization": f"Bearer {INDSTOCKS_TOKEN}"}
     results = {}
     async with httpx.AsyncClient(timeout=12) as client:
@@ -681,7 +761,7 @@ async def fetch_indstocks_ltp(symbols: list) -> dict:
                     }
                 log.info(f"IndStocks: {len(results)} prices")
             except Exception as e:
-                log.warning(f"IndStocks error: {e}")
+                log.debug(f"IndStocks fallback error: {e}")
     return results
 
 
