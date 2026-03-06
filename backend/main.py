@@ -39,253 +39,7 @@ def _maybe_reset_daily():
         _reset_daily_sets()
 
 
-# ── Strike interval per symbol (for accurate ATM proximity scoring) ───────────
-# Bug 1 fix: replaces the hardcoded /50 in compute_stock_score
-STRIKE_INTERVALS = {
-    "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25,
-    "RELIANCE": 20, "TCS": 50, "INFY": 20, "HDFCBANK": 10, "ICICIBANK": 10,
-    "SBIN": 5, "ADANIENT": 50, "WIPRO": 5, "AXISBANK": 10, "BAJFINANCE": 50,
-    "HCLTECH": 20, "LT": 20, "KOTAKBANK": 20, "TATAMOTORS": 5, "MARUTI": 100,
-    "SUNPHARMA": 20, "ITC": 5, "ONGC": 5, "POWERGRID": 5, "NTPC": 5,
-    "BPCL": 10, "GRASIM": 20, "TITAN": 50, "INDUSINDBK": 10, "ULTRACEMCO": 50,
-    "HEROMOTOCO": 50, "ASIANPAINT": 50, "MM": 20, "DRREDDY": 50, "DIVISLAB": 50,
-    "CIPLA": 10, "TECHM": 20, "TATASTEEL": 5, "BAJAJFINSV": 20, "NESTLEIND": 100,
-    "HINDALCO": 5, "COALINDIA": 5, "VEDL": 5, "JSWSTEEL": 10, "SAIL": 2,
-    "APOLLOHOSP": 50, "PIDILITIND": 50, "SIEMENS": 50, "HAVELLS": 20, "VOLTAS": 20,
-}
 
-def _get_interval(symbol: str) -> int:
-    return STRIKE_INTERVALS.get(symbol.upper(), 10)
-
-def _nearest_atm(spot: float, symbol: str) -> float:
-    iv = _get_interval(symbol)
-    return round(spot / iv) * iv
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 1.  score_option  — fixed
-# ══════════════════════════════════════════════════════════════════════════════
-# Bugs fixed:
-#   #1  strikePrice was always 0 (ATM proximity always scored 0)
-#   #3  volume baseline 10,000 was meaningless; now uses V/OI ratio
-#   #4  IV scoring rewarded near-zero IV; now rewards 15-40 sweet spot
-
-def score_option(side: dict, spot: float, symbol: str = "") -> int:
-    """
-    Score a single CE or PE option contract [0–100].
-
-    Caller MUST inject strikePrice into the dict before calling:
-        score_option({**ce_dict, "strikePrice": strike}, spot, symbol)
-
-    Components:
-      30 pts  OI momentum   — % OI build-up (requires oi > 100 guard)
-      25 pts  Activity      — V/OI ratio (self-scaling, works for all symbols)
-      20 pts  ATM proximity — decays over per-symbol strike intervals
-      15 pts  IV quality    — rewards 15–40 IV sweet spot
-      10 pts  Liquidity     — non-zero LTP guard
-    """
-    oi     = side.get("openInterest", 0) or 0
-    oi_chg = side.get("changeinOpenInterest", 0) or 0
-    vol    = side.get("totalTradedVolume", 0) or 0
-    iv     = side.get("impliedVolatility", 0) or 0
-    ltp    = side.get("lastPrice", 0) or 0
-    strike = side.get("strikePrice", 0) or 0   # ← Bug 1 fix: caller must inject this
-
-    score = 0
-
-    # 1. OI momentum: % build-up
-    if oi > 100:                                        # minimum OI guard avoids ÷0 noise
-        oi_pct = (oi_chg / oi) * 100
-        score += int(min(30, max(0, oi_pct * 1.5)))    # 20% build-up → 30 pts
-
-    # 2. Activity: V/OI ratio — self-scaling across all symbols  (Bug 3 fix)
-    if oi > 0:
-        v_oi = vol / oi
-        score += int(min(25, v_oi * 20))                # V/OI=1.25 → full 25 pts
-
-    # 3. ATM proximity using per-symbol interval  (Bug 1 fix)
-    if spot > 0 and strike > 0:
-        interval   = _get_interval(symbol) if symbol else 10
-        bands_away = abs(spot - strike) / max(interval, 1)
-        prox       = max(0.0, 1.0 - bands_away / 6.0)  # 0 pts beyond 6 strikes away
-        score     += int(prox * 20)
-
-    # 4. IV quality — sweet spot 15–40  (Bug 4 fix)
-    if iv > 0:
-        if 15 <= iv <= 40:
-            score += 15
-        elif iv < 15:
-            score += int(iv / 15 * 10)                  # ramping: near-zero IV = near-zero pts
-        else:
-            score += max(0, int(15 - (iv - 40) * 0.35)) # penalise very high IV gradually
-
-    # 5. Liquidity guard — zero-price = untradeable
-    if ltp > 0:
-        score += 10
-
-    return min(100, max(0, score))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 2.  compute_stock_score  — fixed
-# ══════════════════════════════════════════════════════════════════════════════
-# Bugs fixed:
-#   #1  ATM used round(spot/50)*50 — now uses per-symbol interval
-#   #2  vol_spike divided only by CE OI — now uses total OI
-#   #5  Signal was PCR-only and BEARISH scored less than BULLISH
-
-def compute_stock_score(chain_data: dict, spot: float, symbol: str = "") -> dict:
-    """
-    Returns composite stock-level analysis dict:
-        pcr, iv, oi_change, vol_spike (V/OI), signal, score [0-100],
-        top_picks, signal_reasons
-    """
-    records = chain_data.get("records", {}).get("data", [])
-
-    _empty = dict(
-        pcr=1.0, iv=0, oi_change=0, vol_spike=0.0,
-        signal="NEUTRAL", score=0, top_picks=[], signal_reasons=[]
-    )
-    if not records or spot <= 0:
-        return _empty
-
-    # Bug 1 fix: per-symbol ATM + band
-    atm_strike = _nearest_atm(spot, symbol)
-    interval   = _get_interval(symbol)
-    atm_band   = interval * 3                       # ±3 strikes = near-the-money zone
-
-    tce_oi = tpe_oi = tce_vol = tpe_vol = 0
-    tce_oi_chg = tpe_oi_chg = 0
-    oi_changes: list = []
-    atm_iv_ce = atm_iv_pe = 0.0
-    all_options: list = []
-
-    for row in records:
-        ce     = row.get("CE", {}) or {}
-        pe     = row.get("PE", {}) or {}
-        strike = row.get("strikePrice", 0) or 0
-
-        # Bug 1 fix: inject strikePrice so score_option can use it
-        ce_scored = {**ce, "strikePrice": strike}
-        pe_scored = {**pe, "strikePrice": strike}
-
-        ce_oi  = ce.get("openInterest", 0) or 0
-        pe_oi  = pe.get("openInterest", 0) or 0
-        ce_vol = ce.get("totalTradedVolume", 0) or 0
-        pe_vol = pe.get("totalTradedVolume", 0) or 0
-        ce_chg = ce.get("changeinOpenInterest", 0) or 0
-        pe_chg = pe.get("changeinOpenInterest", 0) or 0
-
-        tce_oi     += ce_oi;    tpe_oi     += pe_oi
-        tce_vol    += ce_vol;   tpe_vol    += pe_vol
-        tce_oi_chg += ce_chg;   tpe_oi_chg += pe_chg
-
-        for oi, chg in [(ce_oi, ce_chg), (pe_oi, pe_chg)]:
-            if oi > 100:
-                oi_changes.append(chg / oi * 100)
-
-        if abs(strike - atm_strike) <= atm_band:
-            if ce.get("impliedVolatility"):
-                atm_iv_ce = float(ce["impliedVolatility"])
-            if pe.get("impliedVolatility"):
-                atm_iv_pe = float(pe["impliedVolatility"])
-
-        # Bug 1 fix: pass symbol so score_option uses correct interval
-        ce_s = score_option(ce_scored, spot, symbol)
-        pe_s = score_option(pe_scored, spot, symbol)
-
-        # Bug 6 pre-condition: only keep liquid options in top_picks
-        if ce.get("lastPrice", 0) > 0:
-            all_options.append({"type": "CE", "strike": strike,
-                                 "ltp": ce["lastPrice"], "score": ce_s})
-        if pe.get("lastPrice", 0) > 0:
-            all_options.append({"type": "PE", "strike": strike,
-                                 "ltp": pe["lastPrice"], "score": pe_s})
-
-    # ── Derived metrics ───────────────────────────────────────────────────────
-
-    pcr       = round(tpe_oi / tce_oi, 3) if tce_oi > 0 else 1.0
-    avg_oi    = round(sum(oi_changes) / len(oi_changes), 2) if oi_changes else 0.0
-    total_oi  = tce_oi + tpe_oi
-    total_vol = tce_vol + tpe_vol
-
-    # Bug 2 fix: divide by TOTAL OI, not just CE OI
-    vol_spike = round(total_vol / max(1, total_oi), 3)
-
-    # ATM IV: prefer average of CE+PE, fallback to whichever exists
-    if atm_iv_ce and atm_iv_pe:
-        atm_iv = round((atm_iv_ce + atm_iv_pe) / 2, 1)
-    else:
-        atm_iv = round(atm_iv_ce or atm_iv_pe, 1)
-
-    # ── Signal: multi-factor voting  (Bug 5 fix) ─────────────────────────────
-    bullish_votes = bearish_votes = 0
-    reasons: list = []
-
-    # Factor 1 — PCR
-    if pcr > 1.4:
-        bullish_votes += 2
-        reasons.append(f"PCR {pcr} → heavy put writing (bullish)")
-    elif pcr > 1.1:
-        bullish_votes += 1
-        reasons.append(f"PCR {pcr} mildly elevated (bullish lean)")
-    elif pcr < 0.7:
-        bearish_votes += 2
-        reasons.append(f"PCR {pcr} → heavy call writing (bearish)")
-    elif pcr < 0.9:
-        bearish_votes += 1
-        reasons.append(f"PCR {pcr} suppressed (bearish lean)")
-
-    # Factor 2 — Net OI change direction
-    if tce_oi_chg > 0 and tpe_oi_chg < 0:
-        bearish_votes += 1
-        reasons.append("CE OI building + PE OI unwinding → bearish pressure")
-    elif tpe_oi_chg > 0 and tce_oi_chg < 0:
-        bullish_votes += 1
-        reasons.append("PE OI building + CE OI unwinding → bullish support")
-    elif tpe_oi_chg > 0 and tce_oi_chg > 0:
-        reasons.append("Both sides building OI → range-bound / straddle territory")
-
-    # Factor 3 — Volume dominance
-    if total_vol > 0:
-        ce_dom = tce_vol / total_vol
-        pe_dom = tpe_vol / total_vol
-        if ce_dom > 0.62:
-            bearish_votes += 1
-            reasons.append(f"CE volume {ce_dom:.0%} dominant → bearish activity")
-        elif pe_dom > 0.62:
-            bullish_votes += 1
-            reasons.append(f"PE volume {pe_dom:.0%} dominant → bullish activity")
-
-    if   bullish_votes > bearish_votes: signal = "BULLISH"
-    elif bearish_votes > bullish_votes: signal = "BEARISH"
-    else:                               signal = "NEUTRAL"
-
-    confidence = max(bullish_votes, bearish_votes)
-
-    # ── Composite score  (Bug 5 fix: BULLISH and BEARISH weighted equally) ───
-    activity_score = min(30, vol_spike / 1.5 * 30)           # V/OI component
-    oi_mom_score   = min(20, abs(avg_oi) * 1.5)              # OI momentum
-    iv_score       = (20 if 15 <= atm_iv <= 40 else          # IV quality
-                      int(atm_iv / 15 * 15) if 0 < atm_iv < 15 else
-                      max(0, int(20 - (atm_iv - 40) * 0.4)) if atm_iv > 40 else 5)
-    signal_score   = confidence * 8                          # 0/8/16/24 pts — same for BULL/BEAR
-
-    score = min(100, max(0, int(activity_score + oi_mom_score + iv_score + signal_score)))
-
-    # Top picks: sorted by option score, liquid only
-    top_picks = sorted(all_options, key=lambda x: x["score"], reverse=True)[:2]
-
-    return dict(
-        pcr            = pcr,
-        iv             = atm_iv,
-        oi_change      = avg_oi,
-        vol_spike      = vol_spike,
-        signal         = signal,
-        score          = score,
-        top_picks      = top_picks,
-        signal_reasons = reasons,
-    )
 
 import httpx, uvicorn
 from fastapi import FastAPI, HTTPException, Query
@@ -767,26 +521,6 @@ async def _fetch_indstocks_ltp_v1(symbols: list) -> dict:
 
 
 
-
-async def _internal_scan() -> list:
-    all_symbols = INDEX_SYMBOLS + FO_STOCKS
-    ltp_map = await fetch_indstocks_ltp(all_symbols)
-    sem = asyncio.Semaphore(3)
-    async def process(symbol):
-        async with sem:
-            try:
-                cj    = await fetch_nse_chain(symbol)
-                recs  = cj.get("records", {})
-                spot  = recs.get("underlyingValue") or ltp_map.get(symbol, {}).get("ltp") or 0
-                if spot == 0: return None
-                ivr   = db.get_iv_rank(symbol)
-                exp   = recs.get("expiryDates", [""])[0]
-                stats = compute_stock_score(cj, spot, symbol, exp, ivr)
-                return {"symbol": symbol, "ltp": spot, **stats}
-            except: return None
-    raw = await asyncio.gather(*[process(s) for s in all_symbols])
-    return [r for r in raw if r]
-
 @app.get("/api/debug-slugs")
 async def debug_slugs():
     return {"slugs_len": len(SLUG_MAP), "RELIANCE_in_map": "RELIANCE" in SLUG_MAP, "keys": list(SLUG_MAP.keys())}
@@ -858,9 +592,11 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 spot     = records.get("underlyingValue") or live.get("ltp") or 0
                 expiries = records.get("expiryDates", [])
 
-                # Bug 1 fix: pass symbol into compute_stock_score
-                stats = compute_stock_score(cj, spot or 1, symbol=symbol)
-                if spot == 0:
+                # Analytics v4 args mapping
+                ivr   = db.get_iv_rank(symbol)
+                exp   = expiries[0] if expiries else ""
+                stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr)
+                if not spot:
                     return None
 
                 stock_score  = stats.get("score", 0)
@@ -1301,7 +1037,7 @@ async def straddle_screener(min_iv: float = 15.0, max_pcr_delta: float = 0.3):
 
                 ivr     = db.get_iv_rank(symbol)
                 exp     = expiries[0] if expiries else ""
-                stats   = compute_stock_score(chain, spot, symbol, exp, ivr)
+                stats   = compute_stock_score(chain, spot, symbol, expiry_str=exp, iv_rank_data=ivr)
                 pcr     = stats.get("pcr", 1.0)
                 atm_iv  = stats.get("iv", 0)
 
@@ -1333,9 +1069,12 @@ async def sector_heatmap():
     Runs a fast scan and returns sector-level signal aggregation.
     Sectors: Banking, IT, Auto, Pharma, Energy, Metal, Finance, Consumer.
     """
-    results     = await _internal_scan()
-    heatmap     = build_sector_heatmap(results)
-    deals_map   = Signals.get_deals_for_scan(results)
+    results_raw = await _internal_scan()
+    # Handle dict vs list backward compatibility
+    results_list = results_raw.get("candidates", []) if isinstance(results_raw, dict) else results_raw
+    
+    heatmap     = build_sector_heatmap(results_list)
+    deals_map   = Signals.get_deals_for_scan(results_list)
 
     # Annotate symbols with bulk deal flags
     for sector_data in heatmap.values():
