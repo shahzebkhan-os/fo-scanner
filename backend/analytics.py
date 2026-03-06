@@ -429,10 +429,28 @@ def compute_stock_score(
     score = min(100, max(0, int(activity_score + oi_mom_score + iv_score +
                                 signal_score + mp_score + expiry_bonus)))
 
-    top_picks = sorted(
-        [o for o in all_options if o["ltp"] > 0],
-        key=lambda x: x["score"], reverse=True
-    )[:2]
+    def _directional_picks(options, signal):
+        """
+        For a directional signal, only return the matching option type.
+        BULLISH → CE only (buying calls on upward move)
+        BEARISH → PE only (buying puts on downward move)
+        NEUTRAL → return top 1 CE + top 1 PE for straddle awareness
+        """
+        if signal == "BULLISH":
+            candidates = [o for o in options if o["type"] == "CE"]
+        elif signal == "BEARISH":
+            candidates = [o for o in options if o["type"] == "PE"]
+        else:
+            # NEUTRAL: return best of each side, labelled clearly
+            ce_best = sorted([o for o in options if o["type"] == "CE"],
+                             key=lambda x: x["score"], reverse=True)[:1]
+            pe_best = sorted([o for o in options if o["type"] == "PE"],
+                             key=lambda x: x["score"], reverse=True)[:1]
+            return ce_best + pe_best
+    
+        return sorted(candidates, key=lambda x: x["score"], reverse=True)[:2]
+    
+    top_picks = _directional_picks(all_options, signal)
 
     return dict(
         pcr            = pcr,

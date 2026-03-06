@@ -606,36 +606,33 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 # ── Auto paper-trade entry  (Bugs 6 & 7 fixed) ───────────────
                 if stock_score >= 80 and is_market_open() and signal != "NEUTRAL":
                     for pick in top_picks:
-                        # Bug 7 fix: only enter the side matching the signal
-                        if signal == "BULLISH" and pick["type"] != "CE": continue
-                        if signal == "BEARISH" and pick["type"] != "PE": continue
-
-                        opt_type    = pick["type"]
-                        strike      = pick["strike"]
-                        entry_price = pick["ltp"]
-
-                        # Bug 6 fix: dedup by symbol+type+strike+date
-                        trade_uid = f"{symbol}-{opt_type}-{strike}-{datetime.now(IST).date()}"
+                        # Hard guard: BULLISH → CE only, BEARISH → PE only
+                        if signal == "BULLISH" and pick["type"] != "CE":
+                            continue
+                        if signal == "BEARISH" and pick["type"] != "PE":
+                            continue
+                
+                        trade_uid = f"{symbol}-{pick['type']}-{pick['strike']}-{datetime.now(IST).date()}"
                         if trade_uid in _traded_today:
                             continue
                         _traded_today.add(trade_uid)
-
-                        reason = f"Auto: {signal} score={stock_score}"
-                        db.add_trade(symbol, opt_type, strike, entry_price, reason)
-                        log.info(f"  📝 Auto-trade: {symbol} {opt_type} {strike} @ ₹{entry_price}")
+                
+                        reason = f"Auto: {signal} | Score {stock_score} | PCR {stats.get('pcr')}"
+                        db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason)
+                        log.info(f"  📝 Auto-trade: {symbol} {pick['type']} {pick['strike']} @ ₹{pick['ltp']}")
 
                 # ── Telegram alerts  (Bug 9 fixed: separate thresholds) ───────
-                # Stock must score ≥ 70, AND the specific option must score ≥ 60
-                if stock_score >= 90:
+                if stock_score >= 70 and signal != "NEUTRAL":
                     for pick in top_picks:
-                        # Bug 9 fix: option score threshold is lower than stock threshold
+                        # Same direction guard as trade entry
+                        if signal == "BULLISH" and pick["type"] != "CE":
+                            continue
+                        if signal == "BEARISH" and pick["type"] != "PE":
+                            continue
                         if pick.get("score", 0) < 60:
                             continue
-
-                        opt_type = pick["type"]
-                        strike   = pick["strike"]
-                        uid      = f"{symbol}-{opt_type}-{strike}-{datetime.now(IST).date()}"
-
+                
+                        uid = f"{symbol}-{pick['type']}-{pick['strike']}-{datetime.now(IST).date()}"
                         if uid not in notified_signals:
                             notified_signals.add(uid)
                             reasons_text = "\n".join(
@@ -644,7 +641,7 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                             msg = (
                                 f"🚀 *HIGH CONFIDENCE ALERT*\n\n"
                                 f"Symbol: *{symbol}*\n"
-                                f"Contract: *{strike} {opt_type}*\n"
+                                f"Contract: *{pick['strike']} {pick['type']}*\n"
                                 f"LTP: ₹{pick['ltp']}\n"
                                 f"Option Score: *{pick['score']}* | Stock Score: *{stock_score}*\n\n"
                                 f"Signal: *{signal}*\n"
@@ -725,13 +722,27 @@ async def get_chain(symbol: str, expiry: str = None):
             },
         })
 
-    top_ce = sorted(strikes, key=lambda x: x["CE"]["score"], reverse=True)[:2]
-    top_pe = sorted(strikes, key=lambda x: x["PE"]["score"], reverse=True)[:2]
-    top_picks = sorted(
-        [{"type":"CE","strike":r["strike"],**r["CE"]} for r in top_ce] +
-        [{"type":"PE","strike":r["strike"],**r["PE"]} for r in top_pe],
-        key=lambda x: x["score"], reverse=True
+    all_chain_options = (
+        [{"type":"CE","strike":r["strike"],**r["CE"]} for r in strikes if r["CE"]["ltp"] > 0] +
+        [{"type":"PE","strike":r["strike"],**r["PE"]} for r in strikes if r["PE"]["ltp"] > 0]
     )
+    chain_stats = compute_stock_score(data, spot, symbol)
+    chain_signal = chain_stats.get("signal", "NEUTRAL")
+    
+    if chain_signal == "BULLISH":
+        top_picks = sorted([o for o in all_chain_options if o["type"] == "CE"],
+                           key=lambda x: x["score"], reverse=True)[:4]
+    elif chain_signal == "BEARISH":
+        top_picks = sorted([o for o in all_chain_options if o["type"] == "PE"],
+                           key=lambda x: x["score"], reverse=True)[:4]
+    else:
+        # NEUTRAL: top 2 from each side
+        top_picks = (
+            sorted([o for o in all_chain_options if o["type"] == "CE"],
+                   key=lambda x: x["score"], reverse=True)[:2] +
+            sorted([o for o in all_chain_options if o["type"] == "PE"],
+                   key=lambda x: x["score"], reverse=True)[:2]
+        )
 
     return {
         "symbol":    symbol,
