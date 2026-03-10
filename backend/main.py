@@ -10,6 +10,7 @@ from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
 import db
+from pydantic import BaseModel, Field
 import analytics as Analytics
 import signals as Signals
 import scheduler as Scheduler

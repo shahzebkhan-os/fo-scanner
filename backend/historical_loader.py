@@ -1,0 +1,513 @@
+"""
+NSE F&O Historical Loader
+Downloads historical bhavcopies, reconstructs features, and loads into SQLite.
+"""
+
+import os
+import sys
+import time
+import argparse
+import logging
+import sqlite3
+import pandas as pd
+from datetime import datetime, date, timedelta
+from dateutil.relativedelta import relativedelta
+from pathlib import Path
+from math import log, sqrt, exp
+
+try:
+    from jugaad_data.nse import bhavcopy_fo_save, index_df, stock_df
+except ImportError:
+    print("Please install required libraries: pip install pandas jugaad-data")
+    sys.exit(1)
+
+# ── CONFIGURATION ────────────────────────────────────────────────────────────
+
+CONFIG = {
+    "symbols": [
+        "NIFTY", "BANKNIFTY", "FINNIFTY",
+        "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK",
+        "SBIN", "TATAMOTORS", "WIPRO", "AXISBANK", "BAJFINANCE"
+    ],
+    "start_date": "2023-01-01",
+    "end_date":   "2024-12-31",
+    "data_dir":   "./historical_data",
+    "db_path":    "./scanner.db",
+    "rate_limit_seconds": 1.5,
+    "max_retries": 3,
+    "batch_size": 30,
+    "pause_between_batches": 5,
+}
+
+# Add analytics for scoring
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from analytics import compute_stock_score_v2, black_scholes_greeks, nearest_atm
+
+# Known NSE Holidays for 2023 & 2024
+NSE_HOLIDAYS = {
+    # 2023
+    date(2023, 1, 26), date(2023, 3, 7), date(2023, 3, 30), date(2023, 4, 4),
+    date(2023, 4, 7), date(2023, 4, 14), date(2023, 5, 1), date(2023, 6, 28),
+    date(2023, 8, 15), date(2023, 9, 19), date(2023, 10, 2), date(2023, 10, 24),
+    date(2023, 11, 14), date(2023, 11, 27), date(2023, 12, 25),
+    # 2024
+    date(2024, 1, 26), date(2024, 3, 8), date(2024, 3, 25), date(2024, 3, 29),
+    date(2024, 4, 11), date(2024, 4, 17), date(2024, 5, 1), date(2024, 6, 17),
+    date(2024, 7, 17), date(2024, 8, 15), date(2024, 10, 2), date(2024, 11, 1),
+    date(2024, 11, 15), date(2024, 12, 25)
+}
+
+# ── LOGGING ──────────────────────────────────────────────────────────────────
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+log = logging.getLogger(__name__)
+
+os.makedirs(CONFIG["data_dir"], exist_ok=True)
+
+
+# ── HELPER: NEXT TRADING DAY ─────────────────────────────────────────────────
+
+def next_trading_day(d: date) -> date:
+    nxt = d + timedelta(days=1)
+    while nxt.weekday() >= 5 or nxt in NSE_HOLIDAYS:
+        nxt += timedelta(days=1)
+    return nxt
+
+def is_trading_day(d: date) -> bool:
+    return d.weekday() < 5 and d not in NSE_HOLIDAYS
+
+
+# ── STEP 1B: SPOT PRICE DOWNLOADER ───────────────────────────────────────────
+
+def download_spot_prices(symbols: list, start_date_str: str, end_date_str: str, data_dir: str) -> dict:
+    start = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+    out_file = os.path.join(data_dir, "spot_prices.json")
+
+    if os.path.exists(out_file):
+        log.info(f"Loaded existing spot prices from {out_file}")
+        return pd.read_json(out_file, orient="index").to_dict(orient="index")
+
+    res = {}
+    log.info(f"Downloading spot prices from {start} to {end}...")
+
+    for sym in symbols:
+        log.info(f"  Fetching {sym}...")
+        try:
+            if sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"]:
+                idx_name = f"{sym} 50" if sym == "NIFTY" else f"NIFTY {sym.replace('NIFTY', ' BANK')}"
+                if sym == "FINNIFTY": idx_name = "NIFTY FIN SERVICE"
+                df = index_df(symbol=idx_name, from_date=start, to_date=end)
+            else:
+                df = stock_df(symbol=sym, from_date=start, to_date=end, series="EQ")
+
+            if df is not None and not df.empty:
+                res[sym] = {pd.to_datetime(r["DATE"]).strftime("%Y-%m-%d"): float(r["CLOSE"]) for _, r in df.iterrows()}
+        except Exception as e:
+            log.warning(f"Failed spot download for {sym}: {e}")
+        time.sleep(CONFIG["rate_limit_seconds"])
+
+    pd.DataFrame.from_dict(res, orient="index").to_json(out_file, orient="index")
+    return res
+
+
+# ── STEP 1C: BHAVCOPY DOWNLOADER ─────────────────────────────────────────────
+
+def download_bhavcopy_range(start_date_str: str, end_date_str: str, data_dir: str) -> list:
+    start = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+
+    curr = start
+    dates_to_fetch = []
+    while curr <= end:
+        if is_trading_day(curr):
+            dates_to_fetch.append(curr)
+        curr += timedelta(days=1)
+
+    successful = []
+    total = len(dates_to_fetch)
+    os.makedirs(os.path.join(data_dir, "bhavcopies"), exist_ok=True)
+
+    log.info(f"Downloading {total} bhavcopy days...")
+
+    for i, d in enumerate(dates_to_fetch):
+        fname = f"fo_bhavcopy_{d.strftime('%d%b%Y').upper()}.csv"
+        fpath = os.path.join(data_dir, "bhavcopies", fname)
+
+        progress = int((i / total) * 20)
+        bar = "=" * progress + ">" + " " * (20 - progress)
+        sys.stdout.write(f"\r[{bar}] {i}/{total} | Current: {d.strftime('%d-%b-%Y')}")
+        sys.stdout.flush()
+
+        if os.path.exists(fpath):
+            successful.append(fpath)
+            continue
+
+        retries = 0
+        while retries < CONFIG["max_retries"]:
+            try:
+                bhavcopy_fo_save(d, os.path.join(data_dir, "bhavcopies"))
+                time.sleep(CONFIG["rate_limit_seconds"])
+                successful.append(fpath)
+                break
+            except Exception as e:
+                retries += 1
+                time.sleep(2 ** retries)
+                if retries == CONFIG["max_retries"]:
+                    log.warning(f"\nFailed to download {d} after {retries} retries: {e}")
+
+        if (i + 1) % CONFIG["batch_size"] == 0:
+            time.sleep(CONFIG["pause_between_batches"])
+
+    sys.stdout.write(f"\n✅ Downloaded {len(successful)}/{total} dates.\n")
+    return successful
+
+
+# ── STEP 1D: KAGGLE DATA LOADER ──────────────────────────────────────────────
+
+def load_kaggle_csv(file_path: str) -> pd.DataFrame:
+    df = pd.read_csv(file_path, low_memory=False)
+
+    df = df[df["INSTRUMENT"].isin(["OPTIDX", "OPTSTK"])]
+    df = df[df["OPTION_TYP"].isin(["CE", "PE"])]
+    df = df[(df["OPEN_INT"] > 0) | (df["CLOSE"] > 0)]
+    df = df[df["STRIKE_PR"] > 0]
+
+    df["EXPIRY_DT"] = pd.to_datetime(df["EXPIRY_DT"]).dt.strftime("%Y-%m-%d")
+    df["TIMESTAMP"] = pd.to_datetime(df["TIMESTAMP"]).dt.strftime("%Y-%m-%d")
+    df["CHG_IN_OI"] = df["CHG_IN_OI"].fillna(0)
+
+    # Clean strike
+    df["STRIKE_PR"] = pd.to_numeric(df["STRIKE_PR"]).astype(float)
+
+    cols = {
+        "TIMESTAMP": "trade_date", "SYMBOL": "symbol", "EXPIRY_DT": "expiry_date",
+        "STRIKE_PR": "strike", "OPTION_TYP": "opt_type", "OPEN": "open",
+        "HIGH": "high", "LOW": "low", "CLOSE": "close", "SETTLE_PR": "settle_price",
+        "CONTRACTS": "volume", "OPEN_INT": "open_interest", "CHG_IN_OI": "chg_in_oi"
+    }
+
+    df = df.rename(columns=cols)
+    df["ltp"] = df["close"].where(df["close"] > 0, df["settle_price"])
+    return df
+
+def merge_data_sources(bhavcopy_dir: str, kaggle_files: list, symbols: list) -> pd.DataFrame:
+    dfs = []
+    # Kaggle
+    for kf in kaggle_files:
+        if os.path.exists(kf):
+            dfs.append(load_kaggle_csv(kf))
+
+    # Bhavcopies
+    for root, _, files in os.walk(bhavcopy_dir):
+        for f in files:
+            if f.endswith(".csv"):
+                df = load_kaggle_csv(os.path.join(root, f))
+                dfs.append(df)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    combo = pd.concat(dfs, ignore_index=True)
+    combo = combo[combo["symbol"].isin(symbols)]
+    combo = combo.drop_duplicates(subset=["trade_date", "symbol", "expiry_date", "strike", "opt_type"])
+    return combo
+
+
+# ── STEP 2A: IV & GREEKS RECONSTRUCTION ──────────────────────────────────────
+
+def _bs_price(S, K, T, r, sigma, opt_type):
+    if T <= 0: return max(0.0, S - K) if opt_type == 'CE' else max(0.0, K - S)
+    d1 = (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
+    d2 = d1 - sigma * sqrt(T)
+
+    try:
+        from scipy.stats import norm
+        Nd1 = norm.cdf(d1)
+        Nd2 = norm.cdf(d2)
+        Nnd1 = norm.cdf(-d1)
+        Nnd2 = norm.cdf(-d2)
+    except:
+        def cdf(x):
+            return 0.5 * (1 + sum([x**(2*n+1) / (float(n)*2+1) for n in range(50)])) # simplistic
+        # More robust approximation:
+        return 0.0 # Placeholder if scipy missing and real exactness needed
+
+    from scipy.stats import norm
+    if opt_type == "CE": return S * norm.cdf(d1) - K * exp(-r * T) * norm.cdf(d2)
+    else: return K * exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
+def _bs_vega(S, K, T, r, sigma):
+    if T <= 0: return 0.0
+    from scipy.stats import norm
+    d1 = (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
+    return S * norm.pdf(d1) * sqrt(T)
+
+def compute_implied_volatility(market_price, spot, strike, dte, opt_type, r=0.065, max_iter=100, tol=1e-6):
+    if market_price <= 0 or spot <= 0 or strike <= 0: return None
+    T = max(dte, 0.5) / 365.0
+    
+    iv = 0.3 # Initial guess
+    for _ in range(max_iter):
+        price = _bs_price(spot, strike, T, r, iv, opt_type)
+        vega = _bs_vega(spot, strike, T, r, iv)
+        if vega == 0: break
+        
+        diff = price - market_price
+        if abs(diff) < tol: return max(0.01, min(iv * 100, 500.0))
+        iv -= diff / vega
+
+        if iv <= 0: iv = 0.01; break
+
+    return max(0.01, min(iv * 100, 500.0))
+
+# ── FEATURE PIPELINE ─────────────────────────────────────────────────────────
+
+def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFrame:
+    """
+    LIMITATION 1: EOD data only
+        This snapshot represents EOD conditions only.
+        Intraday OI buildup, IV crush during the day,
+        and actual entry timing are not captured.
+
+    LIMITATION 2: IV reconstruction accuracy
+        Reconstructed IV uses EOD settlement prices.
+        Accuracy suffers near expiry without exact tick data.
+    """
+    snapshots = []
+    
+    # Needs to be sorted chronologically for DTE tracking 
+    raw_df = raw_df.sort_values(by="trade_date")
+
+    grouped_days = raw_df.groupby(["trade_date", "symbol"])
+    total_len = len(grouped_days)
+
+    log.info(f"Reconstructing {total_len} snapshots...")
+    
+    for i, ((tdate, sym), day_df) in enumerate(grouped_days):
+        if i > 0 and i % 500 == 0:
+            log.info(f"Processed {i}/{total_len}")
+
+        spot_history = spot_prices.get(sym, {})
+        spot = spot_history.get(tdate, 0)
+        
+        # We need a spot price. Without it we cannot calculate metrics.
+        if spot == 0: continue
+
+        expiries = sorted(day_df["expiry_date"].unique())
+        if not expiries: continue
+        
+        near_exp = expiries[0]
+        chain = day_df[day_df["expiry_date"] == near_exp]
+        
+        dte = (datetime.strptime(near_exp, "%Y-%m-%d") - datetime.strptime(tdate, "%Y-%m-%d")).days
+
+        atm_strike = nearest_atm(spot, sym)
+
+        # 1. Chain Aggregates
+        total_ce_oi = chain[chain["opt_type"] == "CE"]["open_interest"].sum()
+        total_pe_oi = chain[chain["opt_type"] == "PE"]["open_interest"].sum()
+        pcr_oi = total_pe_oi / max(1, total_ce_oi)
+        
+        total_ce_vol = chain[chain["opt_type"] == "CE"]["volume"].sum()
+        total_pe_vol = chain[chain["opt_type"] == "PE"]["volume"].sum()
+        pcr_vol = total_pe_vol / max(1, total_ce_vol)
+
+        atm_row_ce = chain[(chain["strike"] == atm_strike) & (chain["opt_type"] == "CE")]
+        atm_row_pe = chain[(chain["strike"] == atm_strike) & (chain["opt_type"] == "PE")]
+
+        atm_ce_ltp = atm_row_ce["ltp"].values[0] if not atm_row_ce.empty else 0
+        atm_pe_ltp = atm_row_pe["ltp"].values[0] if not atm_row_pe.empty else 0
+
+        # Max pain
+        strikes = sorted(chain["strike"].unique())
+        pain_vals = []
+        for strike in strikes:
+            loss = 0
+            for _, r in chain.iterrows():
+                if r["opt_type"] == "CE" and strike < r["strike"]: loss += (r["strike"] - strike) * r["open_interest"]
+                elif r["opt_type"] == "PE" and strike > r["strike"]: loss += (strike - r["strike"]) * r["open_interest"]
+            pain_vals.append((loss, strike))
+        max_pain = min(pain_vals)[1] if pain_vals else atm_strike
+
+        # 2. IV Reconstruct
+        atm_ce_iv = compute_implied_volatility(atm_ce_ltp, spot, atm_strike, dte, "CE") or 0.0
+        atm_pe_iv = compute_implied_volatility(atm_pe_ltp, spot, atm_strike, dte, "PE") or 0.0
+        iv_skew = atm_pe_iv - atm_ce_iv
+
+        # 3. Greeks + GEX (Approximations for scoring)
+        # Assuming v2 compute_stock_score handles the internal logic, we build a pseudo chain payload
+        pseudo_records = {"underlyingValue": spot, "expiryDates": expiries, "data": []}
+        for st in strikes:
+            rce = chain[(chain["strike"] == st) & (chain["opt_type"] == "CE")]
+            rpe = chain[(chain["strike"] == st) & (chain["opt_type"] == "PE")]
+            
+            row = {"strikePrice": st, "expiryDate": near_exp}
+            if not rce.empty:
+                rce = rce.iloc[0]
+                row["CE"] = {"lastPrice": rce["ltp"], "openInterest": rce["open_interest"], "changeinOpenInterest": rce["chg_in_oi"], "impliedVolatility": compute_implied_volatility(rce["ltp"], spot, st, dte, "CE") or 0.0, "totalTradedVolume": rce["volume"]}
+            if not rpe.empty:
+                rpe = rpe.iloc[0]
+                row["PE"] = {"lastPrice": rpe["ltp"], "openInterest": rpe["open_interest"], "changeinOpenInterest": rpe["chg_in_oi"], "impliedVolatility": compute_implied_volatility(rpe["ltp"], spot, st, dte, "PE") or 0.0, "totalTradedVolume": rpe["volume"]}
+            pseudo_records["data"].append(row)
+
+        score_res = compute_stock_score_v2({"records": pseudo_records}, spot, sym, near_exp, {"iv_rank": 50}) # defaulting IVR for historical
+        
+        top_picks = score_res.get("top_picks", [])
+        top_type, top_str, top_pr = None, None, None
+        if top_picks and score_res.get("signal") != "NEUTRAL":
+            tp = top_picks[0]
+            top_type = tp["type"]
+            top_str = tp["strike"]
+            top_pr = tp["ltp"]
+
+        # NEXT DAY OUTCOME LABELLING
+        # LIMITATION 3: Next-day outcome assumption...
+        nday = next_trading_day(datetime.strptime(tdate, "%Y-%m-%d").date())
+        nday_str = nday.strftime("%Y-%m-%d")
+
+        out_next = spot_history.get(nday_str)
+
+        pick_pnl_next = 0
+        trade_res = None
+
+        if top_type and out_next:
+            nday_df = raw_df[(raw_df["trade_date"] == nday_str) & (raw_df["symbol"] == sym)]
+            tgt_row = nday_df[(nday_df["strike"] == top_str) & (nday_df["opt_type"] == top_type)]
+            
+            if not tgt_row.empty:
+                pick_ltp_next = tgt_row.iloc[0]["ltp"]
+                if top_pr > 0:
+                    pick_pnl_next = ((pick_ltp_next - top_pr) / top_pr) * 100
+                
+                if pick_pnl_next >= 20: trade_res = "WIN"
+                elif pick_pnl_next <= -20: trade_res = "LOSS"
+                else: trade_res = "NEUTRAL"
+            else:
+                trade_res = None # Data gap
+                
+        # Fill Snapshot Result
+        snap = {
+            "symbol": sym,
+            "snapshot_time": f"{tdate} 15:30:00",
+            "spot_price": spot,
+            "spot_change_pct": 0,
+            "total_ce_oi": total_ce_oi,
+            "total_pe_oi": total_pe_oi,
+            "pcr_oi": pcr_oi,
+            "total_ce_vol": total_ce_vol,
+            "total_pe_vol": total_pe_vol,
+            "pcr_vol": pcr_vol,
+            "atm_ce_iv": atm_ce_iv,
+            "atm_pe_iv": atm_pe_iv,
+            "iv_skew": iv_skew,
+            "atm_ce_ltp": atm_ce_ltp,
+            "atm_pe_ltp": atm_pe_ltp,
+            "atm_strike": atm_strike,
+            "dte": dte,
+            "expiry_date": near_exp,
+            "signal": score_res.get("signal", "NEUTRAL"),
+            "score": score_res.get("score", 0),
+            "confidence": score_res.get("confidence", 0.0),
+            "regime": score_res.get("regime", "EXPIRY"),
+            "top_pick_type": top_type,
+            "top_pick_strike": top_str,
+            "top_pick_ltp": top_pr,
+            "net_gex": score_res.get("gex", {}).get("net_gamma_exposure", 0),
+            "zero_gamma_level": score_res.get("gex", {}).get("zero_gamma_level", atm_strike),
+            "iv_rank": 50, # Computed fully next pass
+            "max_pain_strike": max_pain,
+            "oi_concentration_ratio": score_res.get("oi_concentration_ratio", 0),
+            "net_delta_flow": 0,
+            "outcome_1h": None, "outcome_eod": spot, "outcome_next": out_next,
+            "pick_ltp_1h": None, "pick_ltp_eod": top_pr,
+            "pick_pnl_pct_1h": None, "pick_pnl_pct_eod": 0,
+            "pick_pnl_pct_next": pick_pnl_next,
+            "trade_result": trade_res,
+            "data_source": "EOD_HISTORICAL"
+        }
+        snapshots.append(snap)
+    
+    return pd.DataFrame(snapshots)
+
+# ── LOAD DATABASE ────────────────────────────────────────────────────────────
+
+def load_to_database(df: pd.DataFrame, db_path: str, replace=False):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    if replace:
+        cur.execute("DELETE FROM market_snapshots WHERE data_source='EOD_HISTORICAL'")
+
+    df.to_sql("market_snapshots", conn, if_exists="append", index=False)
+
+    wins = len(df[df["trade_result"] == "WIN"])
+    losses = len(df[df["trade_result"] == "LOSS"])
+    neutrals = len(df[df["trade_result"] == "NEUTRAL"])
+    
+    log.info(f"Loaded {len(df)} rows into DB")
+    log.info(f"Wins: {wins} | Losses: {losses} | Neutrals: {neutrals}")
+    conn.commit()
+    conn.close()
+
+def load_iv_history(df: pd.DataFrame, db_path: str):
+    conn = sqlite3.connect(db_path)
+    
+    # Needs trade_date, symbol, atm_iv (avg)
+    ivs = []
+    for _, r in df.iterrows():
+        dt = r["snapshot_time"].split()[0]
+        aiv = (r["atm_ce_iv"] + r["atm_pe_iv"]) / 2
+        ivs.append({"symbol": r["symbol"], "trade_date": dt, "iv_value": aiv})
+        
+    piv = pd.DataFrame(ivs)
+    piv.to_sql("iv_history", conn, if_exists="append", index=False)
+    conn.commit()
+    conn.close()
+
+
+def validate_data_quality(db_path: str):
+    conn = sqlite3.connect(db_path)
+    df = pd.read_sql("SELECT * FROM market_snapshots WHERE data_source='EOD_HISTORICAL'", conn)
+    
+    if df.empty:
+        log.info("No historical data to validate.")
+        return
+        
+    log.info(f"Data Quality Report: {len(df)} rows")
+    avg_score = df["score"].mean()
+    log.info(f"Avg Score: {avg_score:.2f}")
+
+# ── CLI ENTRY POINT ──────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("cmd", choices=["download", "load-kaggle", "process", "load-db", "full", "status"])
+    parser.add_argument("--start", default=CONFIG["start_date"])
+    parser.add_argument("--end", default=CONFIG["end_date"])
+    parser.add_argument("--symbols", default=",".join(CONFIG["symbols"]))
+    parser.add_argument("--file", help="Kaggle file path")
+    parser.add_argument("--db", default=CONFIG["db_path"])
+
+    args = parser.parse_args()
+    syms = args.symbols.split(",")
+
+    log.info("NSE F&O HISTORICAL LOADER")
+    
+    if args.cmd in ["download", "full"]:
+        download_spot_prices(syms, args.start, args.end, CONFIG["data_dir"])
+        download_bhavcopy_range(args.start, args.end, CONFIG["data_dir"])
+    
+    if args.cmd in ["process", "full"]:
+        spot = download_spot_prices(syms, args.start, args.end, CONFIG["data_dir"])
+        df = merge_data_sources(os.path.join(CONFIG["data_dir"], "bhavcopies"), [args.file] if args.file else [], syms)
+        out = reconstruct_features(df, spot)
+        out.to_csv(os.path.join(CONFIG["data_dir"], "reconstructed.csv"), index=False)
+    
+    if args.cmd in ["load-db", "full"]:
+        out = pd.read_csv(os.path.join(CONFIG["data_dir"], "reconstructed.csv"))
+        load_to_database(out, args.db)
+        load_iv_history(out, args.db)
+        
+    if args.cmd in ["status", "full"]:
+        validate_data_quality(args.db)
