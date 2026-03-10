@@ -275,6 +275,187 @@ async def db_cleanup_loop():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Task 6: Auto TP/SL Monitor (every 5 min during market hours)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Configurable TP/SL percentages
+AUTO_TP_PCT =  25.0   # Take profit at +25%
+AUTO_SL_PCT = -15.0   # Stop loss at -15%
+
+async def auto_tpsl_loop():
+    """
+    Monitors open paper trades and auto-exits based on TP/SL rules.
+    Runs every 5 minutes during market hours.
+    """
+    log.info("Auto TP/SL monitor loop started.")
+
+    while True:
+        try:
+            if _is_market_open_fn and _is_market_open_fn():
+                open_trades = db.get_open_trades()
+                if open_trades:
+                    # Group trades by symbol to batch LTP fetches
+                    symbols = list({t["symbol"] for t in open_trades})
+
+                    # Fetch current LTPs for trade symbols
+                    ltp_map = {}
+                    if _fetch_nse_chain_fn:
+                        sem = asyncio.Semaphore(3)
+                        async def fetch_ltp(sym):
+                            async with sem:
+                                try:
+                                    chain = await _fetch_nse_chain_fn(sym)
+                                    records = chain.get("records", {}).get("data", [])
+                                    spot = chain.get("records", {}).get("underlyingValue", 0)
+                                    ltp_map[sym] = {"spot": spot, "records": records}
+                                except Exception as e:
+                                    log.warning(f"TP/SL LTP fetch failed for {sym}: {e}")
+
+                        await asyncio.gather(*[fetch_ltp(s) for s in symbols])
+
+                    now = datetime.now(IST)
+                    eod_squareoff = now.time() >= dtime(15, 15)
+
+                    for trade in open_trades:
+                        sym = trade["symbol"]
+                        if sym not in ltp_map:
+                            continue
+
+                        chain_data = ltp_map[sym]
+                        # Find current LTP for this specific strike/type
+                        current_ltp = None
+                        for rec in chain_data.get("records", []):
+                            if rec.get("strikePrice") == trade["strike"]:
+                                side_data = rec.get(trade["type"], {}) or {}
+                                ltp = side_data.get("lastPrice", 0)
+                                if ltp and ltp > 0:
+                                    current_ltp = ltp
+                                    break
+
+                        if current_ltp is None:
+                            continue
+
+                        entry = trade["entry_price"]
+                        if entry <= 0:
+                            continue
+
+                        pnl_pct = (current_ltp - entry) / entry * 100
+
+                        # Update current price in DB
+                        db.update_trade(trade["id"], current_ltp)
+
+                        # TP/SL logic
+                        if pnl_pct >= AUTO_TP_PCT:
+                            reason = f"Auto TP +{AUTO_TP_PCT:.0f}% (P&L: {pnl_pct:+.1f}%)"
+                            db.update_trade(trade["id"], current_ltp, exit_flag=True, reason=reason)
+                            log.info(f"  ✅ TP hit: {sym} {trade['type']} {trade['strike']} @ ₹{current_ltp} ({pnl_pct:+.1f}%)")
+
+                        elif pnl_pct <= AUTO_SL_PCT:
+                            reason = f"Auto SL {AUTO_SL_PCT:.0f}% (P&L: {pnl_pct:+.1f}%)"
+                            db.update_trade(trade["id"], current_ltp, exit_flag=True, reason=reason)
+                            log.info(f"  ❌ SL hit: {sym} {trade['type']} {trade['strike']} @ ₹{current_ltp} ({pnl_pct:+.1f}%)")
+
+                        elif eod_squareoff:
+                            reason = f"EOD Square-off (P&L: {pnl_pct:+.1f}%)"
+                            db.update_trade(trade["id"], current_ltp, exit_flag=True, reason=reason)
+                            log.info(f"  🔲 EOD exit: {sym} {trade['type']} {trade['strike']} @ ₹{current_ltp} ({pnl_pct:+.1f}%)")
+
+                    log.info(f"TP/SL check done — {len(open_trades)} open trades monitored")
+
+            await asyncio.sleep(300)   # Check every 5 minutes
+
+        except Exception as e:
+            log.error(f"Auto TP/SL loop error: {e}")
+            await asyncio.sleep(300)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Task 7: Accuracy Tracker - Sampler (every 15 min)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def accuracy_sampler_loop():
+    """Takes a snapshot of suggested trades every 15 minutes."""
+    log.info("Accuracy sampler loop started.")
+    while True:
+        try:
+            if _is_market_open_fn and _is_market_open_fn():
+                if _scan_all_symbols_fn:
+                    log.info("Accuracy Tracking: Sampling suggested trades...")
+                    results = await _scan_all_symbols_fn()
+                    # Filter for all suggested trades (must have top picks)
+                    suggested_trades = [r for r in results if len(r.get("top_picks", [])) > 0]
+                    
+                    if suggested_trades:
+                        sid = db.create_accuracy_snapshot()
+                        count = 0
+                        from main import LOT_SIZES
+                        for r in suggested_trades:
+                            picks = r.get("top_picks", [])
+                            ls = LOT_SIZES.get(r["symbol"], 1)
+                            for p in picks:
+                                tid = db.add_accuracy_trade(
+                                    sid, r["symbol"], p["type"], p["strike"], 
+                                    p["ltp"], r["score"], r["ltp"], lot_size=ls
+                                )
+                                # Add initial history point
+                                if tid:
+                                    db.update_accuracy_trade_price(tid, p["ltp"])
+                                count += 1
+                        log.info(f"Accuracy Tracking: Created snapshot {sid} with {count} trades.")
+            
+            await asyncio.sleep(900)  # 15 minutes
+        except Exception as e:
+            log.error(f"Accuracy sampler loop error: {e}")
+            await asyncio.sleep(900)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Task 8: Accuracy Tracker - Price Updater (every 5 min)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def accuracy_price_updater_loop():
+    """Updates current prices for all active accuracy trades every 5 minutes."""
+    log.info("Accuracy price updater loop started.")
+    while True:
+        try:
+            if _is_market_open_fn and _is_market_open_fn():
+                active_trades = db.get_active_accuracy_trades()
+                if active_trades:
+                    symbols = list({t["symbol"] for t in active_trades})
+                    log.info(f"Accuracy Tracking: Updating prices for {len(symbols)} symbols...")
+                    
+                    sem = asyncio.Semaphore(3)
+                    async def update_sym(sym):
+                        async with sem:
+                            try:
+                                chain = await _fetch_nse_chain_fn(sym)
+                                data = chain.get("records", {}).get("data", [])
+                                # Map strike+type to LTP
+                                prices = {}
+                                for row in data:
+                                    strike = row.get("strikePrice")
+                                    for side in ["CE", "PE"]:
+                                        ltp = row.get(side, {}).get("lastPrice", 0)
+                                        if ltp: prices[(strike, side)] = ltp
+                                
+                                # Update all trades for this symbol
+                                for t in active_trades:
+                                    if t["symbol"] == sym:
+                                        key = (t["strike"], t["type"])
+                                        if key in prices:
+                                            db.update_accuracy_trade_price(t["id"], prices[key])
+                            except Exception as e:
+                                log.warning(f"Accuracy price update failed for {sym}: {e}")
+
+                    await asyncio.gather(*[update_sym(s) for s in symbols])
+                    log.info("Accuracy Tracking: Price updates completed.")
+
+            await asyncio.sleep(300)  # 5 minutes
+        except Exception as e:
+            log.error(f"Accuracy price updater loop error: {e}")
+            await asyncio.sleep(300)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Start all tasks
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -285,5 +466,9 @@ async def start_all():
     asyncio.create_task(pre_market_report_loop())
     asyncio.create_task(bulk_deals_loop())
     asyncio.create_task(db_cleanup_loop())
-    log.info("All scheduler tasks started.")
+    asyncio.create_task(auto_tpsl_loop())
+    asyncio.create_task(accuracy_sampler_loop())
+    asyncio.create_task(accuracy_price_updater_loop())
+    log.info("All scheduler tasks started (including Accuracy Tracker).")
+
 

@@ -13,7 +13,7 @@ import db
 import analytics as Analytics
 import signals as Signals
 import scheduler as Scheduler
-from analytics import compute_stock_score, score_option, black_scholes_greeks, days_to_expiry
+from analytics import compute_stock_score_v2 as compute_stock_score, score_option_v2 as score_option, black_scholes_greeks, days_to_expiry
 from signals import build_sector_heatmap, detect_uoa, screen_straddle, get_pcr_history
 import db
 
@@ -22,12 +22,19 @@ import db
 # Bug 5 fix: separate sets for trades vs alerts so thresholds are independent
 _traded_today: set  = set()   # "SYMBOL-TYPE-STRIKE-DATE"
 notified_signals: set = set() # "SYMBOL-TYPE-STRIKE-DATE"
+_daily_trade_count: int = 0
+_sector_trade_count: dict = {}  # {sector: count}
+
+MAX_DAILY_AUTO_TRADES = 10
+MAX_SECTOR_TRADES     = 3
 
 def _reset_daily_sets():
     """Called at the start of each new trading day."""
-    global _traded_today, notified_signals
+    global _traded_today, notified_signals, _daily_trade_count, _sector_trade_count
     _traded_today.clear()
     notified_signals.clear()
+    _daily_trade_count = 0
+    _sector_trade_count = {}
 
 _last_reset_date = None
 
@@ -69,6 +76,19 @@ async def send_telegram_alert(message: str):
             await client.post(url, json=payload, timeout=5)
         except Exception as e:
             log.error(f"Telegram Alert Failed: {e}")
+
+async def send_telegram_document(filename: str, content: str, caption: str = ""):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    files = {"document": (filename, content.encode("utf-8"), "text/csv")}
+    data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "Markdown"}
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.post(url, data=data, files=files, timeout=10)
+            if r.status_code != 200:
+                log.error(f"Telegram Document Alert Failed: {r.text}")
+        except Exception as e:
+            log.error(f"Telegram Document Alert Failed: {e}")
 
 NSE_HEADERS = {
     "User-Agent":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -159,6 +179,21 @@ def is_market_open() -> bool:
     if now.weekday() >= 5:
         return False
     return dtime(9, 15) <= now.time() <= dtime(15, 30)
+
+def is_optimal_trade_time() -> bool:
+    """Avoid suboptimal entry times:
+       - First 15 mins (9:15-9:30): opening volatility
+       - Lunch lull (12:00-13:00): low volume
+       - Last 30 mins (15:00-15:30): EOD dump risk
+    """
+    now = datetime.now(IST).time()
+    if now < dtime(9, 30):       # Opening volatility
+        return False
+    if dtime(12, 0) <= now < dtime(13, 0):  # Lunch lull
+        return False
+    if now >= dtime(15, 0):      # Last 30 mins
+        return False
+    return True
 
 def market_status() -> dict:
     now = datetime.now(IST)
@@ -582,6 +617,8 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
 
     ltp_map = await fetch_indstocks_ltp(all_symbols)
     sem = asyncio.Semaphore(3)
+    
+    batch_alerts_csv_rows = []
 
     async def process(symbol: str):
         async with sem:
@@ -595,7 +632,7 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 # Analytics v4 args mapping
                 ivr   = db.get_iv_rank(symbol)
                 exp   = expiries[0] if expiries else ""
-                stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr)
+                stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
                 if not spot:
                     return None
 
@@ -603,9 +640,27 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 signal       = stats.get("signal", "NEUTRAL")
                 top_picks    = stats.get("top_picks", [])
 
-                # ── Auto paper-trade entry  (Bugs 6 & 7 fixed) ───────────────
-                if stock_score >= 80 and is_market_open() and signal != "NEUTRAL":
+                # ── Auto paper-trade entry  (v5: stricter multi-condition gate) ──
+                if (stock_score >= 85                      # Higher threshold
+                    and signal != "NEUTRAL"                 # Clear direction only
+                    and stats.get("vol_spike", 0) > 0.5    # Activity confirmation
+                    and abs(stats.get("pcr", 1) - 1) > 0.2 # Clear PCR bias
+                    and is_market_open()
+                    and is_optimal_trade_time()             # Avoid bad times
+                    and _daily_trade_count < MAX_DAILY_AUTO_TRADES):
+
+                    # Sector concentration guard
+                    from signals import get_sector
+                    sym_sector = get_sector(symbol)
+                    sector_ct = _sector_trade_count.get(sym_sector, 0)
+
                     for pick in top_picks:
+                        if _daily_trade_count >= MAX_DAILY_AUTO_TRADES:
+                            break
+                        if sector_ct >= MAX_SECTOR_TRADES:
+                            log.info(f"  ⚠️ Sector cap hit for {sym_sector} — skipping {symbol}")
+                            break
+
                         # Hard guard: BULLISH → CE only, BEARISH → PE only
                         if signal == "BULLISH" and pick["type"] != "CE":
                             continue
@@ -618,9 +673,12 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                         _traded_today.add(trade_uid)
                 
                         reason = f"Auto: {signal} | Score {stock_score} | PCR {stats.get('pcr')}"
-                        db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason)
-                        log.info(f"  📝 Auto-trade: {symbol} {pick['type']} {pick['strike']} @ ₹{pick['ltp']}")
-
+                        auto_lot_size = LOT_SIZES.get(symbol, 1)
+                        db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason, lot_size=auto_lot_size)
+                        _daily_trade_count += 1
+                        _sector_trade_count[sym_sector] = sector_ct + 1
+                        sector_ct += 1
+                        log.info(f"  📝 Auto-trade: {symbol} {pick['type']} {pick['strike']} @ ₹{pick['ltp']} (trade #{_daily_trade_count})")
                 # ── Telegram alerts  (Bug 9 fixed: separate thresholds) ───────
                 if stock_score >= 70 and signal != "NEUTRAL":
                     for pick in top_picks:
@@ -635,20 +693,11 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                         uid = f"{symbol}-{pick['type']}-{pick['strike']}-{datetime.now(IST).date()}"
                         if uid not in notified_signals:
                             notified_signals.add(uid)
-                            reasons_text = "\n".join(
-                                f"  • {r}" for r in stats.get("signal_reasons", [])
-                            ) or "  • No specific reason"
-                            msg = (
-                                f"🚀 *HIGH CONFIDENCE ALERT*\n\n"
-                                f"Symbol: *{symbol}*\n"
-                                f"Contract: *{pick['strike']} {pick['type']}*\n"
-                                f"LTP: ₹{pick['ltp']}\n"
-                                f"Option Score: *{pick['score']}* | Stock Score: *{stock_score}*\n\n"
-                                f"Signal: *{signal}*\n"
-                                f"PCR: {stats.get('pcr')} | V/OI: {stats.get('vol_spike')}x\n\n"
-                                f"Reasons:\n{reasons_text}"
+                            reasons_text = " | ".join(stats.get("signal_reasons", []))
+                            # Add to batch for CSV
+                            batch_alerts_csv_rows.append(
+                                f"{symbol},{signal},{stock_score},{pick['strike']} {pick['type']},{pick['score']},{pick['ltp']},{stats.get('pcr',0)},{stats.get('vol_spike',0)},\"{reasons_text}\""
                             )
-                            asyncio.create_task(send_telegram_alert(msg))
 
                 return {
                     "symbol":         symbol,
@@ -668,12 +717,104 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
     result = [r for r in raw if r]
     result.sort(key=lambda x: x["score"], reverse=True)
     log.info(f"=== SCAN DONE: {len(result)} stocks ===")
+    
+    # ── Dispatch Batched Telegram Alert CSV ─────────────────
+    if batch_alerts_csv_rows:
+        headers = "Symbol,Signal,Stock_Score,Contract,Option_Score,LTP,PCR,Vol_Spike,Reasons"
+        csv_content = headers + "\n" + "\n".join(batch_alerts_csv_rows)
+        filename = f"high_confidence_alerts_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv"
+        caption = f"🚀 *{len(batch_alerts_csv_rows)} High Confidence Trades Detected*\nSee attached CSV for details."
+        asyncio.create_task(send_telegram_document(filename, csv_content, caption))
+        log.info(f"Dispatched {len(batch_alerts_csv_rows)} telegram alerts via batched CSV.")
     return {
         "timestamp":     datetime.now().isoformat(),
         "market_status": market_status(),
         "count":         len(result),
         "data":          result,
     }
+
+
+# ── Accuracy Tracker ──────────────────────────────────────────────────────────
+
+@app.get("/api/tracker/snapshots")
+async def get_tracker_snapshots(limit: int = 50):
+    """Returns a list of all accuracy tracking snapshots."""
+    return db.get_accuracy_snapshots(limit)
+
+@app.get("/api/tracker/snapshot/{snapshot_id}")
+async def get_tracker_snapshot(snapshot_id: int):
+    """Returns details (all suggested trades) for a specific snapshot."""
+    details = db.get_accuracy_snapshot_details(snapshot_id)
+    if not details:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    
+    # Add lot price and lot size to trades
+    for t in details["trades"]:
+        # We need to calculate the difference from the previous price point (if any)
+        history = db.get_accuracy_trade_history(t["id"])
+        if len(history) >= 2:
+            prev = history[-2]["price"]
+            curr = history[-1]["price"]
+            t["diff_5m"] = curr - prev
+            t["diff_5m_pct"] = (t["diff_5m"] / prev * 100) if prev > 0 else 0
+        else:
+            t["diff_5m"] = 0
+            t["diff_5m_pct"] = 0
+            
+    return details
+
+from pydantic import BaseModel
+class ManualSnapshotRequest(BaseModel):
+    results: list
+
+@app.post("/api/tracker/snapshot/manual")
+async def create_manual_snapshot(req: ManualSnapshotRequest):
+    """Manually creates a snapshot from a list of scan results."""
+    suggested_trades = [r for r in req.results if r.get("top_picks")]
+    if not suggested_trades:
+        return {"status": "ignored", "message": "No suggested trades found"}
+        
+    sid = db.create_accuracy_snapshot()
+    count = 0
+    for r in suggested_trades:
+        picks = r.get("top_picks") or []
+        ls = LOT_SIZES.get(r.get("symbol", ""), 1)
+        for p in picks:
+            tid = db.add_accuracy_trade(
+                sid, r.get("symbol", ""), p.get("type"), p.get("strike"), 
+                p.get("ltp"), r.get("score"), r.get("ltp"), lot_size=ls
+            )
+            if tid:
+                db.update_accuracy_trade_price(tid, p.get("ltp"))
+            count += 1
+    return {"status": "success", "snapshot_id": sid, "trades_saved": count}
+
+@app.delete("/api/tracker/snapshot/{snapshot_id}")
+async def delete_tracker_snapshot(snapshot_id: int):
+    """Deletes a specific snapshot and all its associated trades and history."""
+    try:
+        db.delete_accuracy_snapshot(snapshot_id)
+        return {"status": "success", "message": "Snapshot deleted"}
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/tracker/report")
+async def get_accuracy_report():
+    """Returns the aggregated backtest report for all accuracy snapshots."""
+    try:
+        report = db.get_accuracy_backtest_report()
+        return {"status": "success", "report": report}
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/tracker/trade/{trade_id}/history")
+async def get_trade_history(trade_id: int):
+    """Returns price history for a specific accuracy trade."""
+    history = db.get_accuracy_trade_history(trade_id)
+    return {"trade_id": trade_id, "history": history}
 
 
 @app.get("/api/chain/{symbol}")
@@ -692,6 +833,12 @@ async def get_chain(symbol: str, expiry: str = None):
     if expiry:
         rows = [r for r in rows if r.get("expiryDate") == expiry]
 
+    chain_stats = compute_stock_score(data, spot, symbol, prev_chain_data=None, fii_net=0.0)
+    top_picks = chain_stats.get("top_picks", [])
+    
+    ce_scores = {p["strike"]: p["score"] for p in top_picks if p["type"] == "CE"}
+    pe_scores = {p["strike"]: p["score"] for p in top_picks if p["type"] == "PE"}
+
     strikes = []
     for row in rows:
         strike = row.get("strikePrice", 0)
@@ -709,7 +856,7 @@ async def get_chain(symbol: str, expiry: str = None):
                 "oi_chg":     ce_c,
                 "oi_chg_pct": round(ce_c / max(1, ce_oi) * 100, 1),
                 "volume":     ce.get("totalTradedVolume", 0),
-                "score":      score_option({**ce, "strikePrice": strike}, spot, symbol),
+                "score":      ce_scores.get(strike, 0),
             },
             "PE": {
                 "ltp":        pe.get("lastPrice", 0),
@@ -718,31 +865,9 @@ async def get_chain(symbol: str, expiry: str = None):
                 "oi_chg":     pe_c,
                 "oi_chg_pct": round(pe_c / max(1, pe_oi) * 100, 1),
                 "volume":     pe.get("totalTradedVolume", 0),
-                "score":      score_option({**pe, "strikePrice": strike}, spot, symbol),
+                "score":      pe_scores.get(strike, 0),
             },
         })
-
-    all_chain_options = (
-        [{"type":"CE","strike":r["strike"],**r["CE"]} for r in strikes if r["CE"]["ltp"] > 0] +
-        [{"type":"PE","strike":r["strike"],**r["PE"]} for r in strikes if r["PE"]["ltp"] > 0]
-    )
-    chain_stats = compute_stock_score(data, spot, symbol)
-    chain_signal = chain_stats.get("signal", "NEUTRAL")
-    
-    if chain_signal == "BULLISH":
-        top_picks = sorted([o for o in all_chain_options if o["type"] == "CE"],
-                           key=lambda x: x["score"], reverse=True)[:4]
-    elif chain_signal == "BEARISH":
-        top_picks = sorted([o for o in all_chain_options if o["type"] == "PE"],
-                           key=lambda x: x["score"], reverse=True)[:4]
-    else:
-        # NEUTRAL: top 2 from each side
-        top_picks = (
-            sorted([o for o in all_chain_options if o["type"] == "CE"],
-                   key=lambda x: x["score"], reverse=True)[:2] +
-            sorted([o for o in all_chain_options if o["type"] == "PE"],
-                   key=lambda x: x["score"], reverse=True)[:2]
-        )
 
     return {
         "symbol":    symbol,
@@ -799,8 +924,9 @@ async def add_manual_trade(req: ManualTradeRequest):
         raise HTTPException(400, "lots must be >= 1")
 
     lot_size = LOT_SIZES.get(req.symbol, 1)
-    reason   = f"{req.reason} | {req.lots} lot(s) × {lot_size} = {req.lots * lot_size} qty"
-    trade_id = db.add_trade(req.symbol, req.type, req.strike, req.entry_price, reason)
+    qty      = req.lots * lot_size
+    reason   = f"{req.reason} | {req.lots} lot(s) × {lot_size} = {qty} qty"
+    trade_id = db.add_trade(req.symbol, req.type, req.strike, req.entry_price, reason, lot_size=qty)
     return {
         "status":    "created",
         "trade_id":  trade_id,
@@ -813,6 +939,20 @@ async def add_manual_trade(req: ManualTradeRequest):
         "qty":       req.lots * lot_size,
         "capital":   round(req.entry_price * req.lots * lot_size, 2),
     }
+
+
+@app.post("/api/paper-trades/{trade_id}/exit")
+async def exit_manual_trade(trade_id: int, exit_price: Optional[float] = None):
+    """Exit (close) an open manual trade at a given price (defaults to current_price)."""
+    with db._conn() as c:
+        row = c.execute("SELECT * FROM paper_trades WHERE id=? AND status='OPEN'", (trade_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Trade not found or already closed")
+
+    trade = dict(row)
+    price = exit_price if exit_price is not None else (trade.get("current_price") or trade["entry_price"])
+    db.update_trade(trade_id, price, exit_flag=True, reason="Manual exit")
+    return {"status": "closed", "trade_id": trade_id, "exit_price": price}
 
 
 # ── Backtester API ────────────────────────────────────────────────────────────
@@ -1048,7 +1188,7 @@ async def straddle_screener(min_iv: float = 15.0, max_pcr_delta: float = 0.3):
 
                 ivr     = db.get_iv_rank(symbol)
                 exp     = expiries[0] if expiries else ""
-                stats   = compute_stock_score(chain, spot, symbol, expiry_str=exp, iv_rank_data=ivr)
+                stats   = compute_stock_score(chain, spot, symbol, expiry_str=exp, iv_rank_data=ivr, prev_chain_data=None, fii_net=0.0)
                 pcr     = stats.get("pcr", 1.0)
                 atm_iv  = stats.get("iv", 0)
 
@@ -1120,6 +1260,8 @@ async def portfolio_dashboard():
 
     return {
         "closed_trades":     stats,
+        "auto_stats":        db.get_trade_stats("AUTO"),
+        "manual_stats":      db.get_trade_stats("MANUAL"),
         "open_positions":    len(open_trades),
         "unrealised_pnl":    round(unrealised, 2),
         "capital":           db.get_capital(),
@@ -1307,7 +1449,7 @@ async def _internal_scan() -> list:
                 if spot == 0: return None
                 ivr   = db.get_iv_rank(symbol)
                 exp   = recs.get("expiryDates", [""])[0]
-                stats = compute_stock_score(cj, spot, symbol, exp, ivr)
+                stats = compute_stock_score(cj, spot, symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
                 return {"symbol": symbol, "ltp": spot, **stats}
             except:
                 return None
@@ -1444,7 +1586,7 @@ async def straddle_screener(min_iv: float = 15.0, max_pcr_delta: float = 0.3):
 
                 ivr    = db.get_iv_rank(symbol)
                 exp    = expiries[0] if expiries else ""
-                stats  = compute_stock_score(chain, spot, symbol, exp, ivr)
+                stats  = compute_stock_score(chain, spot, symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
                 pcr    = stats.get("pcr", 1.0)
                 atm_iv = stats.get("iv", 0)
 
@@ -1496,6 +1638,8 @@ async def portfolio_dashboard():
 
     return {
         "closed_trades":  stats,
+        "auto_stats":     db.get_trade_stats("AUTO"),
+        "manual_stats":   db.get_trade_stats("MANUAL"),
         "open_positions": len(open_trades),
         "unrealised_pnl": round(unrealised, 2),
         "capital":        db.get_capital(),

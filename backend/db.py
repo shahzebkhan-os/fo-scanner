@@ -135,7 +135,35 @@ def init_db():
             reason      TEXT,
             exit_time   TEXT    DEFAULT (datetime('now'))
         );
+        -- ── New: Accuracy Tracking Snapshots ────────────────────────────
+        CREATE TABLE IF NOT EXISTS accuracy_snapshots (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT    DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS accuracy_trades (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id  INTEGER NOT NULL REFERENCES accuracy_snapshots(id) ON DELETE CASCADE,
+            symbol       TEXT    NOT NULL,
+            type         TEXT    NOT NULL,
+            strike       REAL    NOT NULL,
+            entry_price  REAL    NOT NULL,
+            current_price REAL,
+            score        INTEGER DEFAULT 0,
+            stock_price  REAL    DEFAULT 0,
+            lot_size     INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_accuracy_trades_snapshot ON accuracy_trades(snapshot_id);
+
+        CREATE TABLE IF NOT EXISTS accuracy_trade_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id    INTEGER NOT NULL REFERENCES accuracy_trades(id) ON DELETE CASCADE,
+            price       REAL    NOT NULL,
+            timestamp   TEXT    DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_accuracy_history_trade ON accuracy_trade_history(trade_id);
         """)
+
     print("✅ DB initialised (v4)")
 
 
@@ -178,7 +206,7 @@ def update_trade(trade_id, current_price, exit_flag=False, reason=""):
         if not row: return
         entry = row["entry_price"]
         pnl_pct = ((current_price - entry) / entry * 100) if entry > 0 else 0
-        lot_size = row["lot_size"] or 1
+        lot_size = row["lot_size"] if row["lot_size"] and row["lot_size"] > 0 else 1
         pnl_abs  = (current_price - entry) * lot_size
 
         if exit_flag:
@@ -193,16 +221,27 @@ def update_trade(trade_id, current_price, exit_flag=False, reason=""):
                 UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?
             """, (current_price, round(pnl_abs,2), round(pnl_pct,2), trade_id))
 
-def get_trade_stats():
+def get_trade_stats(trade_type: str = "ALL"):
     with _conn() as c:
         rows = c.execute(
             "SELECT * FROM paper_trades WHERE status='CLOSED'"
         ).fetchall()
-    trades = [dict(r) for r in rows]
+    
+    trades = []
+    for r in rows:
+        t = dict(r)
+        reason = t.get("reason", "")
+        # Filter logic based on reason prefix
+        if trade_type == "AUTO" and not reason.startswith("Auto:"):
+            continue
+        if trade_type == "MANUAL" and reason.startswith("Auto:"):
+            continue
+        trades.append(t)
+        
     if not trades:
         return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0,
                 "avg_pnl_pct": 0, "total_pnl": 0, "best": None, "worst": None,
-                "by_signal": {}, "equity_curve": []}
+                "by_symbol": {}, "equity_curve": []}
 
     wins   = [t for t in trades if (t["pnl"] or 0) > 0]
     losses = [t for t in trades if (t["pnl"] or 0) <= 0]
@@ -296,6 +335,149 @@ def delete_all_tracked_picks():
     with _conn() as c:
         c.execute("DELETE FROM tracked_picks")
     return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Accuracy Tracking
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_accuracy_snapshot():
+    with _conn() as c:
+        cursor = c.execute("INSERT INTO accuracy_snapshots (timestamp) VALUES (datetime('now'))")
+        return cursor.lastrowid
+
+def add_accuracy_trade(snapshot_id, symbol, opt_type, strike, entry_price, score, stock_price=0, lot_size=0):
+    with _conn() as c:
+        cursor = c.execute("""
+            INSERT INTO accuracy_trades (snapshot_id, symbol, type, strike, entry_price, current_price, score, stock_price, lot_size)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (snapshot_id, symbol, opt_type, float(strike), float(entry_price), float(entry_price), score, stock_price, lot_size))
+        return cursor.lastrowid
+
+def get_accuracy_snapshots(limit=50):
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT s.*, (SELECT COUNT(*) FROM accuracy_trades WHERE snapshot_id = s.id) as trade_count
+            FROM accuracy_snapshots s
+            ORDER BY s.timestamp DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+def delete_accuracy_snapshot(snapshot_id: int):
+    with _conn() as c:
+        c.execute("DELETE FROM accuracy_snapshots WHERE id=?", (snapshot_id,))
+    return True
+
+def get_accuracy_snapshot_details(snapshot_id):
+    with _conn() as c:
+        snapshot = c.execute("SELECT * FROM accuracy_snapshots WHERE id=?", (snapshot_id,)).fetchone()
+        if not snapshot: return None
+        trades = c.execute("SELECT * FROM accuracy_trades WHERE snapshot_id=?", (snapshot_id,)).fetchall()
+        return {
+            "snapshot": dict(snapshot),
+            "trades": [dict(r) for r in trades]
+        }
+
+def update_accuracy_trade_price(trade_id, current_price):
+    with _conn() as c:
+        c.execute("UPDATE accuracy_trades SET current_price=? WHERE id=?", (current_price, trade_id))
+        c.execute("INSERT INTO accuracy_trade_history (trade_id, price) VALUES (?,?)", (trade_id, float(current_price)))
+
+def get_accuracy_trade_history(trade_id: int):
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT price, timestamp FROM accuracy_trade_history 
+            WHERE trade_id=? ORDER BY timestamp ASC
+        """, (trade_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+def get_active_accuracy_trades():
+    """Returns all accuracy trades from snapshots taken today that might need price updates."""
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT t.* FROM accuracy_trades t
+            JOIN accuracy_snapshots s ON t.snapshot_id = s.id
+            WHERE s.timestamp >= date('now')
+        """).fetchall()
+    return [dict(r) for r in rows]
+
+def get_accuracy_backtest_report():
+    """Aggregates historical accuracy data for the backtest report."""
+    with _conn() as c:
+        # Get all trades that have at least one history point
+        trades = c.execute("""
+            SELECT 
+                t.id, t.symbol, t.type, t.strike, t.entry_price, t.score, t.lot_size,
+                MAX(h.price) as max_price,
+                MIN(h.price) as min_price
+            FROM accuracy_trades t
+            JOIN accuracy_trade_history h ON t.id = h.trade_id
+            GROUP BY t.id
+        """).fetchall()
+
+    if not trades:
+        return {"total_trades": 0, "win_rate": 0, "avg_max_pnl": 0, "best_trade": None, "score_brackets": {}}
+
+    total = len(trades)
+    winning_trades = 0
+    total_max_pnl_pct = 0
+    best_trade = None
+    best_pnl_pct = -100
+
+    score_brackets = {
+        ">=90": {"total": 0, "wins": 0, "avg_pnl": 0},
+        "80-89": {"total": 0, "wins": 0, "avg_pnl": 0},
+        "<80": {"total": 0, "wins": 0, "avg_pnl": 0}
+    }
+
+    for r in trades:
+        entry = r["entry_price"]
+        if entry <= 0: continue
+        
+        # Win is defined as reaching at least +5% (or any positive threshold) at max
+        # Here we'll define a "Win" as max_price > entry_price at all
+        max_pnl_pct = ((r["max_price"] - entry) / entry) * 100
+        
+        if max_pnl_pct > 0:
+            winning_trades += 1
+
+        total_max_pnl_pct += max_pnl_pct
+
+        if max_pnl_pct > best_pnl_pct:
+            best_pnl_pct = max_pnl_pct
+            best_trade = {
+                "symbol": r["symbol"], "type": r["type"], "strike": r["strike"],
+                "entry": entry, "max_price": r["max_price"], "pnl_pct": round(max_pnl_pct, 2),
+                "score": r["score"]
+            }
+
+        # Bracket logic
+        score = r["score"]
+        if score >= 90: b = ">=90"
+        elif score >= 80: b = "80-89"
+        else: b = "<80"
+
+        score_brackets[b]["total"] += 1
+        if max_pnl_pct > 0: score_brackets[b]["wins"] += 1
+        score_brackets[b]["avg_pnl"] += max_pnl_pct
+
+    # Finalize brackets
+    for b, data in score_brackets.items():
+        if data["total"] > 0:
+            data["win_rate"] = round((data["wins"] / data["total"]) * 100, 1)
+            data["avg_pnl"] = round(data["avg_pnl"] / data["total"], 2)
+        else:
+            data["win_rate"] = 0
+            data["avg_pnl"] = 0
+
+    return {
+        "total_trades": total,
+        "win_rate": round((winning_trades / total) * 100, 1) if total > 0 else 0,
+        "avg_max_pnl": round(total_max_pnl_pct / total, 2) if total > 0 else 0,
+        "best_trade": best_trade,
+        "score_brackets": score_brackets
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════

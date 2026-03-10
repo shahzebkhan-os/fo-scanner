@@ -1,94 +1,181 @@
-# 📈 NSE F&O Option Chain Algorithmic Scanner
+# NSE F&O Scanner v4
 
-A powerful, full-stack algorithmic trading dashboard for the National Stock Exchange (NSE). It continuously scans the options chain of all 180+ F&O stocks and indices in real time, applies a proprietary scoring model to identify high-probability breakout trades, executes active paper-trades using a background engine, provides native historical backtesting capabilities, and routes high-confidence signals directly to a Telegram bot and browser alerts.
-
-> ⚠️ **For educational purposes only. Not financial advice. Paper trading is simulated.**
-
----
-
-## 🚀 Key Features
-
-*   **Real-Time Algorithmic Scanner:** Fetches live chain data directly from the NSE API to rank the strength of every single Strike Price based on Put-Call Ratio (PCR), Open Interest (OI) changes, Volume spikes, and ATM Implied Volatility (IV).
-*   **Active DB Algo Trades (Paper Trading):** Background Python loops automatically "buy" and "sell" Top Picks matching specific algorithmic thresholds, enforcing strict Take Profit (TP) and Stop Loss (SL) risk management, storing the results in SQLite.
-*   **Live Tracked Picks:** A manual watchlist table where users can actively track manual picks. Updates real-time prices for PnL tracking and formats monetary returns correctly against NSE lot sizes.
-*   **Historical Backtester:** Replays the algorithmic score history to simulate trading sessions across varying TP/SL/Score conditions, reporting exact Win Rates, Net PnL, Profit Factors, and charting the exit reasons.
-*   **Audio & Visual Alerts:** Emits immediate visual HTML5 Toasts and a high-pitched ring when the scanner locates a `Score >= 70`.
-*   **Telegram Integration:** Directly dispatches push notifications containing actionable breakdown setups to your phone seamlessly in the background.
+Full-featured NSE options chain scanner with live signals, Greeks, OI heatmaps, 
+sector analysis, unusual activity detection, and paper trading.
 
 ---
 
-## 🏗️ System Architecture: What Each File Does
+## What's New in v4
 
-The software operates via a decoupled architecture featuring a FastAPI Python Backend and a React JS Frontend.
-
-### Backend Application
-*   **`backend/main.py`**: The core heartbeat of the application. It runs the FastAPI server to serve static assets and APIs. It manages background asynchronous loops to fetch NSE data, calculates the Option Scores using statistical analysis (combining PCR, Volume, OI, and IV), runs the automated Paper Trade auto-exiting loop, and manages the Telegram HTTP hooks.
-*   **`backend/db.py`**: The SQLite database driver. Manages the `trades.db` files. Contains logical functions to `add_trade`, update Live Tracked options, compute abstract PnL, and transition trades from `OPEN` to `CLOSED`.
-*   **`backend/Backtest.py`**: The mathematical simulation engine. Reads historical data to test various user-input strategies (like strict `%` Stop-Loss). Computes and aggregates the total system PnL, Win Rates, and Loss Rates into a digestible JSON array for the React visualizer.
-
-### Utility Scripts
-*   **`fetch_lot_sizes.py`**: Connects to the AngelOne OpenAPIScripMaster to download the authoritative absolute truth array of all current NSE Lot Sizes (since the Exchange often crashes or expands lot boundaries), writing them directly into the Python matrices.
-*   **`backfill_db.py`**: A database operation script to correct historical log flaws or recalculate old PnL histories if lot-sizes/scores change retrospectively.
-*   **`start.sh`**: The orchestrator script. Safely kills old hung processes, boots the Python Uvicorn engine, and simultaneously starts the Vite React frontend so the application binds seamlessly for the user.
-
-### Frontend Application
-*   **`frontend/src/App.jsx`**: A React application built with Vite containing sophisticated tables, data visualizations, routing elements, sorting functions, Audio alerts, and floating HTML DOM notifications dynamically updating as the backend scans.
-
----
-
-## 🧠 Algorithmic Scoring Logic
-
-Every F&O asset gets an intrinsic **Score (0–100)** calculated during every iteration. 
-
-### Step 1: The Global Signal (Stock Level)
-Before targeting specific strikes, the system grades the *entire* stock option chain:
-1.  **Volume Spike:** Is the total chain volume massively spiking compared to existing Open Interest? High volume relative to OI means institutional movement.
-2.  **PCR (Put-Call Ratio):** A contrarian indicator. If the crowd is massively loading puts (PCR > 1.3), it often indicates a potential Short Squeeze upwards (Bullish). If heavily loaded into Calls (PCR < 0.8), it acts as gravity downwards (Bearish).
-3.  **ATM IV Levels:** IV operates as the 'premium cost'. 15-25% indicates cheap, healthy pricing. Extremely high IVs (>50%) severely penalize the score because premiums become aggressively prone to crushing.
-4.  **Overall OI Change:** Averaging Open Interest additions flags new money committing to directional bets.
-
-### Step 2: Individual Strike Scoring (Contract Level)
-If the Stock scores over 50, the algorithm ranks every single CE/PE strike price inside that chain up to 100 points:
-*   **Strike OI Change (Max 30pts):** Massive explosion of OI at *one exact strike* defines breakout positioning.
-*   **Proximity to Money (Max 30pts):** The closer a strike is to At-The-Money (ATM), the safer and more delta-responsive it is. Deep OTM contracts are harshly docked.
-*   **Contract Volume (Max 20pts):** Discards illiquid chains with wide bid-ask spreads.
-*   **Strike IV (Max 20pts):** Rewards contracts priced fairly relative to implied decay.
-
-The system snags the highest sorted options and forwards them to the Telegram hook and Paper Database as **"Top Picks"**.
+| Feature | File |
+|---|---|
+| Black-Scholes Greeks (Δ Γ θ V) | `analytics.py` |
+| IV Rank (IVR) — 52-week percentile | `analytics.py` + `db.py` |
+| OI Heatmap (15-min snapshots) | `scheduler.py` + `db.py` |
+| PCR intraday timeline | `signals.py` |
+| Unusual Options Activity (UOA) | `signals.py` |
+| Straddle / Strangle screener | `signals.py` |
+| Sector heatmap (10 sectors) | `signals.py` |
+| Pre-market Telegram report (9 AM) | `scheduler.py` |
+| NSE Bulk/Block deals | `signals.py` |
+| FII/DII data | `new_endpoints.py` |
+| Portfolio P&L dashboard + equity curve | `new_endpoints.py` |
+| Per-symbol position sizing (2% rule) | `analytics.py` |
+| Trade journal notes | `db.py` |
+| Settings: capital, watchlist, thresholds | `db.py` |
+| CSV export of all trades | `new_endpoints.py` |
+| Dark/Light mode toggle | `App.jsx` |
+| Keyboard shortcuts | `App.jsx` |
+| PWA — install on mobile home screen | `manifest.json` |
 
 ---
 
-## 💻 Installation & Quick Start
+## Project Structure
 
-```bash
-# 1. Clone & Enter the folder
-cd fo-scanner
-
-# 2. Add your environment variables to a `.env` in the root backend
-## (See Environment Variables below)
-cp .env.example .env
-
-# 3. Boot the full application Stack (React + Python + DB)
-./start.sh
+```
+fo-scanner/
+├── backend/
+│   ├── main.py          # FastAPI app (existing, updated)
+│   ├── analytics.py     # NEW: Greeks, IVR, scoring
+│   ├── signals.py       # NEW: UOA, straddle, sector heatmap
+│   ├── scheduler.py     # NEW: OI snapshots, pre-market report
+│   ├── db.py            # UPDATED: all new tables
+│   ├── backtest.py      # (existing)
+│   ├── slugs.json       # (existing)
+│   └── requirements.txt
+├── frontend/
+│   ├── src/
+│   │   └── App.jsx      # UPDATED: all 9 tabs
+│   ├── public/
+│   │   └── manifest.json  # NEW: PWA manifest
+│   ├── index.html
+│   └── package.json
+├── docker-compose.yml
+├── Dockerfile
+├── .env.example
+└── README.md
 ```
 
-**Market Hours:** Monday–Friday, 9:15 AM – 3:30 PM IST  
-Once active, navigate your browser to `http://localhost:5175`.
+---
+
+## Setup
+
+### 1. Environment Variables
+
+Copy `.env.example` to `.env` and fill in:
+
+```env
+INDSTOCKS_TOKEN=your_token_here
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+```
+
+### 2. Install Backend Dependencies
+
+```bash
+cd backend
+pip install -r requirements.txt
+```
+
+New dependencies needed:
+```
+httpx
+fastapi
+uvicorn
+curl_cffi
+beautifulsoup4
+python-dotenv
+```
+
+### 3. Install Frontend Dependencies
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+### 4. Run
+
+```bash
+# Development
+cd backend && python main.py
+
+# Production
+docker-compose up -d
+```
+
+### 5. Integrate New Files into main.py
+
+Follow the instructions at the top of `new_endpoints.py`:
+
+1. Add imports at the top of `main.py`
+2. Replace `@app.on_event("startup")` with the lifespan context manager
+3. Add the `_internal_scan()` helper function
+4. Paste all routes from `new_endpoints.py` into `main.py`
+
+### 6. Enable PWA on Mobile
+
+Add to your `frontend/index.html` `<head>`:
+```html
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#6366f1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+```
 
 ---
 
-## ⚙️ Environment Variables (`.env`)
+## API Reference
 
-For the application to function perfectly, configure these keys inside a `.env` file within your folder.
+All new endpoints:
 
-| Variable | Description |
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/greeks/{symbol}` | Full Greeks table for all strikes |
+| GET | `/api/ivrank/{symbol}` | IV Rank (52-week percentile) |
+| GET | `/api/oi-heatmap/{symbol}` | OI snapshots by strike (today) |
+| GET | `/api/oi-timeline/{symbol}` | OI over time for one strike |
+| GET | `/api/pcr-history/{symbol}` | Intraday PCR timeline |
+| GET | `/api/uoa` | Unusual options activity scan |
+| GET | `/api/straddle-screen` | Straddle/strangle candidates |
+| GET | `/api/sector-heatmap` | Sector-level signal aggregation |
+| GET | `/api/portfolio` | P&L dashboard + equity curve |
+| GET | `/api/position-size` | Position sizing calculator |
+| GET | `/api/bulk-deals` | NSE bulk/block deals |
+| POST | `/api/bulk-deals/refresh` | Force refresh deals |
+| GET | `/api/fii-dii` | FII/DII activity from NSE |
+| GET | `/api/paper-trades/export` | CSV export |
+| POST | `/api/paper-trades/{id}/note` | Add journal note |
+| GET | `/api/paper-trades/{id}/notes` | Get journal notes |
+| GET | `/api/settings/watchlist` | Get watchlist |
+| POST | `/api/settings/watchlist` | Update watchlist |
+| GET | `/api/settings/capital` | Get capital setting |
+| POST | `/api/settings/capital` | Set capital |
+| GET | `/api/settings/threshold/{symbol}` | Get alert threshold |
+| POST | `/api/settings/threshold/{symbol}` | Set alert threshold |
+
+---
+
+## Notes
+
+- **IVR** requires at least 30 days of history to be meaningful. Keep the scanner running daily.
+- **UOA** requires at least 5 days of OI history to establish baselines.
+- **OI Heatmap** data is only recorded during market hours (9:15–15:30 IST).
+- **Pre-market report** fires at 9:00 AM IST on weekdays if `TELEGRAM_BOT_TOKEN` is set.
+- **Bulk deals** are fetched daily at 4:00 PM IST from NSE's public API.
+
+---
+
+## Keyboard Shortcuts
+
+| Key | Action |
 |---|---|
-| `INDSTOCKS_TOKEN` | (Optional but recommended) Your IndStocks JWT for real-time underlying Spot LTP fetching fallback. |
-| `TELEGRAM_BOT_TOKEN` | Generated natively via `@BotFather` on Telegram. The bot token authorizing the notification pipeline. |
-| `TELEGRAM_CHAT_ID` | Your personal or group chat destination ID where the Python engine formats the >70 Score setups. |
-
----
-
-## 🔒 Limitations & Security
-*   **SQLite DB Persistence:** The entire database sits as a simple local `trades.db` file. No cloud required. Keep backups if using it heavily over months.
-*   **Akamai Anti-Bot Handling:** The NSE applies extreme throttling on scraping its Option Chains. `main.py` utilizes `curl_cffi` to mimic Chrome TLS fingerprints to circumvent basic scraping bans, rotating headers constantly. Overuse (e.g. infinite loops under 1 second apart) can lead to temporary IP blocks.
+| `R` | Scanner |
+| `C` | Chain |
+| `G` | Greeks |
+| `H` | OI Heatmap |
+| `S` | Sectors |
+| `U` | UOA |
+| `P` | Portfolio |
+| `,` | Settings |

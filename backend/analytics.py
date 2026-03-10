@@ -181,289 +181,387 @@ def oi_walls(records: list, spot: float, n: int = 3) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Position Sizing
+# Quantitative Option Scoring System v2 (Rebuild)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def compute_lot_size_for_risk(
-    capital: float,
-    entry_price: float,
-    lot_size: int,
-    risk_pct: float = 2.0,
-    sl_pct:   float = 25.0,
-) -> dict:
-    """
-    Given total capital and a max-risk-per-trade percentage,
-    returns how many lots to trade and the rupee risk.
+DEFAULT_LOT_SIZE = {"NIFTY": 50, "BANKNIFTY": 15, "FINNIFTY": 25}
 
-    risk_pct : % of capital to risk per trade (default 2%)
-    sl_pct   : stop-loss % (default 25%)
-    """
-    if entry_price <= 0 or lot_size <= 0:
-        return {"lots": 1, "risk_per_lot": 0, "total_risk": 0, "allocation": 0}
+REGIME_WEIGHTS = {
+    "PINNED":   {"gex": 0.30, "vol_pcr": 0.10, "dwoi": 0.40, "skew": 0.10, "buildup": 0.10},
+    "TRENDING": {"gex": 0.15, "vol_pcr": 0.25, "dwoi": 0.15, "skew": 0.20, "buildup": 0.25},
+    "EXPIRY":   {"gex": 0.10, "vol_pcr": 0.40, "dwoi": 0.10, "skew": 0.10, "buildup": 0.30},
+    "SQUEEZE":  {"gex": 0.40, "vol_pcr": 0.30, "dwoi": 0.10, "skew": 0.10, "buildup": 0.10},
+}
 
-    max_risk_rs    = capital * risk_pct / 100
-    risk_per_lot   = entry_price * lot_size * sl_pct / 100
-    lots           = max(1, int(max_risk_rs / risk_per_lot)) if risk_per_lot > 0 else 1
-    actual_risk    = lots * risk_per_lot
-    allocation     = lots * lot_size * entry_price
+PCR_BULLISH_THRESHOLD = 1.2
+PCR_BEARISH_THRESHOLD = 0.8
+IV_SKEW_CRITICAL_LEVEL = 2.0
+
+
+def compute_gex(records: list, spot: dict|float, lot_size: int = 50) -> dict:
+    total_call_gex = 0.0
+    total_put_gex = 0.0
+    gex_by_strike = []
+    
+    for row in records:
+        ce = row.get("CE", {}) or {}
+        pe = row.get("PE", {}) or {}
+        strike = row.get("strikePrice", 0)
+        
+        ce_oi = ce.get("openInterest", 0) or 0
+        ce_gamma = ce.get("gamma", 0.0) or 0.0
+        if ce_oi and ce_gamma:
+            cgex = (ce_oi * ce_gamma * lot_size * (spot ** 2)) / 100
+            total_call_gex += cgex
+            
+        pe_oi = pe.get("openInterest", 0) or 0
+        pe_gamma = pe.get("gamma", 0.0) or 0.0
+        if pe_oi and pe_gamma:
+            pgex = (pe_oi * pe_gamma * lot_size * (spot ** 2)) / 100
+            total_put_gex += pgex
+            
+        if ce_oi or pe_oi:
+            gex_by_strike.append({
+                "strike": strike,
+                "net_gex_at_strike": (ce_oi * ce_gamma) - (pe_oi * pe_gamma)
+            })
+            
+    net_gex = total_call_gex - total_put_gex
+    regime = "POSITIVE" if net_gex > 0 else "NEGATIVE"
+    
+    sorted_strikes = sorted(gex_by_strike, key=lambda x: abs(x["net_gex_at_strike"]))
+    zgl = sorted_strikes[0]["strike"] if sorted_strikes else spot
 
     return {
-        "lots":        lots,
-        "risk_per_lot": round(risk_per_lot, 2),
-        "total_risk":  round(actual_risk, 2),
-        "allocation":  round(allocation, 2),
-        "risk_pct_of_capital": round(actual_risk / capital * 100, 2),
+        "net_gex": net_gex,
+        "gex_by_strike": gex_by_strike,
+        "zero_gamma_level": zgl,
+        "gex_regime": regime
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# score_option  (v4 — all bugs fixed)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def score_option(
-    side:     dict,
-    spot:     float,
-    symbol:   str  = "",
-    dte:      int  = 30,
-    iv_rank:  float = 50.0,
-) -> int:
-    """
-    Score a single option [0–100].
-    MUST have strikePrice injected: {**ce, "strikePrice": strike}
-
-    Components:
-      30 pts  OI momentum   (% build-up, min 100 OI guard)
-      25 pts  Activity      (V/OI ratio, self-scaling)
-      20 pts  ATM proximity (per-symbol interval)
-      15 pts  IV quality    (15-40 sweet spot; IVR-adjusted)
-      10 pts  Liquidity     (non-zero LTP)
-    """
-    oi     = side.get("openInterest", 0) or 0
-    oi_chg = side.get("changeinOpenInterest", 0) or 0
-    vol    = side.get("totalTradedVolume", 0) or 0
-    iv     = side.get("impliedVolatility", 0) or 0
-    ltp    = side.get("lastPrice", 0) or 0
-    strike = side.get("strikePrice", 0) or 0
-    score  = 0
-
-    # 1 — OI momentum
-    if oi > 100:
-        oi_pct = oi_chg / oi * 100
-        score += int(min(30, max(0, oi_pct * 1.5)))
-
-    # 2 — V/OI ratio
-    if oi > 0:
-        score += int(min(25, (vol / oi) * 20))
-
-    # 3 — ATM proximity
-    if spot > 0 and strike > 0:
-        interval   = get_strike_interval(symbol) if symbol else 10
-        bands_away = abs(spot - strike) / max(interval, 1)
-        score     += int(max(0, 1.0 - bands_away / 6.0) * 20)
-
-    # 4 — IV quality (IVR-aware)
-    if iv > 0:
-        if 15 <= iv <= 40:
-            base_iv = 15
-        elif iv < 15:
-            base_iv = int(iv / 15 * 10)
-        else:
-            base_iv = max(0, int(15 - (iv - 40) * 0.35))
-
-        # Bonus: if IVR < 30, buying options is cheaper — slight boost
-        # Penalty: if IVR > 80, options are expensive — penalise buyers
-        if iv_rank < 30:
-            base_iv = min(15, int(base_iv * 1.2))
-        elif iv_rank > 80:
-            base_iv = int(base_iv * 0.7)
-        score += base_iv
-
-    # 5 — Liquidity
-    if ltp > 0:
-        score += 10
-
-    return min(100, max(0, score))
+def compute_iv_skew(records: list, spot: float, symbol: str) -> dict:
+    closest_dist = float('inf')
+    atm_row = None
+    for row in records:
+        dist = abs(row.get("strikePrice", 0) - spot)
+        if dist < closest_dist:
+            closest_dist = dist
+            atm_row = row
+            
+    if not atm_row:
+        return {"skew_value": 0.0, "skew_signal": "NEUTRAL", "skew_percentile": 50}
+        
+    ce_iv = (atm_row.get("CE") or {}).get("impliedVolatility", 0.0)
+    pe_iv = (atm_row.get("PE") or {}).get("impliedVolatility", 0.0)
+    
+    skew = pe_iv - ce_iv
+    
+    if skew > IV_SKEW_CRITICAL_LEVEL:
+        signal = "BEARISH"
+    elif skew < -1.0:
+        signal = "BULLISH"
+    else:
+        signal = "NEUTRAL"
+        
+    percentile = max(0, min(100, (skew + 1.5) * 20))
+    
+    return {
+        "skew_value": skew,
+        "skew_signal": signal,
+        "skew_percentile": percentile
+    }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# compute_stock_score  (v4)
-# ══════════════════════════════════════════════════════════════════════════════
+def detect_buildup_type(records: list, spot: float, prev_records: list = None) -> dict:
+    if not prev_records:
+        return {"overall": "NEUTRAL", "strikes": {}}
+        
+    prev_map = {r.get("strikePrice"): r for r in prev_records}
+    
+    long_buildup_pts = 0
+    short_buildup_pts = 0
+    long_unwind_pts = 0
+    short_cover_pts = 0
+    
+    strike_buildups = {}
+    
+    for row in records:
+        strike = row.get("strikePrice", 0)
+        p_row = prev_map.get(strike)
+        if not p_row: continue
+        
+        ce = row.get("CE", {}) or {}; p_ce = p_row.get("CE", {}) or {}
+        c_oi_chg = (ce.get("openInterest", 0) or 0) - (p_ce.get("openInterest", 0) or 0)
+        c_ltp_chg = (ce.get("lastPrice", 0) or 0) - (p_ce.get("lastPrice", 0) or 0)
+        
+        ce_state = "NEUTRAL"
+        if c_ltp_chg > 0 and c_oi_chg > 0:
+            ce_state = "LONG_BUILDUP"; long_buildup_pts += 1
+        elif c_ltp_chg < 0 and c_oi_chg > 0:
+            ce_state = "SHORT_BUILDUP"; short_buildup_pts += 1
+        elif c_ltp_chg < 0 and c_oi_chg < 0:
+            ce_state = "LONG_UNWINDING"; long_unwind_pts += 1
+        elif c_ltp_chg > 0 and c_oi_chg < 0:
+            ce_state = "SHORT_COVERING"; short_cover_pts += 1
+            
+        strike_buildups[strike] = ce_state
 
-def compute_stock_score(
+    bull_pts = long_buildup_pts + short_cover_pts
+    bear_pts = short_buildup_pts + long_unwind_pts
+    
+    overall = "NEUTRAL"
+    if bull_pts > bear_pts * 1.5: overall = "BULLISH"
+    elif bear_pts > bull_pts * 1.5: overall = "BEARISH"
+    
+    return {
+        "overall": overall,
+        "strikes": strike_buildups
+    }
+
+
+def detect_regime(records: list, spot: float, symbol: str, dte: int, ivr: float) -> str:
+    if dte <= 2:
+        return "EXPIRY"
+        
+    gex_data = compute_gex(records, spot)
+    net_gex = gex_data["net_gex"]
+    
+    total_oi = 0
+    strike_ois = []
+    for r in records:
+        o = (r.get("CE", {}) or {}).get("openInterest", 0) + (r.get("PE", {}) or {}).get("openInterest", 0)
+        total_oi += o
+        strike_ois.append(o)
+    
+    strike_ois.sort(reverse=True)
+    top_3_oi = sum(strike_ois[:3])
+    ocr = (top_3_oi / total_oi) if total_oi > 0 else 0
+    
+    if ocr > 0.45 and ivr < 30 and dte <= 5 and net_gex < 0:
+        return "SQUEEZE"
+        
+    if net_gex > 0:
+        return "PINNED"
+        
+    return "TRENDING"
+
+
+def score_option_v2(side: dict, spot: float, symbol: str, dte: int, iv_rank: float, regime: str, greeks: dict) -> dict:
+    delta = greeks.get("delta", 0.5)
+    
+    oi = side.get("openInterest", 0) or 0
+    vol = side.get("totalTradedVolume", 0) or 0
+    iv = side.get("impliedVolatility", 0) or 0
+    
+    d_score = abs(delta) * 25
+    
+    liq_ratio = (vol / max(1, oi)) if oi > 0 else 0
+    l_score = min(50, liq_ratio * 10)
+    
+    iv_score = 0
+    if 15 < iv < 40: iv_score = 25
+    elif iv <= 15: iv_score = 15
+    else: iv_score = max(0, 25 - (iv-40))
+    
+    total = min(100, d_score + l_score + iv_score)
+    
+    return {
+        "score": int(total),
+        "confidence": round(min(1.0, l_score / 50.0), 2),
+    }
+
+
+def compute_stock_score_v2(
     chain_data:  dict,
     spot:        float,
     symbol:      str   = "",
     expiry_str:  str   = "",
     iv_rank_data: dict = None,
+    prev_chain_data: dict = None,
+    fii_net: float = 0.0
 ) -> dict:
-    """
-    Full stock-level analysis.
-    Returns: pcr, iv, oi_change, vol_spike, signal, score, top_picks,
-             max_pain, oi_walls, signal_reasons, greeks_atm, days_to_expiry
-    """
+    
     records = chain_data.get("records", {}).get("data", [])
     _empty  = dict(
         pcr=1.0, iv=0, oi_change=0, vol_spike=0.0,
-        signal="NEUTRAL", score=0, top_picks=[],
+        signal="NEUTRAL", score=0, top_picks=[], confidence=0, regime="TRENDING", metrics={},
         max_pain=None, oi_walls={}, signal_reasons=[],
-        greeks_atm={}, days_to_expiry=30
+        greeks_atm={}, days_to_expiry=30, iv_rank=50.0
     )
     if not records or spot <= 0:
         return _empty
-
-    dte        = days_to_expiry(expiry_str) if expiry_str else 30
-    iv_rank    = (iv_rank_data or {}).get("iv_rank", 50.0)
-    atm_strike = nearest_atm(spot, symbol)
-    interval   = get_strike_interval(symbol)
-    atm_band   = interval * 3
-
-    tce_oi = tpe_oi = tce_vol = tpe_vol = tce_oi_chg = tpe_oi_chg = 0
-    oi_changes: list = []
-    atm_iv_ce = atm_iv_pe = 0.0
-    all_options: list = []
-    greeks_atm: dict = {}
-
+        
+    dte = days_to_expiry(expiry_str) if expiry_str else 5
+    iv_rank = (iv_rank_data or {}).get("iv_rank", 50.0)
+    
+    regime = detect_regime(records, spot, symbol, dte, iv_rank)
+    weights = REGIME_WEIGHTS[regime]
+    
+    lot_size = DEFAULT_LOT_SIZE.get(symbol, 50)
+    
+    # Needs greeks computation for all strikes to be accurate
     for row in records:
-        ce     = row.get("CE", {}) or {}
-        pe     = row.get("PE", {}) or {}
-        strike = row.get("strikePrice", 0) or 0
+        strike = row.get("strikePrice", 0)
+        ce = row.get("CE", {}) or {}
+        pe = row.get("PE", {}) or {}
+        
+        iv_ce = ce.get("impliedVolatility", 20.0) or 20.0
+        iv_pe = pe.get("impliedVolatility", 20.0) or 20.0
+        
+        ce_greeks = black_scholes_greeks(spot, strike, iv_ce, dte, "CE")
+        pe_greeks = black_scholes_greeks(spot, strike, iv_pe, dte, "PE")
+        
+        if "CE" in row and row["CE"]: row["CE"].update(ce_greeks)
+        if "PE" in row and row["PE"]: row["PE"].update(pe_greeks)
 
-        ce_k = {**ce, "strikePrice": strike}
-        pe_k = {**pe, "strikePrice": strike}
-
-        ce_oi  = ce.get("openInterest", 0) or 0
-        pe_oi  = pe.get("openInterest", 0) or 0
-        ce_vol = ce.get("totalTradedVolume", 0) or 0
-        pe_vol = pe.get("totalTradedVolume", 0) or 0
-        ce_chg = ce.get("changeinOpenInterest", 0) or 0
-        pe_chg = pe.get("changeinOpenInterest", 0) or 0
-
-        tce_oi += ce_oi; tpe_oi += pe_oi
-        tce_vol += ce_vol; tpe_vol += pe_vol
-        tce_oi_chg += ce_chg; tpe_oi_chg += pe_chg
-
-        for oi, chg in [(ce_oi, ce_chg), (pe_oi, pe_chg)]:
-            if oi > 100:
-                oi_changes.append(chg / oi * 100)
-
-        if abs(strike - atm_strike) <= atm_band:
-            if ce.get("impliedVolatility"): atm_iv_ce = float(ce["impliedVolatility"])
-            if pe.get("impliedVolatility"): atm_iv_pe = float(pe["impliedVolatility"])
-
-        # Compute Greeks for ATM strike
-        if strike == atm_strike and not greeks_atm:
-            iv_for_greeks = atm_iv_ce or atm_iv_pe or 20.0
-            greeks_atm = {
-                "CE": black_scholes_greeks(spot, strike, iv_for_greeks, dte, "CE"),
-                "PE": black_scholes_greeks(spot, strike, iv_for_greeks, dte, "PE"),
-                "strike": strike,
-            }
-
-        ce_s = score_option(ce_k, spot, symbol, dte, iv_rank)
-        pe_s = score_option(pe_k, spot, symbol, dte, iv_rank)
-
-        if ce.get("lastPrice", 0) > 0:
-            all_options.append({"type": "CE", "strike": strike,
-                                 "ltp": ce["lastPrice"], "score": ce_s})
-        if pe.get("lastPrice", 0) > 0:
-            all_options.append({"type": "PE", "strike": strike,
-                                 "ltp": pe["lastPrice"], "score": pe_s})
-
-    # ── Metrics ───────────────────────────────────────────────────────────────
-    pcr       = round(tpe_oi / tce_oi, 3) if tce_oi > 0 else 1.0
-    avg_oi    = round(sum(oi_changes) / len(oi_changes), 2) if oi_changes else 0.0
-    total_oi  = tce_oi + tpe_oi
-    total_vol = tce_vol + tpe_vol
-    vol_spike = round(total_vol / max(1, total_oi), 3)
-    atm_iv    = round((atm_iv_ce + atm_iv_pe) / 2 if atm_iv_ce and atm_iv_pe
-                      else atm_iv_ce or atm_iv_pe, 1)
-
-    mp    = compute_max_pain(records)
-    walls = oi_walls(records, spot)
-
-    # ── Signal (multi-factor) ─────────────────────────────────────────────────
-    bv = bev = 0
-    reasons: list = []
-
-    if pcr > 1.4:   bv += 2;  reasons.append(f"PCR {pcr} → heavy put writing (bullish)")
-    elif pcr > 1.1: bv += 1;  reasons.append(f"PCR {pcr} elevated (mild bullish)")
-    elif pcr < 0.7: bev += 2; reasons.append(f"PCR {pcr} → heavy call writing (bearish)")
-    elif pcr < 0.9: bev += 1; reasons.append(f"PCR {pcr} suppressed (bearish)")
-
-    if tce_oi_chg > 0 and tpe_oi_chg < 0:
-        bev += 1; reasons.append("CE OI building + PE unwinding → bearish")
-    elif tpe_oi_chg > 0 and tce_oi_chg < 0:
-        bv += 1;  reasons.append("PE OI building + CE unwinding → bullish")
-
-    if total_vol > 0:
-        if tce_vol / total_vol > 0.62:
-            bev += 1; reasons.append(f"CE volume dominant ({tce_vol/total_vol:.0%})")
-        elif tpe_vol / total_vol > 0.62:
-            bv += 1;  reasons.append(f"PE volume dominant ({tpe_vol/total_vol:.0%})")
-
-    if mp and spot > 0:
-        mp_pct = (mp - spot) / spot * 100
-        if mp_pct < -1.5:   bev += 1; reasons.append(f"Max Pain ₹{mp:.0f} below spot ({mp_pct:+.1f}%)")
-        elif mp_pct > 1.5:  bv += 1;  reasons.append(f"Max Pain ₹{mp:.0f} above spot ({mp_pct:+.1f}%)")
-
-    # IVR factor
-    if iv_rank > 0:
-        if iv_rank > 75:
-            reasons.append(f"IVR {iv_rank:.0f} → options expensive, favour selling")
-        elif iv_rank < 25:
-            reasons.append(f"IVR {iv_rank:.0f} → options cheap, favour buying")
-
-    signal = "BULLISH" if bv > bev else "BEARISH" if bev > bv else "NEUTRAL"
-
-    # ── Composite Score ───────────────────────────────────────────────────────
-    activity_score = min(30, vol_spike / 1.5 * 30)
-    oi_mom_score   = min(20, abs(avg_oi) * 1.5)
-    iv_score       = (20 if 15 <= atm_iv <= 40 else
-                      int(atm_iv / 15 * 15) if 0 < atm_iv < 15 else
-                      max(0, int(20 - (atm_iv - 40) * 0.4)) if atm_iv > 40 else 5)
-    signal_score   = max(bv, bev) * 8
-    mp_score       = max(0, int(10 - abs(mp - spot) / spot * 100 * 2)) if mp and spot else 0
-    # Expiry bonus: near expiry + good setup = higher urgency score
-    expiry_bonus   = max(0, int((30 - dte) / 30 * 10)) if dte <= 30 else 0
-
-    score = min(100, max(0, int(activity_score + oi_mom_score + iv_score +
-                                signal_score + mp_score + expiry_bonus)))
-
+    gex_data = compute_gex(records, spot, lot_size)
+    is_spot_above_zgl = spot > gex_data["zero_gamma_level"]
+    gex_bullish = is_spot_above_zgl and gex_data["net_gex"] > 0
+    
+    ce_dwoi = pe_dwoi = ce_vol = pe_vol = tce_oi = tpe_oi = 0
+    all_options = []
+    
+    for r in records:
+        c = r.get("CE", {}) or {}; p = r.get("PE", {}) or {}
+        strike = r.get("strikePrice", 0)
+        
+        ce_oi = c.get("openInterest", 0) or 0
+        pe_oi = p.get("openInterest", 0) or 0
+        
+        tce_oi += ce_oi
+        tpe_oi += pe_oi
+        
+        ce_vol += c.get("totalTradedVolume", 0) or 0
+        pe_vol += p.get("totalTradedVolume", 0) or 0
+        
+        ce_dwoi += ce_oi * abs(c.get("delta", 0.5))
+        pe_dwoi += pe_oi * abs(p.get("delta", 0.5))
+        
+        if c.get("lastPrice", 0) > 0:
+            c_s = score_option_v2(c, spot, symbol, dte, iv_rank, regime, c)
+            all_options.append({"type": "CE", "strike": strike, "ltp": c["lastPrice"], "score": c_s["score"]})
+        if p.get("lastPrice", 0) > 0:
+            p_s = score_option_v2(p, spot, symbol, dte, iv_rank, regime, p)
+            all_options.append({"type": "PE", "strike": strike, "ltp": p["lastPrice"], "score": p_s["score"]})
+        
+    dwoi_pcr = pe_dwoi / ce_dwoi if ce_dwoi > 0 else 1.0
+    vol_pcr = pe_vol / ce_vol if ce_vol > 0 else 1.0
+    pcr = tpe_oi / tce_oi if tce_oi > 0 else 1.0
+    
+    skew_data = compute_iv_skew(records, spot, symbol)
+    prev_records = prev_chain_data.get("records", {}).get("data", []) if prev_chain_data else None
+    buildup_data = detect_buildup_type(records, spot, prev_records)
+    
+    factors = []
+    
+    if gex_bullish: factors.append(1)
+    elif not is_spot_above_zgl: factors.append(-1)
+    else: factors.append(0)
+        
+    if vol_pcr > PCR_BULLISH_THRESHOLD: factors.append(1)
+    elif vol_pcr < PCR_BEARISH_THRESHOLD: factors.append(-1)
+    else: factors.append(0)
+        
+    if dwoi_pcr > PCR_BULLISH_THRESHOLD: factors.append(1)
+    elif dwoi_pcr < PCR_BEARISH_THRESHOLD: factors.append(-1)
+    else: factors.append(0)
+        
+    if skew_data["skew_signal"] == "BULLISH": factors.append(1)
+    elif skew_data["skew_signal"] == "BEARISH": factors.append(-1)
+    else: factors.append(0)
+        
+    if buildup_data["overall"] == "BULLISH": factors.append(1)
+    elif buildup_data["overall"] == "BEARISH": factors.append(-1)
+    else: factors.append(0)
+        
+    bull_count = factors.count(1)
+    bear_count = factors.count(-1)
+    
+    direction = "NEUTRAL"
+    confidence = 0.0
+    
+    if bull_count >= 3 and bull_count > bear_count:
+        direction = "BULLISH"
+        confidence = bull_count / len(factors)
+    elif bear_count >= 3 and bear_count > bull_count:
+        direction = "BEARISH"
+        confidence = bear_count / len(factors)
+        
+    sub_gex     = 100 if factors[0] == 1 else (0 if factors[0] == -1 else 50)
+    sub_volpcr  = min(100, max(0, (vol_pcr - 0.5) * 100))
+    sub_dwoipcr = min(100, max(0, (dwoi_pcr - 0.5) * 100))
+    sub_skew    = 100 - skew_data["skew_percentile"]
+    sub_build   = 100 if factors[4] == 1 else (0 if factors[4] == -1 else 50)
+    
+    weighted_score = (
+        (sub_gex     * weights["gex"]) +
+        (sub_volpcr  * weights["vol_pcr"]) +
+        (sub_dwoipcr * weights["dwoi"]) +
+        (sub_skew    * weights["skew"]) +
+        (sub_build   * weights["buildup"])
+    )
+    
+    if direction == "BEARISH" and fii_net < 0 and symbol in ["NIFTY", "BANKNIFTY"]:
+        weighted_score = max(0, weighted_score / 1.15)
+        
     def _directional_picks(options, signal):
-        """
-        For a directional signal, only return the matching option type.
-        BULLISH → CE only (buying calls on upward move)
-        BEARISH → PE only (buying puts on downward move)
-        NEUTRAL → return top 1 CE + top 1 PE for straddle awareness
-        """
         if signal == "BULLISH":
             candidates = [o for o in options if o["type"] == "CE"]
         elif signal == "BEARISH":
             candidates = [o for o in options if o["type"] == "PE"]
         else:
-            # NEUTRAL: return best of each side, labelled clearly
             ce_best = sorted([o for o in options if o["type"] == "CE"],
                              key=lambda x: x["score"], reverse=True)[:1]
             pe_best = sorted([o for o in options if o["type"] == "PE"],
                              key=lambda x: x["score"], reverse=True)[:1]
             return ce_best + pe_best
-    
         return sorted(candidates, key=lambda x: x["score"], reverse=True)[:2]
     
-    top_picks = _directional_picks(all_options, signal)
+    top_picks = _directional_picks(all_options, direction)
+    
+    mp = compute_max_pain(records)
+    walls = oi_walls(records, spot)
+    
+    atm_strike = nearest_atm(spot, symbol)
+    atm_iv_ce = atm_iv_pe = 20.0
+    greeks_atm = {}
+    
+    for row in records:
+        if row.get("strikePrice") == atm_strike:
+            atm_iv_ce = (row.get("CE") or {}).get("impliedVolatility", 20.0) or 20.0
+            atm_iv_pe = (row.get("PE") or {}).get("impliedVolatility", 20.0) or 20.0
+            
+            greeks_atm = {
+                "CE": black_scholes_greeks(spot, atm_strike, atm_iv_ce, dte, "CE"),
+                "PE": black_scholes_greeks(spot, atm_strike, atm_iv_pe, dte, "PE"),
+                "strike": atm_strike,
+            }
+            break
+
+    atm_iv = round((atm_iv_ce + atm_iv_pe) / 2, 1)
 
     return dict(
-        pcr            = pcr,
+        pcr            = round(pcr, 3),
         iv             = atm_iv,
-        oi_change      = avg_oi,
-        vol_spike      = vol_spike,
-        signal         = signal,
-        score          = score,
+        oi_change      = 0, # Deprecated in v2 but kept for schema compatibility
+        vol_spike      = round((ce_vol + pe_vol) / max(1, tce_oi + tpe_oi), 3),
+        signal         = direction,
+        score          = int(weighted_score),
         top_picks      = top_picks,
         max_pain       = mp,
         oi_walls       = walls,
-        signal_reasons = reasons,
+        signal_reasons = [f"Regime: {regime}"], # Reused generic signals reason logic
         greeks_atm     = greeks_atm,
         days_to_expiry = dte,
         iv_rank        = iv_rank,
+        confidence     = confidence,
+        regime         = regime,
+        metrics        = {
+            "gex": gex_data["net_gex"],
+            "vol_pcr": round(vol_pcr, 2),
+            "dwoi_pcr": round(dwoi_pcr, 2),
+            "iv_skew": round(skew_data["skew_value"], 2)
+        }
     )
+

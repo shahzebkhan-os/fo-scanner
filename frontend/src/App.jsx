@@ -1,15 +1,16 @@
-// App.jsx — NSE F&O Scanner v4 Frontend
+// App.jsx — NSE F&O Scanner v5 Frontend
 // Features: Scanner, Chain, Greeks, OI Heatmap, Sector Map, UOA,
 //           Straddle Screen, Portfolio Dashboard, Settings, Dark Mode
+// v5: QoL improvements — auto-refresh, hover effects, TP/SL indicators
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  CartesianGrid, Cell, ReferenceLine
+  CartesianGrid, Cell, ReferenceLine, AreaChart, Area
 } from "recharts";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const API = "";   // same-origin; set to http://localhost:8000 for dev
+const API = "http://localhost:8000";   // same-origin; set to http://localhost:8000 for dev
 
 const TABS = [
   { id: "scanner", label: "Scanner", icon: "⚡" },
@@ -21,19 +22,20 @@ const TABS = [
   { id: "straddle", label: "Straddle", icon: "⚖" },
   { id: "portfolio", label: "P&L", icon: "💰" },
   { id: "manual", label: "Trade", icon: "🚀" },
+  { id: "accuracy", label: "Accuracy", icon: "📈" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const fmt = (n, d = 2) => (n ?? 0).toFixed(d);
+const fmt = (n, d = 2) => Number(n || 0).toFixed(d);
 const pct = (n) => `${n >= 0 ? "+" : ""}${fmt(n, 1)}%`;
 const signalColor = (s) =>
   s === "BULLISH" ? "#22c55e" : s === "BEARISH" ? "#ef4444" : "#94a3b8";
 const signalBg = (s) =>
   s === "BULLISH" ? "rgba(34,197,94,.15)" : s === "BEARISH" ? "rgba(239,68,68,.15)" : "rgba(148,163,184,.1)";
 
-async function apiFetch(path) {
-  const r = await fetch(API + path);
+async function apiFetch(path, options = {}) {
+  const r = await fetch(API + path, options);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -45,6 +47,7 @@ export default function App() {
   const [chainSymbol, setChainSymbol] = useState("NIFTY");
   const [marketStatus, setMarketStatus] = useState(null);
   const [scanData, setScanData] = useState([]);  // lifted for CSV export
+  const [lotSizes, setLotSizes] = useState({});
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
@@ -67,11 +70,14 @@ export default function App() {
 
   useEffect(() => {
     apiFetch("/health").then(d => setMarketStatus(d)).catch(() => { });
+    apiFetch("/api/lot-sizes").then(setLotSizes).catch(() => {});
     const id = setInterval(() => apiFetch("/health").then(setMarketStatus).catch(() => { }), 30000);
     return () => clearInterval(id);
   }, []);
 
-  const goChain = (sym) => { setChainSymbol(sym); setTab("chain"); };
+  const goChain  = (sym) => { setChainSymbol(sym); setTab("chain"); };
+  const [greeksSymbol, setGreeksSymbol] = useState("NIFTY");
+  const goGreeks = (sym) => { setGreeksSymbol(sym); setTab("greeks"); };
 
   const theme = {
     bg: dark ? "#0a0e1a" : "#f1f5f9",
@@ -90,21 +96,40 @@ export default function App() {
       fontFamily: "'IBM Plex Mono', 'Fira Code', monospace",
       fontSize: 13
     }}>
+      {/* Global QoL styles */}
+      <style>{`
+        @keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }
+        @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+        .tab-btn { transition: all 0.2s ease !important; }
+        .tab-btn:hover { background: rgba(99,102,241,.08) !important; }
+        .scan-card { transition: all 0.2s ease; }
+        .scan-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,.15); }
+        .trade-row { transition: background 0.15s ease; }
+        .trade-row:hover { background: rgba(99,102,241,.04) !important; }
+        .clickable-btn { transition: all 0.15s ease; }
+        .clickable-btn:hover { opacity: 0.85; transform: scale(1.02); }
+        .clickable-btn:active { transform: scale(0.98); }
+      `}</style>
+
       {/* Header */}
       <header style={{
         background: theme.card, borderBottom: `1px solid ${theme.border}`,
         padding: "0 16px", display: "flex", alignItems: "center",
         justifyContent: "space-between", height: 52, position: "sticky",
-        top: 0, zIndex: 100
+        top: 0, zIndex: 100,
+        backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+        background: dark ? "rgba(17,24,39,.92)" : "rgba(255,255,255,.92)"
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ fontSize: 18, fontWeight: 700, color: theme.accent }}>F&O</span>
-          <span style={{ color: theme.muted }}>Scanner v4</span>
+          <span style={{ fontSize: 18, fontWeight: 700, color: theme.accent, letterSpacing: -0.5 }}>F&O</span>
+          <span style={{ color: theme.muted, fontSize: 12 }}>Scanner v5</span>
           {marketStatus && (
             <span style={{
               padding: "2px 8px", borderRadius: 4, fontSize: 11,
               background: signalBg(marketStatus.open ? "BULLISH" : "BEARISH"),
-              color: marketStatus.open ? theme.green : theme.red
+              color: marketStatus.open ? theme.green : theme.red,
+              animation: marketStatus.open ? "pulse 2s infinite" : "none"
             }}>
               {marketStatus.open ? "● LIVE" : "○ CLOSED"}
             </span>
@@ -113,8 +138,18 @@ export default function App() {
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => {
             if (!scanData.length) return;
-            const cols = ["symbol", "signal", "score", "ltp", "change_pct", "volume", "pcr", "iv", "oi_change", "vol_spike"];
-            const csv = [cols.join(","), ...scanData.map(r => cols.map(c => r[c] ?? "").join(","))].join("\n");
+            const baseCols = ["symbol", "signal", "score", "ltp", "change_pct", "volume", "pcr", "iv", "oi_change", "vol_spike"];
+            const cols = [...baseCols, "suggested_trade", "trade_score", "lot_value"];
+            const csvRows = scanData.map(r => {
+              const pick = r.top_picks?.[0];
+              const suggested_trade = pick ? `${pick.strike} ${pick.type}` : "";
+              const trade_score = pick ? pick.score : "";
+              const ls = lotSizes[r.symbol] || 0;
+              const lot_value = (pick && ls) ? (pick.ltp * ls).toFixed(2) : "";
+              const rowData = baseCols.map(c => r[c] ?? "");
+              return [...rowData, suggested_trade, trade_score, lot_value].join(",");
+            });
+            const csv = [cols.join(","), ...csvRows].join("\n");
             const a = document.createElement("a");
             a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
             a.download = `fo_scanner_${new Date().toISOString().slice(0, 10)}.csv`;
@@ -144,9 +179,11 @@ export default function App() {
       }}>
         {TABS.map(t => (
           <button key={t.id} onClick={() => setTab(t.id)}
+            className="tab-btn"
             style={{
               padding: "10px 16px", border: "none", cursor: "pointer",
-              background: "none", color: tab === t.id ? theme.accent : theme.muted,
+              background: tab === t.id ? "rgba(99,102,241,.08)" : "none",
+              color: tab === t.id ? theme.accent : theme.muted,
               borderBottom: tab === t.id ? `2px solid ${theme.accent}` : "2px solid transparent",
               whiteSpace: "nowrap", fontFamily: "inherit", fontSize: 12,
               fontWeight: tab === t.id ? 600 : 400
@@ -158,15 +195,17 @@ export default function App() {
 
       {/* Content */}
       <main style={{ padding: 16, maxWidth: 1400, margin: "0 auto" }}>
-        {tab === "scanner" && <ScannerTab theme={theme} onChain={goChain} onData={setScanData} />}
-        {tab === "chain" && <ChainTab theme={theme} symbol={chainSymbol} setSymbol={setChainSymbol} />}
-        {tab === "greeks" && <GreeksTab theme={theme} />}
-        {tab === "heatmap" && <HeatmapTab theme={theme} />}
-        {tab === "sector" && <SectorTab theme={theme} onChain={goChain} />}
-        {tab === "uoa" && <UOATab theme={theme} onChain={goChain} />}
-        {tab === "straddle" && <StraddleTab theme={theme} />}
-        {tab === "portfolio" && <PortfolioTab theme={theme} />}
-        {tab === "settings" && <SettingsTab theme={theme} />}
+        <div style={{ display: tab === "scanner"   ? "block" : "none" }}><ScannerTab theme={theme} onChain={goChain} onGreeks={goGreeks} onData={setScanData} /></div>
+        <div style={{ display: tab === "chain"     ? "block" : "none" }}><ChainTab theme={theme} symbol={chainSymbol} setSymbol={setChainSymbol} /></div>
+        <div style={{ display: tab === "greeks"    ? "block" : "none" }}><GreeksTab theme={theme} symbol={greeksSymbol} /></div>
+        <div style={{ display: tab === "heatmap"   ? "block" : "none" }}><HeatmapTab theme={theme} /></div>
+        <div style={{ display: tab === "sector"    ? "block" : "none" }}><SectorTab theme={theme} onChain={goChain} /></div>
+        <div style={{ display: tab === "uoa"       ? "block" : "none" }}><UOATab theme={theme} onChain={goChain} /></div>
+        <div style={{ display: tab === "straddle"  ? "block" : "none" }}><StraddleTab theme={theme} /></div>
+        <div style={{ display: tab === "portfolio" ? "block" : "none" }}><PortfolioTab theme={theme} /></div>
+        <div style={{ display: tab === "manual"    ? "block" : "none" }}><ManualTradeTab theme={theme} /></div>
+        <div style={{ display: tab === "accuracy"  ? "block" : "none" }}><AccuracyTab theme={theme} /></div>
+        <div style={{ display: tab === "settings"  ? "block" : "none" }}><SettingsTab theme={theme} /></div>
       </main>
     </div>
   );
@@ -203,8 +242,7 @@ function Loader({ theme }) {
         fontSize: 24, animation: "spin 1s linear infinite",
         display: "inline-block"
       }}>⟳</div>
-      <div style={{ marginTop: 8 }}>Loading...</div>
-      <style>{`@keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }`}</style>
+      <div style={{ marginTop: 8, fontSize: 12 }}>Loading...</div>
     </div>
   );
 }
@@ -235,13 +273,17 @@ function SymbolInput({ value, onChange, onSubmit, theme }) {
 // Scanner Tab
 // ══════════════════════════════════════════════════════════════════════════════
 
-function ScannerTab({ theme, onChain, onData }) {
+function ScannerTab({ theme, onChain, onGreeks, onData }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("ALL");
   const [search, setSearch] = useState("");
   const [watchlist, setWatchlist] = useState([]);
   const [showWL, setShowWL] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [countdown, setCountdown] = useState(60);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [savingSnapshot, setSavingSnapshot] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -250,9 +292,23 @@ function ScannerTab({ theme, onChain, onData }) {
       const rows = r.data || [];
       setData(rows);
       if (onData) onData(rows);
+      setLastUpdated(new Date());
+      setCountdown(60);
     } catch (e) { console.error(e); }
     setLoading(false);
   }, []);
+
+  // Auto-refresh countdown
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const timer = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) { load(); return 60; }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [autoRefresh, load]);
 
   useEffect(() => { load(); apiFetch("/api/settings/watchlist").then(r => setWatchlist(r.watchlist || [])); }, []);
 
@@ -276,35 +332,79 @@ function ScannerTab({ theme, onChain, onData }) {
     });
   };
 
+  // Count signals for badges
+  const signalCounts = { ALL: data.length, BULLISH: 0, BEARISH: 0, NEUTRAL: 0 };
+  data.forEach(r => { if (signalCounts[r.signal] !== undefined) signalCounts[r.signal]++; });
+
   return (
     <div>
       {/* Controls */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
-        <button onClick={load} disabled={loading}
+        <button onClick={() => { load(); setCountdown(60); }} disabled={loading}
+          className="clickable-btn"
           style={{
             padding: "6px 14px", borderRadius: 6, background: theme.accent,
-            color: "#fff", border: "none", cursor: "pointer"
           }}>
           {loading ? "⟳ Scanning..." : "⟳ Refresh"}
         </button>
+        <button 
+          onClick={async () => {
+            if (data.length === 0) return alert("No trades to save");
+            if (!window.confirm("Save these suggested trades to Accuracy Tracker?")) return;
+            setSavingSnapshot(true);
+            try {
+              const res = await apiFetch("/api/tracker/snapshot/manual", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ results: data }),
+              });
+              if (res.status === "success") {
+                alert(`Snapshot saved successfully! Added ${res.trades_saved} trades.`);
+              } else {
+                alert(res.message || "No trades met criteria.");
+              }
+            } catch (e) {
+              console.error(e);
+              alert("Failed to save snapshot.");
+            }
+            setSavingSnapshot(false);
+          }} 
+          disabled={loading || savingSnapshot || data.length === 0}
+          className="clickable-btn"
+          style={{
+            padding: "6px 14px", borderRadius: 6, border: `1px solid ${theme.border}`,
+            background: "transparent", color: theme.text, cursor: "pointer", fontWeight: 600,
+            opacity: (loading || savingSnapshot || data.length === 0) ? 0.5 : 1
+          }}>
+          {savingSnapshot ? "Saving..." : "💾 Save Snapshot"}
+        </button>
         {["ALL", "BULLISH", "BEARISH", "NEUTRAL"].map(f => (
           <button key={f} onClick={() => setFilter(f)}
+            className="clickable-btn"
             style={{
               padding: "4px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
               background: filter === f ? signalBg(f) : "none",
               color: filter === f ? signalColor(f) : theme.muted,
-              cursor: "pointer", fontFamily: "inherit", fontSize: 12
+              cursor: "pointer", fontFamily: "inherit", fontSize: 12,
+              display: "flex", alignItems: "center", gap: 4
             }}>
             {f}
+            <span style={{
+              background: filter === f ? signalColor(f) : theme.border,
+              color: filter === f ? "#fff" : theme.muted,
+              borderRadius: 10, padding: "1px 6px", fontSize: 10, fontWeight: 700,
+              minWidth: 18, textAlign: "center"
+            }}>{signalCounts[f]}</span>
           </button>
         ))}
         <input value={search} onChange={e => setSearch(e.target.value)}
-          placeholder="Search..."
+          placeholder="🔍 Search..."
           style={{
             padding: "5px 10px", borderRadius: 6, border: `1px solid ${theme.border}`,
             background: theme.bg, color: theme.text, fontFamily: "inherit", fontSize: 12
           }} />
         <button onClick={() => setShowWL(w => !w)}
+          className="clickable-btn"
           style={{
             padding: "4px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
             background: showWL ? "rgba(99,102,241,.15)" : "none",
@@ -313,22 +413,46 @@ function ScannerTab({ theme, onChain, onData }) {
           ★ Watchlist
         </button>
         <span style={{ color: theme.muted, fontSize: 11 }}>{filtered.length} symbols</span>
+        {/* Auto-refresh controls */}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          <button onClick={() => setAutoRefresh(a => !a)}
+            style={{
+              padding: "3px 8px", borderRadius: 4, border: `1px solid ${theme.border}`,
+              background: autoRefresh ? "rgba(34,197,94,.12)" : "none",
+              color: autoRefresh ? theme.green : theme.muted, cursor: "pointer",
+              fontSize: 11, fontFamily: "inherit"
+            }}>
+            {autoRefresh ? "⏱ Auto" : "⏸ Paused"}
+          </button>
+          {autoRefresh && (
+            <span style={{ fontSize: 11, color: theme.muted, fontVariantNumeric: "tabular-nums" }}>
+              {countdown}s
+            </span>
+          )}
+          {lastUpdated && (
+            <span style={{ fontSize: 10, color: theme.muted }}>
+              {lastUpdated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+            </span>
+          )}
+        </div>
       </div>
 
       {loading && <Loader theme={theme} />}
 
       {/* Grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
-        {filtered.map(r => (
-          <ScanCard key={r.symbol} r={r} theme={theme} onChain={onChain}
-            isWatched={watchlist.includes(r.symbol)} onToggleWL={toggleWL} />
+        {filtered.map((r, idx) => (
+          <div key={r.symbol} className="scan-card" style={{ animation: `fadeIn 0.3s ease ${idx * 0.02}s both` }}>
+            <ScanCard r={r} theme={theme} onChain={onChain} onGreeks={onGreeks}
+              isWatched={watchlist.includes(r.symbol)} onToggleWL={toggleWL} />
+          </div>
         ))}
       </div>
     </div>
   );
 }
 
-function ScanCard({ r, theme, onChain, isWatched, onToggleWL }) {
+function ScanCard({ r, theme, onChain, onGreeks, isWatched, onToggleWL }) {
   const [expanded, setExpanded] = useState(false);
   const sig = r.signal || "NEUTRAL";
 
@@ -414,16 +538,17 @@ function ScanCard({ r, theme, onChain, isWatched, onToggleWL }) {
           style={{
             flex: 1, padding: "8px", background: "none", border: "none",
             cursor: "pointer", color: theme.accent, fontFamily: "inherit",
-            fontSize: 11, borderRight: `1px solid ${theme.border}`
+            fontSize: 11, fontWeight: 600, borderRight: `1px solid ${theme.border}`
           }}>
-          View Chain
+          📈 Track
         </button>
-        <button onClick={() => onChain(r.symbol)}
+        <button onClick={() => onGreeks && onGreeks(r.symbol)}
           style={{
             flex: 1, padding: "8px", background: "none", border: "none",
-            cursor: "pointer", color: theme.muted, fontFamily: "inherit", fontSize: 11
+            cursor: "pointer", color: theme.muted, fontFamily: "inherit",
+            fontSize: 11
           }}>
-          Track →
+          🔢 Greeks
         </button>
       </div>
     </div>
@@ -431,11 +556,25 @@ function ScanCard({ r, theme, onChain, isWatched, onToggleWL }) {
 }
 
 function ScoreDial({ score, theme }) {
-  const color = score >= 75 ? "#22c55e" : score >= 50 ? "#f59e0b" : "#ef4444";
+  // v5 thresholds: 85+ is high conviction (trade-worthy), 70+ is moderate
+  const color = score >= 85 ? "#22c55e" : score >= 70 ? "#f59e0b" : score >= 50 ? "#fb923c" : "#ef4444";
+  const label = score >= 85 ? "HIGH" : score >= 70 ? "MED" : "LOW";
+  const pct = Math.min(100, score);
   return (
-    <div style={{ textAlign: "center", minWidth: 48 }}>
-      <div style={{ fontSize: 20, fontWeight: 700, color }}>{score}</div>
-      <div style={{ fontSize: 9, color: theme.muted }}>SCORE</div>
+    <div style={{ textAlign: "center", minWidth: 52 }}>
+      <div style={{ position: "relative", width: 48, height: 48, margin: "0 auto" }}>
+        <svg width="48" height="48" viewBox="0 0 48 48">
+          <circle cx="24" cy="24" r="20" fill="none" stroke={theme.border} strokeWidth="3" />
+          <circle cx="24" cy="24" r="20" fill="none" stroke={color} strokeWidth="3"
+            strokeDasharray={`${pct * 1.26} 126`} strokeLinecap="round"
+            transform="rotate(-90 24 24)" style={{ transition: "stroke-dasharray 0.5s ease" }} />
+        </svg>
+        <div style={{
+          position: "absolute", top: "50%", left: "50%",
+          transform: "translate(-50%, -50%)", fontSize: 14, fontWeight: 700, color
+        }}>{score}</div>
+      </div>
+      <div style={{ fontSize: 9, color, fontWeight: 600, marginTop: 2 }}>{label}</div>
     </div>
   );
 }
@@ -460,7 +599,10 @@ function ChainTab({ theme, symbol, setSymbol }) {
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(symbol, expiry); }, [symbol]);
+  useEffect(() => {
+    setInput(symbol);
+    load(symbol, expiry);
+  }, [symbol]);
 
   const handleSubmit = () => { setSymbol(input); load(input, expiry); };
 
@@ -549,9 +691,8 @@ function ChainTab({ theme, symbol, setSymbol }) {
 // Greeks Tab
 // ══════════════════════════════════════════════════════════════════════════════
 
-function GreeksTab({ theme }) {
-  const [symbol, setSymbol] = useState("NIFTY");
-  const [input, setInput] = useState("NIFTY");
+function GreeksTab({ theme, symbol = "NIFTY" }) {
+  const [input, setInput] = useState(symbol);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -562,13 +703,17 @@ function GreeksTab({ theme }) {
     setLoading(false);
   };
 
-  useEffect(() => { load(symbol); }, []);
+  // Sync input box and reload whenever parent changes the symbol (e.g. via Scanner Track)
+  useEffect(() => {
+    setInput(symbol);
+    load(symbol);
+  }, [symbol]);
 
   return (
     <div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <SymbolInput value={input} onChange={setInput}
-          onSubmit={() => { setSymbol(input); load(input); }} theme={theme} />
+          onSubmit={() => load(input)} theme={theme} />
       </div>
 
       {loading && <Loader theme={theme} />}
@@ -975,6 +1120,36 @@ function ManualTradeTab({ theme }) {
 
   // We maintain a state of "entry forms" keyed by symbol
   const [forms, setForms] = useState({});
+  const [sortConfig, setSortConfig] = useState({ key: "score", direction: "desc" });
+
+  const sortedData = [...data].sort((a, b) => {
+    let valA, valB;
+    if (sortConfig.key === "score") {
+      valA = a.score || 0;
+      valB = b.score || 0;
+    } else if (sortConfig.key === "pick_score") {
+      valA = (a.top_picks && a.top_picks[0]) ? a.top_picks[0].score : 0;
+      valB = (b.top_picks && b.top_picks[0]) ? b.top_picks[0].score : 0;
+    } else if (sortConfig.key === "symbol") {
+      valA = a.symbol || "";
+      valB = b.symbol || "";
+    }
+    
+    if (valA < valB) return sortConfig.direction === "asc" ? -1 : 1;
+    if (valA > valB) return sortConfig.direction === "asc" ? 1 : -1;
+    return 0;
+  });
+
+  const requestSort = (key) => {
+    let direction = "desc";
+    if (sortConfig.key === key && sortConfig.direction === "desc") { direction = "asc"; }
+    setSortConfig({ key, direction });
+  };
+  
+  const SortIcon = ({ col }) => {
+    if (sortConfig.key !== col) return " ↕";
+    return sortConfig.direction === "asc" ? " ↑" : " ↓";
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -990,13 +1165,14 @@ function ManualTradeTab({ theme }) {
       // Initialize form states
       const initialForms = {};
       rows.forEach(row => {
+        const pick = (row.top_picks && row.top_picks.length > 0) ? row.top_picks[0] : null;
         initialForms[row.symbol] = {
           symbol: row.symbol,
-          type: row.signal === "BULLISH" ? "CE" : "PE",
-          strike: "",
-          entry_price: "",
+          type: pick ? pick.type : (row.signal === "BULLISH" ? "CE" : "PE"),
+          strike: pick ? pick.strike : "",
+          entry_price: pick ? pick.ltp : "",
           lots: 1,
-          reason: `Top Signal (Score: ${fmt(row.score, 0)})`
+          reason: pick ? `Manual: Top Pick (Score: ${pick.score})` : `Manual: Top Signal (Score: ${fmt(row.score, 0)})`
         };
       });
       setForms(initialForms);
@@ -1063,94 +1239,107 @@ function ManualTradeTab({ theme }) {
         <button onClick={load} style={{ padding: "6px 14px", borderRadius: 6, background: theme.accent, color: "#fff", border: "none", cursor: "pointer" }}>⟳ Refresh</button>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16 }}>
-        {data.length === 0 && <div style={{ color: theme.muted }}>No active high-confidence signals.</div>}
-        {data.map(row => {
-          const form = forms[row.symbol] || {};
-          const ls = lotSizes[row.symbol] || 1;
-          const qty = (form.lots || 1) * ls;
-          const capital = form.entry_price ? ((+form.entry_price) * qty).toLocaleString("en-IN") : "—";
-          const feedback = formFeedback[row.symbol] || {};
-          const isSubmitting = submitting === row.symbol;
+      <Card theme={theme} style={{ padding: 0, overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, textAlign: "left" }}>
+          <thead>
+            <tr style={{ background: theme.border, color: theme.muted, textTransform: "uppercase", fontSize: 11 }}>
+              <th onClick={() => requestSort("symbol")} style={{ padding: "12px 16px", cursor: "pointer", userSelect: "none" }}>Symbol <SortIcon col="symbol"/></th>
+              <th style={{ padding: "12px 16px" }}>Signal</th>
+              <th onClick={() => requestSort("score")} style={{ padding: "12px 16px", cursor: "pointer", userSelect: "none" }}>Scores <SortIcon col="score"/></th>
+              <th onClick={() => requestSort("pick_score")} style={{ padding: "12px 16px", cursor: "pointer", userSelect: "none" }}>Option Contract <SortIcon col="pick_score"/></th>
+              <th style={{ padding: "12px 16px" }}>Entry Limit</th>
+              <th style={{ padding: "12px 16px" }}>Qty Target</th>
+              <th style={{ padding: "12px 16px", textAlign: "right" }}>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.length === 0 && (
+              <tr><td colSpan="7" style={{ padding: 16, textAlign: "center", color: theme.muted }}>No high-confidence signals found.</td></tr>
+            )}
+            {sortedData.map(row => {
+              const form = forms[row.symbol] || {};
+              const ls = lotSizes[row.symbol] || 1;
+              const pick = (row.top_picks && row.top_picks.length > 0) ? row.top_picks[0] : null;
+              
+              const qty = (form.lots || 1) * ls;
+              const perLot = form.entry_price ? (+form.entry_price) * ls : 0;
+              const capital = form.entry_price ? ((+form.entry_price) * qty).toLocaleString("en-IN") : "—";
+              const feedback = formFeedback[row.symbol] || {};
+              const isSubmitting = submitting === row.symbol;
 
-          return (
-            <Card key={row.symbol} theme={theme} style={{ borderLeft: `4px solid ${signalColor(row.signal)}` }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-                <div>
-                  <div style={{ fontSize: 16, fontWeight: 700 }}>{row.symbol}</div>
-                  <div style={{ color: theme.muted, fontSize: 12 }}>Score: {fmt(row.score, 0)}/100</div>
-                </div>
-                <div style={{
-                  background: signalBg(row.signal), color: signalColor(row.signal),
-                  padding: "4px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700
-                }}>
-                  {row.signal}
-                </div>
-              </div>
-
-              {/* Data Preview */}
-              <div style={{ display: "flex", gap: 12, fontSize: 12, marginBottom: 16, borderBottom: `1px solid ${theme.border}`, paddingBottom: 12 }}>
-                <div>LTP: <b>{fmt(row.ltp)}</b></div>
-                <div>Vol: <b>{row.volume}x</b></div>
-                <div>PCR: <b style={{ color: row.pcr > 1 ? theme.green : row.pcr < 0.7 ? theme.red : theme.text }}>{fmt(row.pcr)}</b></div>
-                <div>OI Δ: <b style={{ color: row.oi_change >= 0 ? theme.green : theme.red }}>{fmt(row.oi_change, 1)}%</b></div>
-              </div>
-
-              {/* Quick Entry Form */}
-              <form onSubmit={(e) => submitTrade(e, row)}>
-                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 10, color: theme.muted, marginBottom: 2 }}>TYPE</div>
-                    <div style={{ display: "flex", gap: 2 }}>
-                      {["CE", "PE"].map(t => (
-                        <button key={t} type="button" onClick={() => updateForm(row.symbol, "type", t)}
-                          style={{
-                            flex: 1, padding: "5px 0", borderRadius: 4, fontWeight: 700, fontSize: 12, cursor: "pointer", border: "none",
-                            background: form.type === t ? (t === "CE" ? theme.green : theme.red) : theme.border,
-                            color: form.type === t ? "#fff" : theme.muted,
-                          }}>{t}</button>
-                      ))}
+              return (
+                <tr key={row.symbol} style={{ borderBottom: `1px solid ${theme.border}` }}>
+                  <td style={{ padding: "12px 16px", fontWeight: 700, verticalAlign: "middle" }}>
+                    {row.symbol}
+                  </td>
+                  <td style={{ padding: "12px 16px", verticalAlign: "middle" }}>
+                    <div style={{
+                      display: "inline-block", background: signalBg(row.signal), color: signalColor(row.signal),
+                      padding: "4px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700
+                    }}>
+                      {row.signal}
                     </div>
-                  </div>
-                  <div style={{ flex: 1.5 }}>
-                    <div style={{ fontSize: 10, color: theme.muted, marginBottom: 2 }}>STRIKE</div>
-                    <input {...inp({ padding: "5px 8px" })} type="number" step="50" placeholder="Strike"
-                      value={form.strike || ""} onChange={e => updateForm(row.symbol, "strike", e.target.value)} required />
-                  </div>
-                </div>
-
-                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 10, color: theme.muted, marginBottom: 2 }}>PRICE (₹)</div>
-                    <input {...inp({ padding: "5px 8px" })} type="number" step="0.05" placeholder="Limit"
-                      value={form.entry_price || ""} onChange={e => updateForm(row.symbol, "entry_price", e.target.value)} required />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 10, color: theme.muted, marginBottom: 2 }}>LOTS ({ls})</div>
-                    <input {...inp({ padding: "5px 8px" })} type="number" min="1" step="1"
-                      value={form.lots || 1} onChange={e => updateForm(row.symbol, "lots", e.target.value)} required />
-                  </div>
-                </div>
-
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, color: theme.muted, marginBottom: 12 }}>
-                  <span>Capital: <b style={{ color: theme.accent }}>₹{capital}</b></span>
-                  <span>Qty: <b>{qty}</b></span>
-                </div>
-
-                {feedback.error && <div style={{ color: theme.red, fontSize: 11, marginBottom: 8 }}>⚠ {feedback.error}</div>}
-                {feedback.success && <div style={{ color: theme.green, fontSize: 11, marginBottom: 8 }}>{feedback.success}</div>}
-
-                <button type="submit" disabled={isSubmitting} style={{
-                  width: "100%", background: isSubmitting ? theme.muted : theme.accent, color: "#fff", border: "none",
-                  borderRadius: 6, padding: "8px", fontWeight: 700, fontSize: 13, cursor: isSubmitting ? "not-allowed" : "pointer",
-                }}>
-                  {isSubmitting ? "Submitting..." : `Enter ${form.type} Trade`}
-                </button>
-              </form>
-            </Card>
-          );
-        })}
-      </div>
+                  </td>
+                  <td style={{ padding: "12px 16px", verticalAlign: "middle", fontSize: 12 }}>
+                    <div>Stock: <b>{fmt(row.score,0)}</b></div>
+                    <div style={{ color: theme.muted }}>Opt: <b>{pick ? pick.score : "—"}</b></div>
+                  </td>
+                  <td style={{ padding: "12px 16px", verticalAlign: "middle" }}>
+                    {pick ? (
+                      <Badge bg={form.type === "CE" ? "rgba(34,197,94,.15)" : "rgba(239,68,68,.15)"} 
+                             color={form.type === "CE" ? theme.green : theme.red} 
+                             label={`${form.strike} ${form.type}`} />
+                    ) : (
+                      <span style={{ color: theme.muted }}>N/A</span>
+                    )}
+                  </td>
+                  <td style={{ padding: "12px 16px", verticalAlign: "middle" }}>
+                    {pick ? (
+                       <div>
+                         <b>₹{fmt(form.entry_price)}</b>
+                         <div style={{ fontSize: 11, color: theme.muted }}>LTP: ₹{fmt(row.ltp)}</div>
+                         {perLot > 0 && (
+                           <div style={{ fontSize: 11, color: theme.accent, fontWeight: 600 }}>Lot: ₹{perLot.toLocaleString("en-IN")}</div>
+                         )}
+                       </div>
+                    ) : "—"}
+                  </td>
+                  <td style={{ padding: "12px 16px", verticalAlign: "middle" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <input 
+                        {...inp({ padding: "4px 8px", width: 60 })} 
+                        type="number" min="1" step="1"
+                        value={form.lots || 1} 
+                        onChange={e => updateForm(row.symbol, "lots", e.target.value)} 
+                        disabled={!pick}
+                      />
+                      <span style={{ fontSize: 11, color: theme.muted }}>lots ({qty})</span>
+                    </div>
+                    <div style={{ fontSize: 11, marginTop: 4, color: theme.muted }}>Cap: ₹{capital}</div>
+                  </td>
+                  <td style={{ padding: "12px 16px", verticalAlign: "middle", textAlign: "right" }}>
+                    {feedback.error ? (
+                      <div style={{ color: theme.red, fontSize: 11, marginBottom: 6 }}>{feedback.error}</div>
+                    ) : feedback.success ? (
+                       <div style={{ color: theme.green, fontSize: 11, marginBottom: 6 }}>{feedback.success}</div>
+                    ) : null}
+                    <button 
+                      onClick={(e) => pick && submitTrade(e, row)} 
+                      disabled={isSubmitting || !pick} 
+                      style={{
+                        padding: "6px 12px", background: isSubmitting || !pick ? theme.border : theme.accent, 
+                        color: isSubmitting || !pick ? theme.muted : "#fff", border: "none",
+                        borderRadius: 6, fontWeight: 700, fontSize: 12, cursor: isSubmitting || !pick ? "not-allowed" : "pointer",
+                      }}>
+                      {isSubmitting ? "Wait..." : "⚡ One-Click Trade"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </Card>
     </div>
   );
 }
@@ -1163,7 +1352,11 @@ function PortfolioTab({ theme }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [openTrades, setOpenTrades] = useState([]);
+  const [closedTrades, setClosedTrades] = useState([]);
   const [noteInput, setNoteInput] = useState({});
+  const [exitInputs, setExitInputs] = useState({}); // { tradeId: exitPrice }
+  const [exitingId, setExitingId]   = useState(null);
+  const [viewType, setViewType] = useState("ALL"); // ALL, AUTO, MANUAL
 
   // ── Manual Trade Form ──
   const [showForm, setShowForm] = useState(false);
@@ -1178,13 +1371,15 @@ function PortfolioTab({ theme }) {
   const load = async () => {
     setLoading(true);
     try {
-      const [p, o, ls] = await Promise.all([
+      const [p, o, ls, hist] = await Promise.all([
         apiFetch("/api/portfolio"),
         apiFetch("/api/paper-trades/active"),
         apiFetch("/api/lot-sizes"),
+        apiFetch("/api/paper-trades/history"),
       ]);
       setData(p);
-      setOpenTrades(o);
+      setOpenTrades(Array.isArray(o) ? o : []);
+      setClosedTrades(Array.isArray(hist) ? hist.slice(0, 20) : []);
       setLotSizes(ls);
     } catch (e) { console.error(e); }
     setLoading(false);
@@ -1197,6 +1392,34 @@ function PortfolioTab({ theme }) {
     if (!note) return;
     await fetch(`${API}/api/paper-trades/${tradeId}/note?note=${encodeURIComponent(note)}`, { method: "POST" });
     setNoteInput(prev => ({ ...prev, [tradeId]: "" }));
+  };
+
+  const exitTrade = async (tradeId) => {
+    const exitPrice = exitInputs[tradeId];
+    setExitingId(tradeId);
+    // Optimistically remove from open list immediately
+    const exitedTrade = openTrades.find(t => t.id === tradeId);
+    setOpenTrades(prev => prev.filter(t => t.id !== tradeId));
+    try {
+      const url = exitPrice
+        ? `${API}/api/paper-trades/${tradeId}/exit?exit_price=${exitPrice}`
+        : `${API}/api/paper-trades/${tradeId}/exit`;
+      const res = await fetch(url, { method: "POST" });
+      if (res.ok) {
+        // Add to closed trades list immediately
+        if (exitedTrade) {
+          const price = exitPrice ? +exitPrice : (exitedTrade.current_price || exitedTrade.entry_price);
+          const pnl = (price - exitedTrade.entry_price) * (exitedTrade.lot_size || 1);
+          setClosedTrades(prev => [{ ...exitedTrade, exit_price: price, pnl, pnl_pct: ((price - exitedTrade.entry_price) / exitedTrade.entry_price * 100), status: "CLOSED" }, ...prev]);
+        }
+        // Reload full portfolio stats in background
+        load();
+      } else {
+        // Rollback on failure
+        setOpenTrades(prev => exitedTrade ? [exitedTrade, ...prev] : prev);
+      }
+    } catch (ex) { console.error(ex); setOpenTrades(prev => exitedTrade ? [exitedTrade, ...prev] : prev); }
+    setExitingId(null);
   };
 
   const submitTrade = async (e) => {
@@ -1240,8 +1463,8 @@ function PortfolioTab({ theme }) {
   if (loading) return <Loader theme={theme} />;
   if (!data) return null;
 
-  const stats = data.closed_trades;
-  const equity = stats.equity_curve || [];
+  const stats = (viewType === "AUTO" ? data.auto_stats : viewType === "MANUAL" ? data.manual_stats : data.closed_trades) || {};
+  const equity = stats?.equity_curve || [];
 
   return (
     <div>
@@ -1339,42 +1562,58 @@ function PortfolioTab({ theme }) {
         )}
       </Card>
 
-      {/* Summary Cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12, marginBottom: 20 }}>
-
         {[
-          ["Total P&L", `₹${stats.total_pnl?.toLocaleString("en-IN") || 0}`, stats.total_pnl >= 0 ? theme.green : theme.red],
-          ["Unrealised", `₹${data.unrealised_pnl?.toLocaleString("en-IN") || 0}`, data.unrealised_pnl >= 0 ? theme.green : theme.red],
-          ["Win Rate", `${stats.win_rate}%`, stats.win_rate >= 50 ? theme.green : theme.red],
-          ["Trades", `${stats.wins}W / ${stats.losses}L`, theme.text],
-          ["Avg P&L%", `${pct(stats.avg_pnl_pct)}`, stats.avg_pnl_pct >= 0 ? theme.green : theme.red],
+          ["Total P&L", `₹${(stats.total_pnl ?? 0).toLocaleString("en-IN")}`, (stats.total_pnl ?? 0) >= 0 ? theme.green : theme.red],
+          ["Unrealised", `₹${(data.unrealised_pnl ?? 0).toLocaleString("en-IN")}`, (data.unrealised_pnl ?? 0) >= 0 ? theme.green : theme.red],
+          ["Win Rate", `${stats.win_rate ?? 0}%`, (stats.win_rate ?? 0) >= 50 ? theme.green : theme.red],
+          ["Trades", `${stats.wins ?? 0}W / ${stats.losses ?? 0}L`, theme.text],
+          ["Avg P&L%", `${pct(stats.avg_pnl_pct ?? 0)}`, (stats.avg_pnl_pct ?? 0) >= 0 ? theme.green : theme.red],
           ["Max Drawdown", `₹${(stats.max_drawdown || 0).toLocaleString("en-IN")}`, theme.red],
-          ["Capital", `₹${data.capital?.toLocaleString("en-IN")}`, theme.muted],
-          ["Open", `${data.open_positions} pos`, theme.accent],
-        ].map(([label, value, color]) => (
-          <Card key={label} theme={theme}>
+          ["Capital", `₹${(data.capital ?? 0).toLocaleString("en-IN")}`, theme.muted],
+          ["Open", `${data.open_positions ?? 0} pos`, theme.accent],
+        ].map(([label, value, color], i) => (
+          <Card key={i} theme={theme}>
             <div style={{ color: theme.muted, fontSize: 10, marginBottom: 4 }}>{label}</div>
             <div style={{ fontWeight: 700, fontSize: 16, color }}>{value}</div>
           </Card>
         ))}
       </div>
 
-      {/* Equity Curve */}
-      {equity.length > 1 && (
-        <Card theme={theme} style={{ marginBottom: 20 }}>
-          <div style={{ color: theme.muted, fontSize: 11, marginBottom: 8 }}>EQUITY CURVE</div>
-          <ResponsiveContainer width="100%" height={220}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h3 style={{ margin: 0, fontSize: 16 }}>Performance Snapshot</h3>
+        <select {...inp({ width: "auto", padding: "6px 12px", background: theme.bg })} 
+          value={viewType} onChange={e => setViewType(e.target.value)}>
+          <option value="ALL">All Trades</option>
+          <option value="AUTO">🤖 Auto System</option>
+          <option value="MANUAL">👨‍💻 Manual Trades</option>
+        </select>
+      </div>
+
+      {/* Equity Curve - responds to viewType */}
+      <Card theme={theme} style={{ marginBottom: 20 }}>
+        <div style={{ color: theme.muted, fontSize: 11, marginBottom: 8 }}>
+          {viewType === "AUTO" ? "🤖 AUTO SYSTEM" : viewType === "MANUAL" ? "👨‍💻 MANUAL" : "ALL"} — EQUITY CURVE
+        </div>
+        {equity.length > 1 ? (
+          <ResponsiveContainer width="100%" height={200}>
             <LineChart data={equity} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
               <XAxis dataKey="date" tick={{ fontSize: 10, fill: theme.muted }} />
               <YAxis tickFormatter={v => `₹${(v / 1000).toFixed(0)}K`} tick={{ fontSize: 10, fill: theme.muted }} />
               <Tooltip formatter={v => [`₹${v.toLocaleString("en-IN")}`, "Cumulative P&L"]} />
               <ReferenceLine y={0} stroke={theme.muted} strokeDasharray="4 4" />
-              <Line dataKey="cumulative" dot={false} stroke={theme.accent} strokeWidth={2} />
+              <Line dataKey="cumulative" dot={false}
+                stroke={viewType === "MANUAL" ? theme.accent : viewType === "AUTO" ? theme.green : theme.accent}
+                strokeWidth={2} />
             </LineChart>
           </ResponsiveContainer>
-        </Card>
-      )}
+        ) : (
+          <div style={{ color: theme.muted, textAlign: "center", padding: 24, fontSize: 13 }}>
+            No closed trades yet for this view.
+          </div>
+        )}
+      </Card>
 
       {/* By Symbol Breakdown */}
       {Object.keys(stats.by_symbol || {}).length > 0 && (
@@ -1398,38 +1637,87 @@ function PortfolioTab({ theme }) {
         </Card>
       )}
 
-      {/* Open Positions with Journal */}
+      {/* Open Positions with Journal & Exit */}
       {openTrades.length > 0 && (
         <Card theme={theme}>
-          <div style={{ color: theme.muted, fontSize: 11, marginBottom: 10 }}>OPEN POSITIONS</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ color: theme.muted, fontSize: 11 }}>OPEN POSITIONS ({openTrades.length})</div>
+            <button onClick={load} style={{
+              padding: "3px 10px", borderRadius: 4, background: "none",
+              border: `1px solid ${theme.border}`, color: theme.muted,
+              cursor: "pointer", fontSize: 10, fontFamily: "inherit"
+            }}>⟳ Refresh</button>
+          </div>
           {openTrades.map(t => {
             const pnlPct = t.pnl_pct || 0;
+            const isExiting = exitingId === t.id;
+            // TP/SL progress bar (TP = +25%, SL = -15%)
+            const tpPct = 25, slPct = 15;
+            const barPct = pnlPct >= 0 ? Math.min(100, (pnlPct / tpPct) * 100) : Math.min(100, (Math.abs(pnlPct) / slPct) * 100);
+            const barColor = pnlPct >= 0 ? theme.green : theme.red;
+            // Time in trade
+            const entryTime = t.entry_time ? new Date(t.entry_time) : null;
+            const elapsed = entryTime ? Math.floor((Date.now() - entryTime.getTime()) / 60000) : 0;
+            const elapsedStr = elapsed > 60 ? `${Math.floor(elapsed/60)}h ${elapsed%60}m` : `${elapsed}m`;
             return (
-              <div key={t.id} style={{ borderBottom: `1px solid ${theme.border}`, padding: "10px 0" }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <div key={t.id} className="trade-row" style={{ borderBottom: `1px solid ${theme.border}`, padding: "10px 0" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                   <div>
                     <span style={{ fontWeight: 600 }}>{t.symbol}</span>
                     <span style={{ margin: "0 6px", color: theme.muted }}>·</span>
                     <Badge label={`${t.strike} ${t.type}`}
                       color={t.type === "CE" ? theme.green : theme.red}
                       bg={signalBg(t.type === "CE" ? "BULLISH" : "BEARISH")} />
+                    {entryTime && <span style={{ marginLeft: 8, fontSize: 10, color: theme.muted }}>⏱ {elapsedStr}</span>}
+                    <div style={{ fontSize: 11, color: theme.muted, marginTop: 2 }}>Entry ₹{t.entry_price} → Current ₹{t.current_price || "—"}</div>
+                    {/* TP/SL progress bar */}
+                    <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 9, color: theme.red, fontWeight: 600 }}>SL -{slPct}%</span>
+                      <div style={{ flex: 1, height: 4, borderRadius: 2, background: theme.border, maxWidth: 120, position: "relative" }}>
+                        <div style={{
+                          height: "100%", borderRadius: 2, background: barColor,
+                          width: `${barPct}%`, transition: "width 0.3s ease",
+                          position: "absolute", [pnlPct >= 0 ? "left" : "right"]: "50%"
+                        }} />
+                      </div>
+                      <span style={{ fontSize: 9, color: theme.green, fontWeight: 600 }}>TP +{tpPct}%</span>
+                    </div>
                   </div>
                   <div style={{ textAlign: "right" }}>
-                    <div style={{ fontWeight: 600, color: pnlPct >= 0 ? theme.green : theme.red }}>
-                      {pct(pnlPct)} · ₹{(t.pnl || 0).toLocaleString("en-IN")}
+                    <div style={{ fontWeight: 700, fontSize: 15, color: pnlPct >= 0 ? theme.green : theme.red }}>
+                      {pct(pnlPct)}
                     </div>
-                    <div style={{ fontSize: 11, color: theme.muted }}>
-                      Entry ₹{t.entry_price} → ₹{t.current_price || "—"}
+                    <div style={{ fontSize: 11, color: pnlPct >= 0 ? theme.green : theme.red }}>
+                      ₹{(t.pnl || 0).toLocaleString("en-IN")}
                     </div>
                   </div>
                 </div>
-                {/* Journal note input */}
-                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+
+                {/* Exit row */}
+                <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <input
+                    type="number" step="0.05" placeholder={`Exit price (default: ${t.current_price || t.entry_price})`}
+                    value={exitInputs[t.id] || ""}
+                    onChange={e => setExitInputs(prev => ({ ...prev, [t.id]: e.target.value }))}
+                    style={{
+                      flex: 1, minWidth: 160, padding: "4px 8px", borderRadius: 4,
+                      border: `1px solid ${theme.border}`, background: theme.bg,
+                      color: theme.text, fontFamily: "inherit", fontSize: 11
+                    }}
+                  />
+                  <button onClick={() => exitTrade(t.id)} disabled={isExiting}
+                    style={{
+                      padding: "4px 12px", borderRadius: 4, background: isExiting ? theme.border : theme.red,
+                      color: isExiting ? theme.muted : "#fff", border: "none", cursor: isExiting ? "not-allowed" : "pointer",
+                      fontSize: 11, fontWeight: 700
+                    }}>
+                    {isExiting ? "Exiting..." : "⬛ Exit Trade"}
+                  </button>
                   <input value={noteInput[t.id] || ""}
                     onChange={e => setNoteInput(prev => ({ ...prev, [t.id]: e.target.value }))}
                     placeholder="Add journal note..."
                     style={{
-                      flex: 1, padding: "4px 8px", borderRadius: 4,
+                      flex: 1, minWidth: 120, padding: "4px 8px", borderRadius: 4,
                       border: `1px solid ${theme.border}`, background: theme.bg,
                       color: theme.text, fontFamily: "inherit", fontSize: 11
                     }} />
@@ -1446,6 +1734,65 @@ function PortfolioTab({ theme }) {
           })}
         </Card>
       )}
+
+      {/* Closed Trades History */}
+      {closedTrades.length > 0 && (
+        <Card theme={theme} style={{ marginTop: 20 }}>
+          <div style={{ color: theme.muted, fontSize: 11, marginBottom: 10 }}>RECENTLY CLOSED TRADES</div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ color: theme.muted, textAlign: "left", fontSize: 11, textTransform: "uppercase" }}>
+                <th style={{ padding: "6px 10px" }}>Symbol</th>
+                <th style={{ padding: "6px 10px" }}>Contract</th>
+                <th style={{ padding: "6px 10px" }}>Entry</th>
+                <th style={{ padding: "6px 10px" }}>Exit</th>
+                <th style={{ padding: "6px 10px", textAlign: "right" }}>P&amp;L</th>
+                <th style={{ padding: "6px 10px", textAlign: "right" }}>P&amp;L %</th>
+                <th style={{ padding: "6px 10px" }}>Exit Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {closedTrades.map((t, i) => {
+                const pnl = t.pnl || 0;
+                const pnlPct = t.pnl_pct || 0;
+                const color = pnl >= 0 ? theme.green : theme.red;
+                const reason = t.reason || "";
+                const isTP = reason.includes("TP");
+                const isSL = reason.includes("SL");
+                const isEOD = reason.includes("EOD");
+                return (
+                  <tr key={t.id ?? i} className="trade-row" style={{ borderTop: `1px solid ${theme.border}` }}>
+                    <td style={{ padding: "8px 10px", fontWeight: 600 }}>{t.symbol}</td>
+                    <td style={{ padding: "8px 10px" }}>
+                      <Badge label={`${t.strike} ${t.type}`}
+                        color={t.type === "CE" ? theme.green : theme.red}
+                        bg={signalBg(t.type === "CE" ? "BULLISH" : "BEARISH")} />
+                    </td>
+                    <td style={{ padding: "8px 10px" }}>₹{fmt(t.entry_price)}</td>
+                    <td style={{ padding: "8px 10px" }}>₹{fmt(t.exit_price)}</td>
+                    <td style={{ padding: "8px 10px", textAlign: "right", color, fontWeight: 700 }}>
+                      {pnl >= 0 ? "+" : ""}₹{pnl.toLocaleString("en-IN")}
+                    </td>
+                    <td style={{ padding: "8px 10px", textAlign: "right", color }}>
+                      {pnlPct >= 0 ? "+" : ""}{fmt(pnlPct, 1)}%
+                    </td>
+                    <td style={{ padding: "8px 10px" }}>
+                      <span style={{
+                        fontSize: 10, padding: "2px 6px", borderRadius: 4,
+                        background: isTP ? "rgba(34,197,94,.12)" : isSL ? "rgba(239,68,68,.12)" : isEOD ? "rgba(148,163,184,.12)" : "none",
+                        color: isTP ? theme.green : isSL ? theme.red : theme.muted,
+                        fontWeight: 600
+                      }}>
+                        {isTP ? "✅ TP" : isSL ? "❌ SL" : isEOD ? "🔲 EOD" : reason.slice(0, 20) || "—"}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </Card>
+      )}
     </div>
   );
 }
@@ -1453,6 +1800,466 @@ function PortfolioTab({ theme }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // Settings Tab
 // ══════════════════════════════════════════════════════════════════════════════
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Accuracy Tracker Tab
+// ══════════════════════════════════════════════════════════════════════════════
+
+function AccuracyTab({ theme }) {
+  const [snapshots, setSnapshots] = useState([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [selectedTrade, setSelectedTrade] = useState(null); // for graph modal
+  const [history, setHistory] = useState([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+  const [report, setReport] = useState(null);
+  const [reportLoading, setReportLoading] = useState(false);
+
+  const sortedTrades = useMemo(() => {
+    if (!data?.trades) return [];
+    let sortableTrades = [...data.trades];
+    if (sortConfig.key !== null) {
+      sortableTrades.sort((a, b) => {
+        let aVal = a[sortConfig.key];
+        let bVal = b[sortConfig.key];
+        
+        // Custom logic for derived columns
+        if (sortConfig.key === 'pnl') {
+          aVal = a.current_price && a.entry_price ? ((a.current_price - a.entry_price) / a.entry_price) * 100 : 0;
+          bVal = b.current_price && b.entry_price ? ((b.current_price - b.entry_price) / b.entry_price) * 100 : 0;
+        } else if (sortConfig.key === 'lotPrice') {
+          aVal = (a.current_price || a.entry_price) * (a.lot_size || 1);
+          bVal = (b.current_price || b.entry_price) * (b.lot_size || 1);
+        }
+
+        if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return sortableTrades;
+  }, [data, sortConfig]);
+
+  const requestSort = (key) => {
+    let direction = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
+    setSortConfig({ key, direction });
+  };
+
+  useEffect(() => {
+    const fetchSnaps = () => apiFetch("/api/tracker/snapshots").then(setSnapshots).catch(console.error);
+    fetchSnaps();
+    const interval = setInterval(fetchSnaps, 60000); // Check for new snapshots every minute
+    return () => clearInterval(interval);
+  }, []);
+
+  const loadSnapshot = async (id) => {
+    if (!id) {
+      setData(null);
+      setSelectedId("");
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await apiFetch(`/api/tracker/snapshot/${id}`);
+      setData(res);
+      setSelectedId(id);
+    } catch (e) { console.error(e); }
+    setLoading(false);
+  };
+
+  const loadHistory = async (trade) => {
+    setSelectedTrade(trade);
+    setLoadingHistory(true);
+    try {
+      const res = await apiFetch(`/api/tracker/trade/${trade.id}/history`);
+      const hist = (res.history || []).map(h => ({ ...h, timestamp: h.timestamp + (h.timestamp.endsWith("Z") ? "" : "Z") }));
+      if (hist.length === 1) {
+        // Duplicate the first point to the current time so the graph draws a flat line instead of failing to render
+        hist.push({ ...hist[0], timestamp: new Date().toISOString() });
+      }
+      setHistory(hist);
+    } catch (e) { console.error(e); }
+    setLoadingHistory(false);
+  };
+
+  const loadReport = async () => {
+    setReportLoading(true);
+    try {
+      const res = await apiFetch("/api/tracker/report");
+      setReport(res.report);
+    } catch (e) {
+      console.error("Failed to load report", e);
+      alert("Failed to load report.");
+    }
+    setReportLoading(false);
+  };
+
+  const deleteSnapshot = async () => {
+    if (!selectedId) return;
+    if (!window.confirm("Are you sure you want to delete this snapshot? All associated trades and history will be permanently removed.")) return;
+    
+    setLoading(true);
+    try {
+      await apiFetch(`/api/tracker/snapshot/${selectedId}`, { method: 'DELETE' });
+      setData(null);
+      setSelectedId("");
+      setSelectedTrade(null);
+      const sns = await apiFetch("/api/tracker/snapshots");
+      setSnapshots(sns);
+    } catch (e) { 
+      console.error("Failed to delete snapshot", e); 
+      alert("Failed to delete snapshot.");
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 20, alignItems: "center", flexWrap: "wrap" }}>
+        <h2 style={{ margin: 0, fontSize: 18, color: theme.accent }}>Accuracy Tracker</h2>
+        <select 
+          value={selectedId} 
+          onChange={e => loadSnapshot(e.target.value)}
+          style={{
+            padding: "8px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
+            background: theme.card, color: theme.text, fontFamily: "inherit",
+            fontSize: 13, minWidth: 260
+          }}
+        >
+          <option value="">Select a previous snapshot...</option>
+          {snapshots.map(s => (
+            <option key={s.id} value={s.id}>
+              {new Date(s.timestamp + (s.timestamp.endsWith("Z") ? "" : "Z")).toLocaleString("en-IN", { 
+                day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' 
+              })} — {s.trade_count} signals
+            </option>
+          ))}
+        </select>
+        <button onClick={() => loadSnapshot(selectedId)} disabled={!selectedId || loading}
+          className="clickable-btn"
+          style={{
+            padding: "8px 16px", borderRadius: 6, background: theme.accent,
+            color: "#fff", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600,
+            opacity: (!selectedId || loading) ? 0.5 : 1
+          }}>
+          {loading ? "Loading..." : "↻ Refresh Prices"}
+        </button>
+        {selectedId && (
+          <button onClick={deleteSnapshot} disabled={loading}
+            className="clickable-btn"
+            style={{
+              padding: "8px 16px", borderRadius: 6, background: "transparent",
+              color: theme.red, border: `1px solid ${theme.red}`, cursor: "pointer", fontSize: 13, fontWeight: 600,
+              opacity: loading ? 0.5 : 1
+            }}>
+            Delete
+          </button>
+        )}
+
+        <div style={{ flex: 1 }} />
+        <button onClick={loadReport} disabled={reportLoading}
+          className="clickable-btn"
+          style={{
+            padding: "8px 16px", borderRadius: 6, background: theme.accent + "22",
+            color: theme.accent, border: `1px solid ${theme.border}`, cursor: "pointer", fontSize: 13, fontWeight: 600,
+            display: "flex", alignItems: "center", gap: 6
+          }}>
+          {reportLoading ? "Generating..." : "📈 View Backtest Report"}
+        </button>
+      </div>
+
+      {!data && !loading && (
+        <Card theme={theme} style={{ textAlign: "center", padding: 60, color: theme.muted }}>
+          <div style={{ fontSize: 40, marginBottom: 16 }}>📊</div>
+          <div>Select a snapshot from the dropdown above to analyze signal accuracy.</div>
+          <div style={{ fontSize: 11, marginTop: 8 }}>Snapshots are taken every 15 minutes during market hours.</div>
+        </Card>
+      )}
+
+      {loading && <Loader theme={theme} />}
+
+      {data && !loading && (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          <Card theme={theme} style={{ marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 11, color: theme.muted }}>SNAPSHOT TIMESTAMP</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>
+                {new Date(data.snapshot.timestamp + (data.snapshot.timestamp.endsWith("Z") ? "" : "Z")).toLocaleString("en-IN", { 
+                   dateStyle: "medium", timeStyle: "short" 
+                })}
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 11, color: theme.muted }}>TOTAL SIGNALS</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: theme.accent }}>{data.trades.length}</div>
+            </div>
+          </Card>
+
+          {/* Graph Section (Now at Top) */}
+          {selectedTrade && (
+            <Card theme={theme} style={{ marginBottom: 20, animation: "slideDown 0.3s ease", padding: "20px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <h3 style={{ margin: 0, fontSize: 16, color: theme.accent }}>
+                      {selectedTrade.symbol} {selectedTrade.strike} {selectedTrade.type}
+                    </h3>
+                    <Badge label={`Score: ${selectedTrade.score}`} color={selectedTrade.score >= 85 ? theme.green : theme.accent} bg={theme.bg} />
+                  </div>
+                  <div style={{ fontSize: 12, color: theme.muted, marginTop: 4 }}>
+                    Live Lot Price Performance (since {new Date(data.snapshot.timestamp + (data.snapshot.timestamp.endsWith("Z") ? "" : "Z")).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setSelectedTrade(null)} 
+                  style={{ 
+                    background: theme.bg, border: `1px solid ${theme.border}`, color: theme.muted, 
+                    cursor: "pointer", width: 32, height: 32, borderRadius: "50%", display: "flex",
+                    alignItems: "center", justifyContent: "center", transition: "all 0.2s"
+                  }}
+                  onMouseOver={e => e.currentTarget.style.color = theme.accent}
+                  onMouseOut={e => e.currentTarget.style.color = theme.muted}
+                >✕</button>
+              </div>
+              
+              {loadingHistory ? <Loader theme={theme} height={200} /> : (
+                history.length > 0 ? (
+                  <div style={{ position: "relative" }}>
+                    <ResponsiveContainer width="100%" height={260}>
+                      <AreaChart data={history.map(h => ({ ...h, lot_price: h.price * selectedTrade.lot_size }))}>
+                        <defs>
+                          <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={theme.accent} stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor={theme.accent} stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke={theme.border} vertical={false} opacity={0.5} />
+                        <XAxis 
+                          dataKey="timestamp" 
+                          tick={{ fontSize: 10, fill: theme.muted }} 
+                          tickFormatter={t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis 
+                          domain={['auto', 'auto']} 
+                          tick={{ fontSize: 10, fill: theme.muted }} 
+                          tickFormatter={v => `₹${(v/1000).toFixed(1)}k`}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip 
+                          contentStyle={{ 
+                            background: theme.card, border: `1px solid ${theme.border}`, 
+                            borderRadius: 12, boxShadow: "0 10px 15px -3px rgba(0,0,0,0.1)"
+                          }}
+                          labelFormatter={t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          formatter={(v) => [`₹${v.toLocaleString("en-IN")}`, "Lot Price"]}
+                        />
+                        <Area 
+                          type="monotone" 
+                          dataKey="lot_price" 
+                          stroke={theme.accent} 
+                          fillOpacity={1} 
+                          fill="url(#colorPrice)" 
+                          strokeWidth={3} 
+                          animationDuration={1000}
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <div style={{ textAlign: "center", padding: "60px 40px", color: theme.muted, background: theme.bg, borderRadius: 12 }}>
+                    <div style={{ fontSize: 24, marginBottom: 12 }}>⏳</div>
+                    <div style={{ fontWeight: 600 }}>Building performance history...</div>
+                    <div style={{ fontSize: 12, marginTop: 4 }}>Price snapshots are taken every 5 minutes. Check back shortly.</div>
+                  </div>
+                )
+              )}
+            </Card>
+          )}
+
+          <div style={{ overflowX: "auto", background: theme.card, borderRadius: 8, border: `1px solid ${theme.border}` }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ color: theme.muted, borderBottom: `2px solid ${theme.border}`, textAlign: "left", background: theme.bg }}>
+                  {[
+                    { label: "Symbol", key: "symbol" },
+                    { label: "Suggest Trade", key: "type" },
+                    { label: "Score", key: "score", align: "center" },
+                    { label: "Entry Price", key: "entry_price" },
+                    { label: "LTP (Active)", key: "current_price" },
+                    { label: "Lot Price", key: "lotPrice" },
+                    { label: "5m Chg", key: "diff_5m_pct" },
+                    { label: "Perf %", key: "pnl", align: "right" }
+                  ].map(({ label, key, align }) => (
+                    <th 
+                      key={key} 
+                      onClick={() => requestSort(key)}
+                      style={{ 
+                        padding: "12px 16px", textAlign: align || "left", 
+                        cursor: "pointer", userSelect: "none" 
+                      }}
+                      onMouseOver={e => e.currentTarget.style.color = theme.text}
+                      onMouseOut={e => e.currentTarget.style.color = theme.muted}
+                    >
+                      {label} {sortConfig.key === key ? (sortConfig.direction === "asc" ? "▲" : "▼") : "↕"}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedTrades.map((t, idx) => {
+                  const pnl = t.current_price && t.entry_price ? ((t.current_price - t.entry_price) / t.entry_price) * 100 : 0;
+                  const color = pnl > 0 ? theme.green : pnl < 0 ? theme.red : theme.muted;
+                  const lotPrice = (t.current_price || t.entry_price) * (t.lot_size || 1);
+                  const diffColor = (t.diff_5m_pct || 0) > 0 ? theme.green : (t.diff_5m_pct || 0) < 0 ? theme.red : theme.muted;
+
+                  return (
+                    <tr key={idx} className="trade-row" onClick={() => loadHistory(t)}
+                        style={{ 
+                          borderBottom: `1px solid ${theme.border}`, 
+                          cursor: "pointer",
+                          backgroundColor: selectedTrade?.id === t.id ? `${theme.accent}08` : "transparent",
+                          transition: "background 0.2s"
+                        }}>
+                      <td style={{ padding: "12px 16px", fontWeight: 700 }}>
+                        {t.symbol}
+                        <div style={{ fontSize: 10, color: theme.muted, fontWeight: 400 }}>Spot: ₹{fmt(t.stock_price)}</div>
+                      </td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <span style={{ 
+                          padding: "3px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
+                          background: t.type === "CE" ? "rgba(34,197,94,.15)" : "rgba(239,68,68,.15)",
+                          color: t.type === "CE" ? theme.green : theme.red,
+                          border: `1px solid ${t.type === "CE" ? "rgba(34,197,94,.2)" : "rgba(239,68,68,.2)"}`
+                        }}>
+                          {t.strike} {t.type}
+                        </span>
+                      </td>
+                      <td style={{ padding: "12px 16px", textAlign: "center" }}>
+                        <Badge label={t.score} color={t.score >= 85 ? theme.green : theme.accent} bg={theme.bg} />
+                      </td>
+                      <td style={{ padding: "12px 16px", fontWeight: 500 }}>₹{fmt(t.entry_price)}</td>
+                      <td style={{ padding: "12px 16px", fontWeight: 500 }}>₹{fmt(t.current_price || t.entry_price)}</td>
+                      <td style={{ padding: "12px 16px", fontWeight: 600 }}>
+                         ₹{lotPrice.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                         <div style={{ fontSize: 9, color: theme.muted, fontWeight: 400 }}>Size: {t.lot_size}</div>
+                      </td>
+                      <td style={{ padding: "12px 16px", color: diffColor }}>
+                        {t.diff_5m_pct ? (
+                          <div style={{ fontWeight: 600 }}>
+                            {t.diff_5m_pct > 0 ? "▲" : "▼"} {Math.abs(t.diff_5m_pct).toFixed(1)}%
+                          </div>
+                        ) : "—"}
+                      </td>
+                      <td style={{ padding: "12px 16px", textAlign: "right", fontWeight: 700, color }}>
+                        {pnl > 0 ? "+" : ""}{fmt(pnl, 2)}%
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Report Modal */}
+      {report && (
+        <div style={{
+          position: "fixed", top: 0, left: 0, right: 0, bottom: 0, 
+          background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center",
+          zIndex: 1000, padding: 20
+        }}>
+          <div style={{
+            background: theme.bg, borderRadius: 12, border: `1px solid ${theme.border}`,
+            maxWidth: 600, width: "100%", maxHeight: "90vh", overflowY: "auto",
+            boxShadow: "0 10px 30px rgba(0,0,0,0.5)", animation: "slideDown 0.3s ease"
+          }}>
+            <div style={{ padding: "20px 24px", borderBottom: `1px solid ${theme.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h3 style={{ margin: 0, color: theme.accent, display: "flex", alignItems: "center", gap: 8 }}>
+                📈 Accuracy Tracker Backtest Report
+              </h3>
+              <button 
+                onClick={() => setReport(null)}
+                style={{ background: "transparent", border: "none", color: theme.muted, cursor: "pointer", fontSize: 18 }}
+              >✕</button>
+            </div>
+            
+            <div style={{ padding: 24 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
+                <Card theme={theme} style={{ textAlign: "center", padding: "24px 16px" }}>
+                  <div style={{ fontSize: 12, color: theme.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>Total Tracks</div>
+                  <div style={{ fontSize: 32, fontWeight: 800, color: theme.text }}>{report.total_trades}</div>
+                </Card>
+                <Card theme={theme} style={{ textAlign: "center", padding: "24px 16px" }}>
+                  <div style={{ fontSize: 12, color: theme.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>Overall Win Rate</div>
+                  <div style={{ fontSize: 32, fontWeight: 800, color: report.win_rate > 50 ? theme.green : theme.red }}>
+                    {report.win_rate}%
+                  </div>
+                </Card>
+              </div>
+
+              <h4 style={{ margin: "0 0 16px 0", color: theme.text }}>Performance by Initial Score</h4>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 24 }}>
+                {Object.entries(report.score_brackets).map(([bracket, data]) => (
+                  <div key={bracket} style={{ 
+                    display: "flex", alignItems: "center", justifyContent: "space-between", 
+                    padding: "16px", background: theme.card, borderRadius: 8, border: `1px solid ${theme.border}` 
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <Badge label={`Score ${bracket}`} color={bracket === ">=90" ? theme.green : theme.accent} bg={theme.bg} />
+                      <div style={{ fontSize: 13, color: theme.muted }}>{data.total} Trades</div>
+                    </div>
+                    <div style={{ display: "flex", gap: 24, textAlign: "right" }}>
+                      <div>
+                        <div style={{ fontSize: 11, color: theme.muted }}>WIN RATE</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: data.win_rate > 50 ? theme.green : theme.red }}>{data.win_rate}%</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, color: theme.muted }}>AVG MAX PNL</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: data.avg_pnl > 0 ? theme.green : theme.red }}>
+                          {data.avg_pnl > 0 ? "+" : ""}{data.avg_pnl}%
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {report.best_trade && (
+                <>
+                  <h4 style={{ margin: "0 0 16px 0", color: theme.text }}>Top Performing Trade</h4>
+                  <Card theme={theme} style={{ borderLeft: `4px solid ${theme.green}`, padding: 20 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: theme.text, marginBottom: 4 }}>
+                          {report.best_trade.symbol} {report.best_trade.strike} {report.best_trade.type}
+                        </div>
+                        <div style={{ fontSize: 13, color: theme.muted }}>
+                          Score: {report.best_trade.score} • Entry: ₹{report.best_trade.entry.toFixed(2)} • Peak: ₹{report.best_trade.max_price.toFixed(2)}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 24, fontWeight: 800, color: theme.green }}>
+                        +{report.best_trade.pnl_pct}%
+                      </div>
+                    </div>
+                  </Card>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function SettingsTab({ theme }) {
   const [capital, setCapital] = useState(100000);
