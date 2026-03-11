@@ -45,12 +45,14 @@ TELEGRAM_CHAT_ID="403302127" (actual chat ID)
 
 **Vulnerabilities:**
 - `python-multipart==0.0.20` - Arbitrary File Write via Non-Default Configuration (CVE)
-- `starlette==0.37.2` - Denial of Service (DoS) via multipart/form-data (CVE)
+- `starlette==0.37.2` - Multiple DoS vulnerabilities:
+  - DoS via multipart/form-data (CVE)
+  - O(n^2) DoS via Range header merging in FileResponse (CVE)
 
-**Risk:** Security vulnerabilities allowing file write attacks and DoS
+**Risk:** Security vulnerabilities allowing file write attacks and multiple DoS vectors
 **Fix:** ✅ Updated to patched versions:
 - `python-multipart==0.0.22` (patched)
-- `starlette==0.40.0` (patched)
+- `starlette==0.49.1` (fully patched - latest secure version)
 
 ### 3. **Duplicate Dependencies** ⚠️ HIGH ✅ FIXED
 **File:** `backend/requirements.txt` (lines 35 and 53)
