@@ -1,22 +1,30 @@
 {
   "name": "fo-scanner",
   "version": "1.0.0",
-  "description": "",
+  "description": "NSE F&O Options Scanner with live signals and paper trading",
   "main": "index.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "eslint src --ext js,jsx --report-unused-disable-directives --max-warnings 0",
+    "format": "prettier --write \"src/**/*.{js,jsx,json,css,md}\""
   },
-  "keywords": [],
+  "keywords": ["nse", "options", "trading", "scanner", "f&o"],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
-    "@vitejs/plugin-react": "^4.2.1",
+    "@vitejs/plugin-react": "^5.1.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "recharts": "^3.7.0",
+    "recharts": "^3.8.0",
     "vite": "^7.3.1"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "eslint-plugin-react": "^7.35.0",
+    "eslint-plugin-react-hooks": "^5.0.0",
+    "prettier": "^3.2.5"
   }
 }
