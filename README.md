@@ -1,181 +1,401 @@
+<div align="center">
+
 # NSE F&O Scanner v4
 
-Full-featured NSE options chain scanner with live signals, Greeks, OI heatmaps, 
-sector analysis, unusual activity detection, and paper trading.
+[![CI](https://github.com/shahzebkhan-os/fo-scanner/workflows/CI/badge.svg)](https://github.com/shahzebkhan-os/fo-scanner/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![React 19](https://img.shields.io/badge/react-19-blue.svg)](https://react.dev/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688.svg)](https://fastapi.tiangolo.com)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+
+**Full-featured NSE options chain scanner with live signals, Greeks calculation, OI heatmaps, sector analysis, unusual activity detection, and paper trading.**
+
+[Features](#-features) • [Quick Start](#-quick-start) • [Documentation](#-documentation) • [API Reference](#-api-reference) • [Contributing](#-contributing)
+
+</div>
 
 ---
 
-## What's New in v4
+## 📋 Table of Contents
 
-| Feature | File |
-|---|---|
-| Black-Scholes Greeks (Δ Γ θ V) | `analytics.py` |
-| IV Rank (IVR) — 52-week percentile | `analytics.py` + `db.py` |
-| OI Heatmap (15-min snapshots) | `scheduler.py` + `db.py` |
-| PCR intraday timeline | `signals.py` |
-| Unusual Options Activity (UOA) | `signals.py` |
-| Straddle / Strangle screener | `signals.py` |
-| Sector heatmap (10 sectors) | `signals.py` |
-| Pre-market Telegram report (9 AM) | `scheduler.py` |
-| NSE Bulk/Block deals | `signals.py` |
-| FII/DII data | `new_endpoints.py` |
-| Portfolio P&L dashboard + equity curve | `new_endpoints.py` |
-| Per-symbol position sizing (2% rule) | `analytics.py` |
-| Trade journal notes | `db.py` |
-| Settings: capital, watchlist, thresholds | `db.py` |
-| CSV export of all trades | `new_endpoints.py` |
-| Dark/Light mode toggle | `App.jsx` |
-| Keyboard shortcuts | `App.jsx` |
-| PWA — install on mobile home screen | `manifest.json` |
+- [Features](#-features)
+- [What's New in v4](#-whats-new-in-v4)
+- [Quick Start](#-quick-start)
+- [Project Structure](#-project-structure)
+- [Setup Guide](#-setup-guide)
+- [API Reference](#-api-reference)
+- [Keyboard Shortcuts](#-keyboard-shortcuts)
+- [Documentation](#-documentation)
+- [Contributing](#-contributing)
+- [Security](#-security)
+- [License](#-license)
 
----
+## ✨ Features
 
-## Project Structure
+<table>
+<tr>
+<td width="50%">
+
+### 📊 Real-Time Analysis
+- Live NSE option chain data
+- Black-Scholes Greeks (Δ, Γ, θ, V)
+- IV Rank (52-week percentile)
+- PCR intraday timeline
+- OI heatmap with 15-min snapshots
+
+</td>
+<td width="50%">
+
+### 🎯 Trading Tools
+- Automated paper trading
+- Position sizing calculator (2% rule)
+- Stop-loss & take-profit automation
+- Trade journal with notes
+- P&L dashboard & equity curve
+
+</td>
+</tr>
+<tr>
+<td>
+
+### 🔍 Advanced Scanning
+- Unusual Options Activity (UOA)
+- Straddle/Strangle screener
+- Sector heatmap (10 sectors)
+- NSE Bulk/Block deals
+- FII/DII activity tracking
+
+</td>
+<td>
+
+### 🚀 Modern Features
+- PWA support (install on mobile)
+- Dark/Light mode toggle
+- Keyboard shortcuts
+- Telegram alerts & reports
+- Historical backtesting engine
+
+</td>
+</tr>
+</table>
+
+## 🆕 What's New in v4
+
+| Feature | Description | File |
+|---------|-------------|------|
+| **Greeks Calculation** | Black-Scholes Δ, Γ, θ, V for all strikes | `analytics.py` |
+| **IV Rank** | 52-week implied volatility percentile | `analytics.py` + `db.py` |
+| **OI Heatmap** | 15-minute OI snapshots by strike | `scheduler.py` + `db.py` |
+| **UOA Detection** | Unusual options activity scanner | `signals.py` |
+| **Sector Analysis** | 10-sector aggregated signals | `signals.py` |
+| **Telegram Reports** | Pre-market reports at 9 AM IST | `scheduler.py` |
+| **Historical Backtester** | Test strategies on EOD data | `backtest_runner.py` |
+| **Portfolio Dashboard** | P&L tracking with equity curve | Frontend |
+| **PWA Support** | Install as mobile app | `manifest.json` |
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Python 3.11+
+- Node.js 20+
+- Docker (optional)
+
+### One-Command Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/shahzebkhan-os/fo-scanner.git
+cd fo-scanner
+
+# Copy environment variables
+cp .env.example .env
+# Edit .env with your credentials
+
+# Run with startup script
+./start.sh
+```
+
+**Access:**
+- 🌐 Frontend: http://localhost:5175
+- ⚡ Backend API: http://localhost:8000
+- 📚 API Docs: http://localhost:8000/docs
+
+### Docker Deployment
+
+```bash
+# Build and run
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop
+docker-compose down
+```
+
+## 📁 Project Structure
 
 ```
 fo-scanner/
-├── backend/
-│   ├── main.py          # FastAPI app (existing, updated)
-│   ├── analytics.py     # NEW: Greeks, IVR, scoring
-│   ├── signals.py       # NEW: UOA, straddle, sector heatmap
-│   ├── scheduler.py     # NEW: OI snapshots, pre-market report
-│   ├── db.py            # UPDATED: all new tables
-│   ├── backtest.py      # (existing)
-│   ├── slugs.json       # (existing)
-│   └── requirements.txt
-├── frontend/
+├── backend/                 # Python FastAPI backend
+│   ├── main.py             # Main FastAPI application
+│   ├── analytics.py        # Greeks, IVR, scoring algorithms
+│   ├── signals.py          # UOA, straddle, sector analysis
+│   ├── scheduler.py        # Background tasks, OI snapshots
+│   ├── db.py               # SQLite database operations
+│   ├── backtest.py         # Backtesting core logic
+│   ├── backtest_runner.py  # Backtest CLI interface
+│   ├── historical_loader.py # Historical data ingestion
+│   └── requirements.txt    # Python dependencies
+├── frontend/               # React + Vite frontend
 │   ├── src/
-│   │   └── App.jsx      # UPDATED: all 9 tabs
-│   ├── public/
-│   │   └── manifest.json  # NEW: PWA manifest
-│   ├── index.html
-│   └── package.json
-├── docker-compose.yml
-├── Dockerfile
-├── .env.example
-└── README.md
+│   │   ├── App.jsx        # Main React application
+│   │   └── main.jsx       # Entry point
+│   ├── public/            # Static assets
+│   ├── package.json       # Node dependencies
+│   └── vite.config.js     # Vite configuration
+├── .github/               # GitHub Actions workflows
+│   └── workflows/
+│       └── ci.yml         # CI/CD pipeline
+├── docker-compose.yml     # Docker orchestration
+├── Dockerfile             # Multi-stage Docker build
+├── pyproject.toml         # Python project config
+├── .pre-commit-config.yaml # Pre-commit hooks
+├── CONTRIBUTING.md        # Contribution guidelines
+├── SECURITY.md            # Security policy
+└── README.md              # This file
 ```
 
----
-
-## Setup
+## 🔧 Setup Guide
 
 ### 1. Environment Variables
 
-Copy `.env.example` to `.env` and fill in:
+Create a `.env` file in the root directory:
 
 ```env
-INDSTOCKS_TOKEN=your_token_here
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
+# INDmoney API Token (for live LTP updates)
+INDSTOCKS_TOKEN="your_token_here"
+
+# Telegram Configuration (optional)
+TELEGRAM_BOT_TOKEN="your_bot_token"
+TELEGRAM_CHAT_ID="your_chat_id"
 ```
 
-### 2. Install Backend Dependencies
+**Getting Credentials:**
+- **INDSTOCKS_TOKEN**: Sign up at [INDstocks API](https://api.indstocks.com/)
+- **Telegram**: Message [@BotFather](https://t.me/BotFather) to create a bot
+- **Chat ID**: Message [@userinfobot](https://t.me/userinfobot) to get your ID
+
+### 2. Backend Setup
 
 ```bash
 cd backend
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Initialize database
+python -c "import db; db.init_db()"
 ```
 
-New dependencies needed:
-```
-httpx
-fastapi
-uvicorn
-curl_cffi
-beautifulsoup4
-python-dotenv
-```
-
-### 3. Install Frontend Dependencies
+### 3. Frontend Setup
 
 ```bash
 cd frontend
+
+# Install dependencies
 npm install
+
+# Build for production
 npm run build
+
+# Or run dev server
+npm run dev
 ```
 
-### 4. Run
+### 4. Running the Application
 
+**Option A: Using startup script** (recommended)
 ```bash
-# Development
-cd backend && python main.py
+./start.sh
+```
 
-# Production
+**Option B: Manual start**
+```bash
+# Terminal 1 - Backend
+cd backend
+python main.py
+
+# Terminal 2 - Frontend
+cd frontend
+npm run dev -- --port 5175
+```
+
+**Option C: Docker**
+```bash
 docker-compose up -d
 ```
 
-### 5. Integrate New Files into main.py
+## 📡 API Reference
 
-Follow the instructions at the top of `new_endpoints.py`:
-
-1. Add imports at the top of `main.py`
-2. Replace `@app.on_event("startup")` with the lifespan context manager
-3. Add the `_internal_scan()` helper function
-4. Paste all routes from `new_endpoints.py` into `main.py`
-
-### 6. Enable PWA on Mobile
-
-Add to your `frontend/index.html` `<head>`:
-```html
-<link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#6366f1">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-```
-
----
-
-## API Reference
-
-All new endpoints:
+### Core Endpoints
 
 | Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/greeks/{symbol}` | Full Greeks table for all strikes |
-| GET | `/api/ivrank/{symbol}` | IV Rank (52-week percentile) |
-| GET | `/api/oi-heatmap/{symbol}` | OI snapshots by strike (today) |
-| GET | `/api/oi-timeline/{symbol}` | OI over time for one strike |
-| GET | `/api/pcr-history/{symbol}` | Intraday PCR timeline |
-| GET | `/api/uoa` | Unusual options activity scan |
-| GET | `/api/straddle-screen` | Straddle/strangle candidates |
-| GET | `/api/sector-heatmap` | Sector-level signal aggregation |
-| GET | `/api/portfolio` | P&L dashboard + equity curve |
-| GET | `/api/position-size` | Position sizing calculator |
-| GET | `/api/bulk-deals` | NSE bulk/block deals |
-| POST | `/api/bulk-deals/refresh` | Force refresh deals |
-| GET | `/api/fii-dii` | FII/DII activity from NSE |
-| GET | `/api/paper-trades/export` | CSV export |
-| POST | `/api/paper-trades/{id}/note` | Add journal note |
-| GET | `/api/paper-trades/{id}/notes` | Get journal notes |
-| GET | `/api/settings/watchlist` | Get watchlist |
-| POST | `/api/settings/watchlist` | Update watchlist |
-| GET | `/api/settings/capital` | Get capital setting |
-| POST | `/api/settings/capital` | Set capital |
-| GET | `/api/settings/threshold/{symbol}` | Get alert threshold |
-| POST | `/api/settings/threshold/{symbol}` | Set alert threshold |
+|--------|----------|-------------|
+| `GET` | `/api/greeks/{symbol}` | Black-Scholes Greeks for all strikes |
+| `GET` | `/api/ivrank/{symbol}` | IV Rank (52-week percentile) |
+| `GET` | `/api/oi-heatmap/{symbol}` | OI snapshots by strike (today) |
+| `GET` | `/api/oi-timeline/{symbol}` | OI time series for one strike |
+| `GET` | `/api/pcr-history/{symbol}` | Intraday PCR timeline |
+
+### Signal Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/uoa` | Unusual options activity scan |
+| `GET` | `/api/straddle-screen` | Straddle/strangle candidates |
+| `GET` | `/api/sector-heatmap` | Sector-level aggregation |
+| `GET` | `/api/bulk-deals` | NSE bulk/block deals |
+| `GET` | `/api/fii-dii` | FII/DII activity data |
+
+### Trading Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/portfolio` | P&L dashboard + equity curve |
+| `GET` | `/api/position-size` | Position sizing calculator |
+| `GET` | `/api/paper-trades/export` | CSV export of all trades |
+| `POST` | `/api/paper-trades/{id}/note` | Add journal note |
+| `GET` | `/api/paper-trades/{id}/notes` | Get trade notes |
+
+### Settings Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET/POST` | `/api/settings/watchlist` | Manage watchlist |
+| `GET/POST` | `/api/settings/capital` | Set trading capital |
+| `GET/POST` | `/api/settings/threshold/{symbol}` | Alert thresholds |
+
+**Interactive API Documentation:** http://localhost:8000/docs
+
+## ⌨️ Keyboard Shortcuts
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `R` | Scanner | Real-time options scanner |
+| `C` | Chain | Full option chain view |
+| `G` | Greeks | Greeks calculation table |
+| `H` | Heatmap | OI heatmap visualization |
+| `S` | Sectors | Sector analysis dashboard |
+| `U` | UOA | Unusual options activity |
+| `P` | Portfolio | P&L and trade history |
+| `,` | Settings | Application settings |
+
+## 📚 Documentation
+
+- **[README2.md](README2.md)** - Trade scoring & selection logic deep-dive
+- **[README_BACKTESTING.md](README_BACKTESTING.md)** - Historical backtesting guide
+- **[PROJECT_IMPROVEMENTS.md](PROJECT_IMPROVEMENTS.md)** - Recommended improvements
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines
+- **[SECURITY.md](SECURITY.md)** - Security policy & best practices
+
+### Backtesting
+
+Load historical data and test your strategies:
+
+```bash
+# Download and process historical data
+python backend/historical_loader.py full --start 2024-01-01
+
+# Run backtest with default parameters
+python backend/backtest_runner.py
+
+# Optimize parameters with grid search
+python backend/backtest_runner.py --optimise
+
+# Test specific strategy
+python backend/backtest_runner.py --score 85 --signal BULLISH
+```
+
+See [README_BACKTESTING.md](README_BACKTESTING.md) for detailed documentation.
+
+## 📝 Important Notes
+
+- **IV Rank**: Requires 30+ days of history for accurate percentiles
+- **UOA Detection**: Needs 5+ days of OI data for baseline establishment
+- **OI Heatmap**: Data recorded only during market hours (9:15-15:30 IST)
+- **Pre-market Reports**: Sent at 9:00 AM IST if Telegram is configured
+- **Bulk Deals**: Fetched daily at 4:00 PM IST from NSE API
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+**Quick Start for Contributors:**
+
+```bash
+# Install pre-commit hooks
+pip install pre-commit
+pre-commit install
+
+# Install development dependencies
+pip install black isort pylint pytest
+cd frontend && npm install --save-dev eslint prettier
+
+# Run code quality checks
+black backend/
+isort backend/
+pylint backend/*.py
+cd frontend && npm run lint
+```
+
+### Areas We Need Help With
+
+- 🧪 Writing tests (unit, integration, e2e)
+- 📱 Mobile UI improvements
+- 🔒 Security enhancements (authentication, rate limiting)
+- 📊 Additional technical indicators
+- 🌐 Internationalization (i18n)
+- 📖 Documentation improvements
+
+## 🔒 Security
+
+Found a security vulnerability? Please see our [Security Policy](SECURITY.md) for responsible disclosure guidelines.
+
+**Never commit:**
+- Your `.env` file
+- API tokens or credentials
+- Database files (`*.db`)
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- NSE for providing public market data
+- [FastAPI](https://fastapi.tiangolo.com/) for the excellent web framework
+- [React](https://react.dev/) and [Vite](https://vitejs.dev/) for the frontend
+- [Recharts](https://recharts.org/) for beautiful visualizations
+
+## 📞 Support
+
+- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/shahzebkhan-os/fo-scanner/issues)
+- 💬 **Discussions**: [GitHub Discussions](https://github.com/shahzebkhan-os/fo-scanner/discussions)
+- 📧 **Security**: See [SECURITY.md](SECURITY.md)
 
 ---
 
-## Notes
+<div align="center">
 
-- **IVR** requires at least 30 days of history to be meaningful. Keep the scanner running daily.
-- **UOA** requires at least 5 days of OI history to establish baselines.
-- **OI Heatmap** data is only recorded during market hours (9:15–15:30 IST).
-- **Pre-market report** fires at 9:00 AM IST on weekdays if `TELEGRAM_BOT_TOKEN` is set.
-- **Bulk deals** are fetched daily at 4:00 PM IST from NSE's public API.
+**Built with ❤️ for the trading community**
 
----
+[⭐ Star this repo](https://github.com/shahzebkhan-os/fo-scanner) • [🐛 Report Bug](https://github.com/shahzebkhan-os/fo-scanner/issues) • [✨ Request Feature](https://github.com/shahzebkhan-os/fo-scanner/issues)
 
-## Keyboard Shortcuts
-
-| Key | Action |
-|---|---|
-| `R` | Scanner |
-| `C` | Chain |
-| `G` | Greeks |
-| `H` | OI Heatmap |
-| `S` | Sectors |
-| `U` | UOA |
-| `P` | Portfolio |
-| `,` | Settings |
+</div>
