@@ -481,16 +481,20 @@ def compute_stock_score_v2(
     direction = "NEUTRAL"
     confidence = 0.0
     
-    if bull_count >= 3 and bull_count > bear_count:
+    # We only have 4 active factors in historical backtest context (buildup is dead)
+    # 2 out of 4 aligned factors is a strong enough confluence.
+    active_indicators = len([f for f in factors if f != 0]) or 1
+    
+    if bull_count >= 2 and bull_count > bear_count:
         direction = "BULLISH"
-        confidence = bull_count / len(factors)
-    elif bear_count >= 3 and bear_count > bull_count:
+        confidence = bull_count / active_indicators
+    elif bear_count >= 2 and bear_count > bull_count:
         direction = "BEARISH"
-        confidence = bear_count / len(factors)
+        confidence = bear_count / active_indicators
         
     sub_gex     = 100 if factors[0] == 1 else (0 if factors[0] == -1 else 50)
-    sub_volpcr  = min(100, max(0, (vol_pcr - 0.5) * 100))
-    sub_dwoipcr = min(100, max(0, (dwoi_pcr - 0.5) * 100))
+    sub_volpcr  = min(100, max(0, vol_pcr * 50))
+    sub_dwoipcr = min(100, max(0, dwoi_pcr * 50))
     sub_skew    = 100 - skew_data["skew_percentile"]
     sub_build   = 100 if factors[4] == 1 else (0 if factors[4] == -1 else 50)
     

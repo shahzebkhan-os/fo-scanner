@@ -14,12 +14,20 @@ from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
 from math import log, sqrt, exp
+import requests
+import zipfile
+import io
 
 try:
-    from jugaad_data.nse import bhavcopy_fo_save, index_df, stock_df
+    from jugaad_data.nse import bhavcopy_fo_save
 except ImportError:
-    print("Please install required libraries: pip install pandas jugaad-data")
-    sys.exit(1)
+    print("WARNING: jugaad_data missing. Bhavcopy downloading might fail.")
+
+try:
+    import yfinance as yf
+except ImportError:
+    print("WARNING: yfinance missing. Missing Spot limits will occur.")
+    yf = None
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 
@@ -31,8 +39,8 @@ CONFIG = {
     ],
     "start_date": "2023-01-01",
     "end_date":   "2024-12-31",
-    "data_dir":   "./historical_data",
-    "db_path":    "./scanner.db",
+    "data_dir":   os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "historical_data"),
+    "db_path":    os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner.db"),
     "rate_limit_seconds": 1.5,
     "max_retries": 3,
     "batch_size": 30,
@@ -60,7 +68,7 @@ NSE_HOLIDAYS = {
 # ── LOGGING ──────────────────────────────────────────────────────────────────
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 os.makedirs(CONFIG["data_dir"], exist_ok=True)
 
@@ -84,31 +92,70 @@ def download_spot_prices(symbols: list, start_date_str: str, end_date_str: str, 
     end = datetime.strptime(end_date_str, "%Y-%m-%d").date()
     out_file = os.path.join(data_dir, "spot_prices.json")
 
+    existing_data = {}
     if os.path.exists(out_file):
-        log.info(f"Loaded existing spot prices from {out_file}")
-        return pd.read_json(out_file, orient="index").to_dict(orient="index")
+        import json
+        with open(out_file, "r") as f:
+            existing_data = json.load(f)
+
+    if yf is None:
+        logger.info(f"Loaded existing spot prices from {out_file} (yfinance missing)")
+        return existing_data
+        
+    logger.info(f"Fetching spot prices from {start_date_str} to {end_date_str}...")
 
     res = {}
-    log.info(f"Downloading spot prices from {start} to {end}...")
+    logger.info(f"Downloading spot prices from {start} to {end}...")
+
+    # Mapping to Yahoo Finance tickers
+    yf_mapping = {
+        "NIFTY": "^NSEI",
+        "BANKNIFTY": "^NSEBANK",
+        "FINNIFTY": "NIFTY_FIN_SERVICE.NS", # Note: FinNifty YF ticker is notoriously unreliable, but we'll try it or fallback
+    }
 
     for sym in symbols:
-        log.info(f"  Fetching {sym}...")
+        logger.info(f"  Fetching {sym} (via yfinance)...")
         try:
-            if sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"]:
-                idx_name = f"{sym} 50" if sym == "NIFTY" else f"NIFTY {sym.replace('NIFTY', ' BANK')}"
-                if sym == "FINNIFTY": idx_name = "NIFTY FIN SERVICE"
-                df = index_df(symbol=idx_name, from_date=start, to_date=end)
+            yf_ticker = yf_mapping.get(sym, f"{sym}.NS")
+            if sym == "FINNIFTY":
+                # FinNifty on yf is often missing/broken, use manual mapping if possible, 
+                # but ^CNXFIN is sometimes used. Let's try ^CNXFIN
+                yf_ticker = "^CNXFIN"
+                
+            # Add 1 day buffer to end date because yfinance end date is strictly exclusive
+            end_buf = (end + timedelta(days=1)).strftime("%Y-%m-%d")
+            ticker_df = yf.download(yf_ticker, start=start_date_str, end=end_buf, progress=False)
+            if ticker_df.empty:
+                logger.warning(f"Failed spot download for {sym}: Empty Data")
+                continue
+                
+            ticker_df.index = pd.to_datetime(ticker_df.index).strftime("%Y-%m-%d")
+            
+            # yfinance MultiIndex output handling
+            if isinstance(ticker_df.columns, pd.MultiIndex):
+                # Usually ('Close', 'RELIANCE.NS') format in newer yfinance versions
+                close_series = ticker_df[("Close", yf_ticker)]
             else:
-                df = stock_df(symbol=sym, from_date=start, to_date=end, series="EQ")
-
-            if df is not None and not df.empty:
-                res[sym] = {pd.to_datetime(r["DATE"]).strftime("%Y-%m-%d"): float(r["CLOSE"]) for _, r in df.iterrows()}
+                close_series = ticker_df["Close"]
+                
+            new_prices = close_series.to_dict()
+            
+            # Merge with existing
+            if sym not in existing_data:
+                existing_data[sym] = new_prices
+            else:
+                existing_data[sym].update(new_prices)
+                
         except Exception as e:
-            log.warning(f"Failed spot download for {sym}: {e}")
-        time.sleep(CONFIG["rate_limit_seconds"])
+            logger.warning(f"Failed spot download for {sym}: {e}")
+        time.sleep(0.5) # small delay to be nice to yf api
 
-    pd.DataFrame.from_dict(res, orient="index").to_json(out_file, orient="index")
-    return res
+    with open(out_file, "w") as f:
+        import json
+        json.dump(existing_data, f)
+        
+    return existing_data
 
 
 # ── STEP 1C: BHAVCOPY DOWNLOADER ─────────────────────────────────────────────
@@ -128,10 +175,11 @@ def download_bhavcopy_range(start_date_str: str, end_date_str: str, data_dir: st
     total = len(dates_to_fetch)
     os.makedirs(os.path.join(data_dir, "bhavcopies"), exist_ok=True)
 
-    log.info(f"Downloading {total} bhavcopy days...")
+    logger.info(f"Downloading {total} bhavcopy days...")
 
     for i, d in enumerate(dates_to_fetch):
-        fname = f"fo_bhavcopy_{d.strftime('%d%b%Y').upper()}.csv"
+        # jugaad_data format: fo01Aug2023bhav.csv
+        fname = f"fo{d.strftime('%d%b%Y')}bhav.csv"
         fpath = os.path.join(data_dir, "bhavcopies", fname)
 
         progress = int((i / total) * 20)
@@ -146,7 +194,24 @@ def download_bhavcopy_range(start_date_str: str, end_date_str: str, data_dir: st
         retries = 0
         while retries < CONFIG["max_retries"]:
             try:
-                bhavcopy_fo_save(d, os.path.join(data_dir, "bhavcopies"))
+                if d >= date(2024, 7, 8):
+                    # NSE changed its entire API/URL structure for Bhavcopies on July 8, 2024
+                    s = requests.Session()
+                    headers = {'User-Agent': 'Mozilla/5.0'}
+                    s.get("https://www.nseindia.com/all-reports", headers=headers, timeout=10)
+                    
+                    dt_str = d.strftime("%Y%m%d")
+                    url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{dt_str}_F_0000.csv.zip"
+                    r = s.get(url, headers=headers, timeout=10)
+                    r.raise_for_status()
+                    
+                    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                        with z.open(z.namelist()[0]) as f:
+                            df = pd.read_csv(f)
+                            df.to_csv(fpath, index=False)
+                else:
+                    bhavcopy_fo_save(d, os.path.join(data_dir, "bhavcopies"))
+                
                 time.sleep(CONFIG["rate_limit_seconds"])
                 successful.append(fpath)
                 break
@@ -154,7 +219,7 @@ def download_bhavcopy_range(start_date_str: str, end_date_str: str, data_dir: st
                 retries += 1
                 time.sleep(2 ** retries)
                 if retries == CONFIG["max_retries"]:
-                    log.warning(f"\nFailed to download {d} after {retries} retries: {e}")
+                    logger.warning(f"\nFailed to download {d} after {retries} retries: {e}")
 
         if (i + 1) % CONFIG["batch_size"] == 0:
             time.sleep(CONFIG["pause_between_batches"])
@@ -167,14 +232,37 @@ def download_bhavcopy_range(start_date_str: str, end_date_str: str, data_dir: st
 
 def load_kaggle_csv(file_path: str) -> pd.DataFrame:
     df = pd.read_csv(file_path, low_memory=False)
+    df.columns = df.columns.str.strip()
+    
+    # Translate modern NSE July 2024+ formatting back to legacy
+    if "TckrSymb" in df.columns:
+        df.rename(columns={
+            "FinInstrmTp": "INSTRUMENT",
+            "TckrSymb": "SYMBOL",
+            "XpryDt": "EXPIRY_DT",
+            "StrkPric": "STRIKE_PR",
+            "OptnTp": "OPTION_TYP",
+            "OpnPric": "OPEN",
+            "HghPric": "HIGH",
+            "LwPric": "LOW",
+            "ClsPric": "CLOSE",
+            "PrvsClsgPric": "SETTLE_PR",
+            "TtlTradgVol": "CONTRACTS",
+            "OpnIntrst": "OPEN_INT",
+            "ChngInOpnIntrst": "CHG_IN_OI",
+            "TradDt": "TIMESTAMP"
+        }, inplace=True)
+        # Map IDs
+        inst_map = {"IDO": "OPTIDX", "STO": "OPTSTK", "IDF": "FUTIDX", "STF": "FUTSTK"}
+        df["INSTRUMENT"] = df["INSTRUMENT"].map(inst_map)
 
     df = df[df["INSTRUMENT"].isin(["OPTIDX", "OPTSTK"])]
     df = df[df["OPTION_TYP"].isin(["CE", "PE"])]
     df = df[(df["OPEN_INT"] > 0) | (df["CLOSE"] > 0)]
     df = df[df["STRIKE_PR"] > 0]
 
-    df["EXPIRY_DT"] = pd.to_datetime(df["EXPIRY_DT"]).dt.strftime("%Y-%m-%d")
-    df["TIMESTAMP"] = pd.to_datetime(df["TIMESTAMP"]).dt.strftime("%Y-%m-%d")
+    df["EXPIRY_DT"] = pd.to_datetime(df["EXPIRY_DT"], format="mixed", dayfirst=True).dt.strftime("%Y-%m-%d")
+    df["TIMESTAMP"] = pd.to_datetime(df["TIMESTAMP"], format="mixed", dayfirst=True).dt.strftime("%Y-%m-%d")
     df["CHG_IN_OI"] = df["CHG_IN_OI"].fillna(0)
 
     # Clean strike
@@ -276,21 +364,21 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
     """
     snapshots = []
     
-    # Needs to be sorted chronologically for DTE tracking 
+    # Needs to be sorted chronologgerically for DTE tracking 
     raw_df = raw_df.sort_values(by="trade_date")
 
     grouped_days = raw_df.groupby(["trade_date", "symbol"])
     total_len = len(grouped_days)
 
-    log.info(f"Reconstructing {total_len} snapshots...")
+    logger.info(f"Reconstructing {total_len} snapshots...")
     
     for i, ((tdate, sym), day_df) in enumerate(grouped_days):
         if i > 0 and i % 500 == 0:
-            log.info(f"Processed {i}/{total_len}")
+            logger.info(f"Processed {i}/{total_len}")
 
         spot_history = spot_prices.get(sym, {})
         spot = spot_history.get(tdate, 0)
-        
+
         # We need a spot price. Without it we cannot calculate metrics.
         if spot == 0: continue
 
@@ -336,7 +424,7 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
         iv_skew = atm_pe_iv - atm_ce_iv
 
         # 3. Greeks + GEX (Approximations for scoring)
-        # Assuming v2 compute_stock_score handles the internal logic, we build a pseudo chain payload
+        # Assuming v2 compute_stock_score handles the internal loggeric, we build a pseudo chain payload
         pseudo_records = {"underlyingValue": spot, "expiryDates": expiries, "data": []}
         for st in strikes:
             rce = chain[(chain["strike"] == st) & (chain["opt_type"] == "CE")]
@@ -354,20 +442,17 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
         score_res = compute_stock_score_v2({"records": pseudo_records}, spot, sym, near_exp, {"iv_rank": 50}) # defaulting IVR for historical
         
         top_picks = score_res.get("top_picks", [])
-        top_type, top_str, top_pr = None, None, None
-        if top_picks and score_res.get("signal") != "NEUTRAL":
+        if top_picks:
             tp = top_picks[0]
             top_type = tp["type"]
             top_str = tp["strike"]
             top_pr = tp["ltp"]
 
         # NEXT DAY OUTCOME LABELLING
-        # LIMITATION 3: Next-day outcome assumption...
         nday = next_trading_day(datetime.strptime(tdate, "%Y-%m-%d").date())
         nday_str = nday.strftime("%Y-%m-%d")
 
         out_next = spot_history.get(nday_str)
-
         pick_pnl_next = 0
         trade_res = None
 
@@ -376,7 +461,7 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
             tgt_row = nday_df[(nday_df["strike"] == top_str) & (nday_df["opt_type"] == top_type)]
             
             if not tgt_row.empty:
-                pick_ltp_next = tgt_row.iloc[0]["ltp"]
+                pick_ltp_next = float(tgt_row.iloc[0]["ltp"])
                 if top_pr > 0:
                     pick_pnl_next = ((pick_ltp_next - top_pr) / top_pr) * 100
                 
@@ -426,6 +511,7 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
             "trade_result": trade_res,
             "data_source": "EOD_HISTORICAL"
         }
+        
         snapshots.append(snap)
     
     return pd.DataFrame(snapshots)
@@ -445,23 +531,37 @@ def load_to_database(df: pd.DataFrame, db_path: str, replace=False):
     losses = len(df[df["trade_result"] == "LOSS"])
     neutrals = len(df[df["trade_result"] == "NEUTRAL"])
     
-    log.info(f"Loaded {len(df)} rows into DB")
-    log.info(f"Wins: {wins} | Losses: {losses} | Neutrals: {neutrals}")
+    logger.info(f"Loaded {len(df)} rows into DB")
+    logger.info(f"Wins: {wins} | Losses: {losses} | Neutrals: {neutrals}")
     conn.commit()
     conn.close()
 
 def load_iv_history(df: pd.DataFrame, db_path: str):
     conn = sqlite3.connect(db_path)
     
-    # Needs trade_date, symbol, atm_iv (avg)
     ivs = []
     for _, r in df.iterrows():
         dt = r["snapshot_time"].split()[0]
         aiv = (r["atm_ce_iv"] + r["atm_pe_iv"]) / 2
-        ivs.append({"symbol": r["symbol"], "trade_date": dt, "iv_value": aiv})
+        ivs.append({"symbol": r["symbol"], "snap_date": dt, "iv": aiv})
         
     piv = pd.DataFrame(ivs)
-    piv.to_sql("iv_history", conn, if_exists="append", index=False)
+    if piv.empty:
+        conn.close()
+        return
+        
+    piv = piv.drop_duplicates(subset=["symbol", "snap_date"])
+    
+    # Save to temp table and gracefully UPSERT
+    piv.to_sql("iv_history_temp", conn, if_exists="replace", index=False)
+    
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR REPLACE INTO iv_history (symbol, snap_date, iv)
+        SELECT symbol, snap_date, iv FROM iv_history_temp
+    """)
+    cur.execute("DROP TABLE iv_history_temp")
+    
     conn.commit()
     conn.close()
 
@@ -471,12 +571,12 @@ def validate_data_quality(db_path: str):
     df = pd.read_sql("SELECT * FROM market_snapshots WHERE data_source='EOD_HISTORICAL'", conn)
     
     if df.empty:
-        log.info("No historical data to validate.")
+        logger.info("No historical data to validate.")
         return
         
-    log.info(f"Data Quality Report: {len(df)} rows")
+    logger.info(f"Data Quality Report: {len(df)} rows")
     avg_score = df["score"].mean()
-    log.info(f"Avg Score: {avg_score:.2f}")
+    logger.info(f"Avg Score: {avg_score:.2f}")
 
 # ── CLI ENTRY POINT ──────────────────────────────────────────────────────────
 
@@ -492,7 +592,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     syms = args.symbols.split(",")
 
-    log.info("NSE F&O HISTORICAL LOADER")
+    logger.info("NSE F&O HISTORICAL LOADER")
     
     if args.cmd in ["download", "full"]:
         download_spot_prices(syms, args.start, args.end, CONFIG["data_dir"])

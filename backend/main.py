@@ -1025,6 +1025,40 @@ async def run_backtest(req: BacktestRequest):
         
     return Backtest.generate_report(trades, tp=req.tp, sl=req.sl)
 
+class HistoricalBacktestRequest(BaseModel):
+    start: str = "2023-01-01"
+    end: str = "2024-12-31"
+    score: int = 40
+    confidence: float = 0.0
+    tp: float = 40.0
+    sl: float = 25.0
+    signal: Optional[str] = None
+    regime: Optional[str] = None
+    symbols: Optional[str] = None
+
+@app.post("/api/historical-backtest")
+async def run_historical_backtest(req: HistoricalBacktestRequest):
+    import sys, os
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+        
+    import backtest_runner as BTR
+    db_path = os.path.join(backend_dir, "scanner.db")
+    bt = BTR.EODBacktester(db_path)
+    syms = req.symbols.split(",") if req.symbols else None
+    sig = req.signal if req.signal and req.signal != "ALL" else None
+    reg = req.regime if req.regime and req.regime != "ALL" else None
+    
+    res = bt.run(
+        req.start, req.end, 
+        score_threshold=req.score, 
+        confidence_threshold=req.confidence, 
+        tp_pct=req.tp, sl_pct=req.sl, 
+        signal_filter=sig, regime_filter=reg, symbols=syms
+    )
+    return res.to_dict()
+
 
 # ── Greeks ────────────────────────────────────────────────────────────────────
 

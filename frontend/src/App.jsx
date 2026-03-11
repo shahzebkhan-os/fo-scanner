@@ -23,6 +23,7 @@ const TABS = [
   { id: "portfolio", label: "P&L", icon: "💰" },
   { id: "manual", label: "Trade", icon: "🚀" },
   { id: "accuracy", label: "Accuracy", icon: "📈" },
+  { id: "backtest", label: "Backtest", icon: "🕰" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
 
@@ -205,6 +206,7 @@ export default function App() {
         <div style={{ display: tab === "portfolio" ? "block" : "none" }}><PortfolioTab theme={theme} /></div>
         <div style={{ display: tab === "manual"    ? "block" : "none" }}><ManualTradeTab theme={theme} /></div>
         <div style={{ display: tab === "accuracy"  ? "block" : "none" }}><AccuracyTab theme={theme} /></div>
+        <div style={{ display: tab === "backtest"  ? "block" : "none" }}><BacktestTab theme={theme} /></div>
         <div style={{ display: tab === "settings"  ? "block" : "none" }}><SettingsTab theme={theme} /></div>
       </main>
     </div>
@@ -2256,6 +2258,210 @@ function AccuracyTab({ theme }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Backtest Tab
+// ══════════════════════════════════════════════════════════════════════════════
+
+function BacktestTab({ theme }) {
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [params, setParams] = useState({
+    start: "2023-01-01",
+    end: "2024-12-31",
+    score: 20,
+    confidence: 0,
+    tp: 40,
+    sl: 25,
+    signal: "ALL",
+    regime: "ALL",
+    symbols: ""
+  });
+
+  const run = async () => {
+    setLoading(true);
+    setResult(null);
+    try {
+      const res = await apiFetch("/api/historical-backtest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
+      });
+      setResult(res);
+    } catch (e) {
+      console.error(e);
+      alert("Backtest failed. See console for details.");
+    }
+    setLoading(false);
+  };
+
+  const ParamGroup = ({ label, desc, name, type = "text", options = null }) => (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+        <label style={{ fontWeight: 600, fontSize: 13 }}>{label}</label>
+        <span style={{ fontSize: 11, color: theme.muted, cursor: "help" }} title={desc}>ⓘ Info</span>
+      </div>
+      {options ? (
+        <select value={params[name]} onChange={e => setParams({ ...params, [name]: e.target.value })}
+          style={{
+            width: "100%", padding: "8px 10px", borderRadius: 6,
+            background: theme.bg, color: theme.text, border: `1px solid ${theme.border}`,
+            fontFamily: "inherit"
+          }}>
+          {options.map(o => <option key={o} value={o}>{o}</option>)}
+        </select>
+      ) : (
+        <input type={type} value={params[name]} onChange={e => setParams({ ...params, [name]: type === "number" ? Number(e.target.value) : e.target.value })}
+          style={{
+            width: "100%", padding: "8px 10px", borderRadius: 6,
+            background: theme.bg, color: theme.text, border: `1px solid ${theme.border}`,
+            fontFamily: "inherit"
+          }} />
+      )}
+      <div style={{ fontSize: 11, color: theme.muted, marginTop: 4 }}>{desc}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 20 }}>
+      {/* Sidebar Controls */}
+      <Card theme={theme} style={{ height: "fit-content" }}>
+        <h3 style={{ margin: "0 0 20px 0", fontSize: 16 }}>Parameters</h3>
+        
+        <ParamGroup label="Date Range" desc="Simulate trades between these dates." name="start" />
+        <ParamGroup label="End Date" desc="To Date" name="end" />
+        
+        <ParamGroup label="Score Hurdle" desc="Min strategy score (1-100) to enter trades. Lower scores allow more trades but might be lower quality." name="score" type="number" />
+        <ParamGroup label="ML Confidence" desc="Min confidence (0.0 - 1.0) needed." name="confidence" type="number" />
+        
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <ParamGroup label="Target %" desc="Profit exit percentage." name="tp" type="number" />
+          <ParamGroup label="Stop %" desc="Risk exit percentage." name="sl" type="number" />
+        </div>
+        
+        <ParamGroup label="Signal Bias" desc="Filter by direction bias." name="signal" options={["ALL", "BULLISH", "BEARISH"]} />
+        <ParamGroup label="Market regime" desc="Specific gamma/volatility environment filter." name="regime" options={["ALL", "TRENDING", "PINNED", "EXPIRY", "SQUEEZE"]} />
+        
+        <ParamGroup label="Symbols" desc="Comma separated (e.g. NIFTY,RELIANCE). Blank = All." name="symbols" />
+
+        <button onClick={run} disabled={loading}
+          style={{
+            width: "100%", padding: "12px", background: theme.accent,
+            color: "#fff", border: "none", borderRadius: 6, cursor: "pointer",
+            fontWeight: 700, marginTop: 10, opacity: loading ? 0.6 : 1
+          }}>
+          {loading ? "⌛ PROCESSING..." : "▶ RUN BACKTEST"}
+        </button>
+      </Card>
+
+      {/* Results Workspace */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        {!result && !loading && (
+          <div style={{ textAlign: "center", padding: "100px", color: theme.muted, background: theme.card, borderRadius: 12, border: `1px dashed ${theme.border}` }}>
+            <div style={{ fontSize: 40, marginBottom: 16 }}>📊</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: theme.text }}>Historical Backtest Engine</div>
+            <p>Setup your parameters and click Run to see detailed historical performance over 2023-2024.</p>
+          </div>
+        )}
+
+        {loading && <Card theme={theme}><Loader theme={theme} /></Card>}
+
+        {result && result.error && (
+          <div style={{ padding: 20, background: "rgba(239,68,68,0.1)", border: `1px solid ${theme.red}`, borderRadius: 8, color: theme.red }}>
+            {result.error}
+          </div>
+        )}
+
+        {result && !result.error && (
+          <>
+            {/* Meta Summary */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+              {[
+                ["Total Trades", result.summary.total],
+                ["Win Rate", `${result.summary.win_rate.toFixed(1)}%`],
+                ["Profit Factor", result.summary.profit_factor.toFixed(2)],
+                ["Expectancy", `${(result.summary.expectancy).toFixed(1)}%`]
+              ].map(([k, v]) => (
+                <Card theme={theme} key={k} style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: 11, color: theme.muted }}>{k}</div>
+                  <div style={{ fontSize: 20, fontWeight: 800 }}>{v}</div>
+                </Card>
+              ))}
+            </div>
+
+            {/* Equity Curve (Chart) */}
+            <Card theme={theme}>
+              <div style={{ fontWeight: 700, marginBottom: 16 }}>Equity Curve (₹)</div>
+              <ResponsiveContainer width="100%" height={250}>
+                <AreaChart data={result.equity_curve.map((v, i) => ({ step: i, capital: v }))}>
+                  <defs>
+                    <linearGradient id="curveColor" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor={theme.accent} stopOpacity={0.2}/>
+                      <stop offset="95%" stopColor={theme.accent} stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={theme.border} opacity={0.3} />
+                  <XAxis dataKey="step" hide />
+                  <YAxis domain={['auto', 'auto']} tick={{fontSize: 10, fill: theme.muted}} />
+                  <Tooltip 
+                    contentStyle={{ background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 8 }}
+                    formatter={(v) => [`₹${Number(v).toLocaleString()}`, "Capital"]}
+                  />
+                  <Area type="monotone" dataKey="capital" stroke={theme.accent} fill="url(#curveColor)" strokeWidth={3} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </Card>
+
+            {/* Drilldown Tables */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+              <Card theme={theme}>
+                <div style={{ fontWeight: 700, marginBottom: 12 }}>Performance by Regime</div>
+                <table style={{ width: "100%", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: theme.muted }}><th>Regime</th><th>Trades</th><th>WR%</th></tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(result.by_regime).map(([k, v]) => (
+                      <tr key={k} style={{ borderTop: `1px solid ${theme.border}` }}>
+                        <td style={{ padding: "8px 0" }}>{k}</td>
+                        <td>{v.trades}</td>
+                        <td style={{ color: v.wr > 50 ? theme.green : theme.red, fontWeight: 700 }}>{v.wr.toFixed(1)}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Card>
+
+              <Card theme={theme}>
+                <div style={{ fontWeight: 700, marginBottom: 12 }}>Top Performing Symbols</div>
+                <table style={{ width: "100%", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: theme.muted }}><th>Symbol</th><th>PnL</th><th>WR%</th></tr>
+                  </thead>
+                  <tbody>
+                    {result.top_symbols.map((s, idx) => (
+                      <tr key={idx} style={{ borderTop: `1px solid ${theme.border}` }}>
+                        <td style={{ padding: "8px 0" }}>{s.symbol}</td>
+                        <td style={{ color: s.pnl > 0 ? theme.green : theme.red }}>₹{fmt(s.pnl, 0)}</td>
+                        <td>{s.wr.toFixed(0)}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Card>
+            </div>
+            
+            <div style={{ fontSize: 11, color: theme.muted, textAlign: "center", marginTop: 10 }}>
+              {result.summary.significant ? "✅ Statistically Significant" : "⚠️ Low Sample Size / High Luck Factor"} · 
+              Max Drawdown: ₹{result.summary.max_drawdown.toLocaleString()} ({result.summary.max_drawdown_pct.toFixed(1)}%) · Sharpe: {fmt(result.summary.sharpe, 2)}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

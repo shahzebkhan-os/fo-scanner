@@ -9,3 +9,4 @@ __pycache__/
 *.plist
 *.csv
 *.db-*
+historical_data/
