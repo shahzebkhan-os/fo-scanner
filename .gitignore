@@ -10,3 +10,4 @@ __pycache__/
 *.csv
 *.db-*
 historical_data/
+*.whl

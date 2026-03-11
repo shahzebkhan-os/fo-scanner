@@ -1,0 +1,100 @@
+repos:
+  # Python hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: mixed-line-ending
+
+  # Python formatting with Black
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+        language_version: python3.11
+        args: ['--line-length=120']
+        files: ^backend/
+
+  # Python import sorting with isort
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ['--profile', 'black', '--line-length', '120']
+        files: ^backend/
+
+  # Python linting with pylint
+  - repo: https://github.com/PyCQA/pylint
+    rev: v3.3.2
+    hooks:
+      - id: pylint
+        args: ['--max-line-length=120', '--disable=C0111,R0903,C0103']
+        files: ^backend/.*\.py$
+
+  # JavaScript/JSX formatting with Prettier
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8
+    hooks:
+      - id: prettier
+        files: ^frontend/src/.*\.(js|jsx|json|css|md)$
+        args: ['--write']
+
+  # Security check for Python dependencies
+  - repo: https://github.com/Lucas-C/pre-commit-hooks-safety
+    rev: v1.3.3
+    hooks:
+      - id: python-safety-dependencies-check
+        files: backend/requirements.txt
+
+  # Dockerfile linting
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.13.1-beta
+    hooks:
+      - id: hadolint-docker
+
+  # Markdown linting
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.43.0
+    hooks:
+      - id: markdownlint
+        args: ['--fix']
+
+  # Shell script linting
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+
+# Configuration
+default_language_version:
+  python: python3.11
+  node: '20'
+
+# Don't run on files in these directories
+exclude: |
+  (?x)^(
+      .*\.db|
+      .*\.sqlite|
+      .*\.pyc|
+      __pycache__|
+      node_modules/|
+      dist/|
+      build/|
+      venv/|
+      \.git/|
+      \.github/|
+      historical_data/
+  )$
+
+# Fail fast - stop on first failure
+fail_fast: false
+
+# Show diff when files are modified
+verbose: true

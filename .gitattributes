@@ -1,0 +1,83 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Source code
+*.py text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+
+# Documentation
+*.txt text eol=lf
+*.rst text eol=lf
+
+# Config files
+.gitignore text eol=lf
+.gitattributes text eol=lf
+.editorconfig text eol=lf
+.dockerignore text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Windows scripts
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.pyc binary
+*.pyo binary
+*.so binary
+*.dll binary
+*.exe binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg binary
+*.pdf binary
+
+# Archives
+*.7z binary
+*.jar binary
+*.rar binary
+*.tar.gz binary
+*.tgz binary
+
+# Fonts
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.eot binary
+
+# Git attributes for linguist (GitHub language statistics)
+*.ipynb linguist-documentation
+*.md linguist-documentation
+*.txt linguist-documentation
+
+# Export-ignore (exclude from git archive)
+.gitattributes export-ignore
+.gitignore export-ignore
+.github/ export-ignore
+.editorconfig export-ignore
+tests/ export-ignore
+*.test.* export-ignore
