@@ -11,6 +11,8 @@
 
 **Full-featured NSE options chain scanner with live signals, Greeks calculation, OI heatmaps, sector analysis, unusual activity detection, and paper trading.**
 
+> **🚀 New to this project?** Start here: **[QUICKSTART.md](QUICKSTART.md)** - Simple step-by-step guide to get running in minutes!
+
 [Features](#-features) • [Quick Start](#-quick-start) • [Documentation](#-documentation) • [API Reference](#-api-reference) • [Contributing](#-contributing)
 
 </div>
@@ -299,6 +301,11 @@ docker-compose up -d
 
 ## 📚 Documentation
 
+### Getting Started
+- **[QUICKSTART.md](QUICKSTART.md)** - 🚀 Simple step-by-step guide to get started (NEW!)
+- **[HOW_TO_RUN.txt](HOW_TO_RUN.txt)** - Quick reference text file for running the project
+
+### Technical Documentation
 - **[README2.md](README2.md)** - Trade scoring & selection logic deep-dive
 - **[README_BACKTESTING.md](README_BACKTESTING.md)** - Historical backtesting guide
 - **[PROJECT_IMPROVEMENTS.md](PROJECT_IMPROVEMENTS.md)** - Recommended improvements
