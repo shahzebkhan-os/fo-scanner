@@ -130,7 +130,7 @@ def download_spot_prices(symbols: list, start_date_str: str, end_date_str: str, 
     if yf is None:
         logger.info(f"Loaded existing spot prices from {out_file} (yfinance missing)")
         return existing_data
-        
+
     logger.info(f"Fetching spot prices from {start_date_str} to {end_date_str}...")
 
     res = {}
@@ -148,34 +148,34 @@ def download_spot_prices(symbols: list, start_date_str: str, end_date_str: str, 
         try:
             yf_ticker = yf_mapping.get(sym, f"{sym}.NS")
             if sym == "FINNIFTY":
-                # FinNifty on yf is often missing/broken, use manual mapping if possible, 
+                # FinNifty on yf is often missing/broken, use manual mapping if possible,
                 # but ^CNXFIN is sometimes used. Let's try ^CNXFIN
                 yf_ticker = "^CNXFIN"
-                
+
             # Add 1 day buffer to end date because yfinance end date is strictly exclusive
             end_buf = (end + timedelta(days=1)).strftime("%Y-%m-%d")
             ticker_df = yf.download(yf_ticker, start=start_date_str, end=end_buf, progress=False)
             if ticker_df.empty:
                 logger.warning(f"Failed spot download for {sym}: Empty Data")
                 continue
-                
+
             ticker_df.index = pd.to_datetime(ticker_df.index).strftime("%Y-%m-%d")
-            
+
             # yfinance MultiIndex output handling
             if isinstance(ticker_df.columns, pd.MultiIndex):
                 # Usually ('Close', 'RELIANCE.NS') format in newer yfinance versions
                 close_series = ticker_df[("Close", yf_ticker)]
             else:
                 close_series = ticker_df["Close"]
-                
+
             new_prices = close_series.to_dict()
-            
+
             # Merge with existing
             if sym not in existing_data:
                 existing_data[sym] = new_prices
             else:
                 existing_data[sym].update(new_prices)
-                
+
         except Exception as e:
             logger.warning(f"Failed spot download for {sym}: {e}")
         time.sleep(0.5) # small delay to be nice to yf api
@@ -183,7 +183,7 @@ def download_spot_prices(symbols: list, start_date_str: str, end_date_str: str, 
     with open(out_file, "w") as f:
         import json
         json.dump(existing_data, f)
-        
+
     return existing_data
 
 
@@ -228,19 +228,19 @@ def download_bhavcopy_range(start_date_str: str, end_date_str: str, data_dir: st
                     s = requests.Session()
                     headers = {'User-Agent': 'Mozilla/5.0'}
                     s.get("https://www.nseindia.com/all-reports", headers=headers, timeout=10)
-                    
+
                     dt_str = d.strftime("%Y%m%d")
                     url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{dt_str}_F_0000.csv.zip"
                     r = s.get(url, headers=headers, timeout=10)
                     r.raise_for_status()
-                    
+
                     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                         with z.open(z.namelist()[0]) as f:
                             df = pd.read_csv(f)
                             df.to_csv(fpath, index=False)
                 else:
                     bhavcopy_fo_save(d, os.path.join(data_dir, "bhavcopies"))
-                
+
                 time.sleep(CONFIG["rate_limit_seconds"])
                 successful.append(fpath)
                 break
@@ -262,7 +262,7 @@ def download_bhavcopy_range(start_date_str: str, end_date_str: str, data_dir: st
 def load_kaggle_csv(file_path: str) -> pd.DataFrame:
     df = pd.read_csv(file_path, low_memory=False)
     df.columns = df.columns.str.strip()
-    
+
     # Translate modern NSE July 2024+ formatting back to legacy
     if "TckrSymb" in df.columns:
         df.rename(columns={
@@ -334,28 +334,18 @@ def merge_data_sources(bhavcopy_dir: str, kaggle_files: list, symbols: list) -> 
 # ── STEP 2A: IV & GREEKS RECONSTRUCTION ──────────────────────────────────────
 
 def _bs_price(S, K, T, r, sigma, opt_type):
-    if T <= 0: return max(0.0, S - K) if opt_type == 'CE' else max(0.0, K - S)
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return max(0.0, S - K) if opt_type == 'CE' else max(0.0, K - S)
     d1 = (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
     d2 = d1 - sigma * sqrt(T)
-
-    try:
-        from scipy.stats import norm
-        Nd1 = norm.cdf(d1)
-        Nd2 = norm.cdf(d2)
-        Nnd1 = norm.cdf(-d1)
-        Nnd2 = norm.cdf(-d2)
-    except:
-        def cdf(x):
-            return 0.5 * (1 + sum([x**(2*n+1) / (float(n)*2+1) for n in range(50)])) # simplistic
-        # More robust approximation:
-        return 0.0 # Placeholder if scipy missing and real exactness needed
 
     from scipy.stats import norm
     if opt_type == "CE": return S * norm.cdf(d1) - K * exp(-r * T) * norm.cdf(d2)
     else: return K * exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
 def _bs_vega(S, K, T, r, sigma):
-    if T <= 0: return 0.0
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
     from scipy.stats import norm
     d1 = (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
     return S * norm.pdf(d1) * sqrt(T)
@@ -394,15 +384,25 @@ def compute_implied_volatility(market_price, spot, strike, dte, opt_type, r=0.06
     for _ in range(max_iter):
         price = _bs_price(spot, strike, T, r, iv, opt_type)
         vega = _bs_vega(spot, strike, T, r, iv)
-        if vega == 0: break
+        if abs(vega) < 1e-12: break
 
         diff = price - market_price
         if abs(diff) < tol: return max(0.01, min(iv * 100, 500.0))
-        iv -= diff / vega
 
-        if iv <= 0: iv = 0.01; break
+        step = diff / vega
+        # Dampen large steps to prevent overflow
+        if abs(step) > 1.0:
+            step = 1.0 if step > 0 else -1.0
+        iv -= step
 
-    return max(0.01, min(iv * 100, 500.0))
+        # Clamp iv to a sane range
+        if iv <= 0.001: iv = 0.001
+        if iv > 5.0: iv = 5.0
+
+    result = iv * 100
+    if result != result:  # NaN check
+        return None
+    return max(0.01, min(result, 500.0))
 
 # ── FEATURE PIPELINE ─────────────────────────────────────────────────────────
 
@@ -697,30 +697,30 @@ def load_to_database(df: pd.DataFrame, db_path: str, replace=False):
 
 def load_iv_history(df: pd.DataFrame, db_path: str):
     conn = sqlite3.connect(db_path)
-    
+
     ivs = []
     for _, r in df.iterrows():
         dt = r["snapshot_time"].split()[0]
         aiv = (r["atm_ce_iv"] + r["atm_pe_iv"]) / 2
         ivs.append({"symbol": r["symbol"], "snap_date": dt, "iv": aiv})
-        
+
     piv = pd.DataFrame(ivs)
     if piv.empty:
         conn.close()
         return
-        
+
     piv = piv.drop_duplicates(subset=["symbol", "snap_date"])
-    
+
     # Save to temp table and gracefully UPSERT
     piv.to_sql("iv_history_temp", conn, if_exists="replace", index=False)
-    
+
     cur = conn.cursor()
     cur.execute("""
         INSERT OR REPLACE INTO iv_history (symbol, snap_date, iv)
         SELECT symbol, snap_date, iv FROM iv_history_temp
     """)
     cur.execute("DROP TABLE iv_history_temp")
-    
+
     conn.commit()
     conn.close()
 
@@ -728,11 +728,11 @@ def load_iv_history(df: pd.DataFrame, db_path: str):
 def validate_data_quality(db_path: str):
     conn = sqlite3.connect(db_path)
     df = pd.read_sql("SELECT * FROM market_snapshots WHERE data_source='EOD_HISTORICAL'", conn)
-    
+
     if df.empty:
         logger.info("No historical data to validate.")
         return
-        
+
     logger.info(f"Data Quality Report: {len(df)} rows")
     avg_score = df["score"].mean()
     logger.info(f"Avg Score: {avg_score:.2f}")
@@ -752,21 +752,21 @@ if __name__ == "__main__":
     syms = args.symbols.split(",")
 
     logger.info("NSE F&O HISTORICAL LOADER")
-    
+
     if args.cmd in ["download", "full"]:
         download_spot_prices(syms, args.start, args.end, CONFIG["data_dir"])
         download_bhavcopy_range(args.start, args.end, CONFIG["data_dir"])
-    
+
     if args.cmd in ["process", "full"]:
         spot = download_spot_prices(syms, args.start, args.end, CONFIG["data_dir"])
         df = merge_data_sources(os.path.join(CONFIG["data_dir"], "bhavcopies"), [args.file] if args.file else [], syms)
         out = reconstruct_features(df, spot)
         out.to_csv(os.path.join(CONFIG["data_dir"], "reconstructed.csv"), index=False)
-    
+
     if args.cmd in ["load-db", "full"]:
         out = pd.read_csv(os.path.join(CONFIG["data_dir"], "reconstructed.csv"))
         load_to_database(out, args.db)
         load_iv_history(out, args.db)
-        
+
     if args.cmd in ["status", "full"]:
         validate_data_quality(args.db)
