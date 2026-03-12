@@ -1,0 +1,106 @@
+================================
+BACKTESTING QUICK START GUIDE
+================================
+
+For detailed documentation, see: HOW_TO_RUN_BACKTESTING.md
+
+PREREQUISITES
+-------------
+cd backend
+pip install -r requirements.txt
+pip install pandas tabulate tqdm scipy yfinance jugaad-data
+python -c "import db; db.init_db()"
+
+
+QUICK START (3 months of data)
+-------------------------------
+cd backend
+python historical_loader.py full --start 2024-10-01 --end 2024-12-31
+python backtest_runner.py --start 2024-10-01 --end 2024-12-31
+
+
+COMMON COMMANDS
+---------------
+
+1. Check data status:
+   python historical_loader.py status
+
+2. Download historical data:
+   python historical_loader.py download --start 2024-10-01 --end 2024-12-31
+
+3. Process downloaded data:
+   python historical_loader.py process --start 2024-10-01 --end 2024-12-31
+
+4. Load into database:
+   python historical_loader.py load-db --start 2024-10-01 --end 2024-12-31
+
+5. Do all steps at once:
+   python historical_loader.py full --start 2024-10-01 --end 2024-12-31
+
+6. Run backtest with default parameters:
+   python backtest_runner.py --start 2024-10-01 --end 2024-12-31
+
+7. Run backtest with custom parameters:
+   python backtest_runner.py --start 2024-10-01 --end 2024-12-31 \
+     --score 80 --tp 45 --sl 25
+
+8. Test only bullish signals:
+   python backtest_runner.py --start 2024-10-01 --end 2024-12-31 --signal BULLISH
+
+9. Optimize parameters (grid search):
+   python backtest_runner.py --start 2024-01-01 --end 2024-12-31 --optimise
+
+10. Test specific symbols:
+    python backtest_runner.py --start 2024-10-01 --end 2024-12-31 \
+      --symbols NIFTY,BANKNIFTY
+
+
+PARAMETERS REFERENCE
+--------------------
+
+Historical Loader:
+  --start YYYY-MM-DD    Start date
+  --end YYYY-MM-DD      End date
+  --symbols LIST        Comma-separated symbols (e.g., NIFTY,BANKNIFTY)
+  --db PATH             Custom database path
+
+Backtest Runner:
+  --start YYYY-MM-DD    Start date (default: 2023-01-01)
+  --end YYYY-MM-DD      End date (default: 2024-12-31)
+  --score N             Score threshold (default: 75)
+  --confidence N        Confidence threshold (default: 0.5)
+  --tp N                Take profit % (default: 40)
+  --sl N                Stop loss % (default: 25)
+  --signal TYPE         BULLISH or BEARISH
+  --regime TYPE         TRENDING, PINNED, EXPIRY, or SQUEEZE
+  --symbols LIST        Comma-separated symbols
+  --optimise            Enable grid search mode
+  --db PATH             Custom database path
+
+
+TROUBLESHOOTING
+---------------
+
+Error: "No module named 'pandas'"
+Fix: pip install pandas tabulate tqdm scipy yfinance jugaad-data
+
+Error: "no such table: market_snapshots"
+Fix: python -c "import db; db.init_db()"
+
+Error: "No historical data to validate"
+Fix: python historical_loader.py full --start 2024-10-01 --end 2024-12-31
+
+Error: "No trades generated"
+Fix: Lower score threshold: --score 50 --confidence 0
+
+
+ONE-LINER EXAMPLE
+-----------------
+cd backend && \
+  python -c "import db; db.init_db()" && \
+  python historical_loader.py full --start 2024-10-01 --end 2024-12-31 && \
+  python backtest_runner.py --start 2024-10-01 --end 2024-12-31
+
+
+For complete documentation with examples and explanations,
+see: HOW_TO_RUN_BACKTESTING.md

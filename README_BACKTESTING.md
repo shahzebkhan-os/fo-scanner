@@ -1,6 +1,12 @@
 # Historical F&O Backtesting & Data Ingestion Guide
 
+> **🚀 New User?** For a simple step-by-step guide, see **[HOW_TO_RUN_BACKTESTING.md](HOW_TO_RUN_BACKTESTING.md)**
+>
+> **📋 Quick Reference?** See **[BACKTESTING_QUICKSTART.txt](BACKTESTING_QUICKSTART.txt)** for a command cheat sheet
+
 This pipeline allows you to download, reconstruct, and backtest end-of-day options data for the National Stock Exchange (NSE). The framework consists of two main tools: the `historical_loader.py` engine for ingestion, and the `backtest_runner.py` for simulated trading.
+
+This document provides technical details about the architecture and data pipeline. For practical usage instructions, see the guides above.
 
 ## 💾 Where is the data stored?
 
