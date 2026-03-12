@@ -1,20 +1,23 @@
 """
-scheduler.py — Background Task Scheduler v4
+scheduler.py — Background Task Scheduler v4.1
 Tasks:
   1. OI Snapshot      — every 15 min during market hours
   2. IV History Save  — once daily at 15:35
   3. Pre-Market Report — every weekday at 9:00 AM IST via Telegram
   4. Bulk Deals Fetch — every weekday at 16:00 IST
   5. DB Cleanup       — every Sunday midnight
+  7. Accuracy Sampler — every 10 min + auto CSV export
+  8. Accuracy Price Updater — every 5 min
 """
 
 import asyncio
 import logging
+import os
 from datetime import datetime, time as dtime, date
 from zoneinfo import ZoneInfo
 
-import db
-import signals as Signals
+from . import db
+from . import signals as Signals
 
 log = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -106,7 +109,7 @@ async def iv_history_loop():
                             if not recs or not spot:
                                 return
 
-                            from analytics import nearest_atm, get_strike_interval
+                            from .analytics import nearest_atm, get_strike_interval
                             atm    = nearest_atm(spot, symbol)
                             band   = get_strike_interval(symbol) * 3
                             iv_sum = count = 0
@@ -370,51 +373,148 @@ async def auto_tpsl_loop():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Task 7: Accuracy Tracker - Sampler (every 15 min)
+# Task 7: Accuracy Tracker - Sampler (every 10 min) + Auto CSV Export
 # ══════════════════════════════════════════════════════════════════════════════
 
+CSV_EXPORT_DIR = os.path.join(os.path.dirname(__file__), "csv_exports")
+
+def _auto_export_snapshot_csv(snapshot_id: int, is_update: bool = False):
+    """
+    Exports a single snapshot to a timestamped CSV file.
+    On initial save creates a new file; on update overwrites the same session file.
+    Includes 5-min price history columns for each trade.
+    """
+    import csv as _csv
+    os.makedirs(CSV_EXPORT_DIR, exist_ok=True)
+
+    trades = db.get_accuracy_trades_with_history(snapshot_id)
+    if not trades:
+        return
+
+    ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+    filename = f"accuracy_{snapshot_id}_{ts}.csv"
+
+    # Determine the max number of price updates across all trades
+    max_history = max((len(t.get("price_history", [])) for t in trades), default=0)
+
+    fieldnames = [
+        "symbol", "type", "strike", "signal", "score",
+        "entry_price", "current_price", "pnl_pct", "max_price", "min_price", "max_pnl_pct",
+        "stock_price", "lot_size", "snapshot_time",
+    ]
+    # Add dynamic 5-min price columns
+    for i in range(max_history):
+        fieldnames.append(f"price_t{i}")
+        fieldnames.append(f"time_t{i}")
+
+    trade_count = len(trades)
+    total_score = 0
+    total_pnl = 0.0
+
+    filepath = os.path.join(CSV_EXPORT_DIR, filename)
+    with open(filepath, "w", newline="") as f:
+        writer = _csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for t in trades:
+            entry = t.get("entry_price", 0) or 0
+            current = t.get("current_price") or entry
+            pnl_pct = t.get("pnl_pct", 0)
+            total_score += t.get("score", 0)
+            total_pnl += pnl_pct
+
+            row = {
+                "symbol": t.get("symbol", ""),
+                "type": t.get("type", ""),
+                "strike": t.get("strike", 0),
+                "signal": t.get("signal", "NEUTRAL"),
+                "score": t.get("score", 0),
+                "entry_price": round(entry, 2),
+                "current_price": round(current, 2),
+                "pnl_pct": round(pnl_pct, 2),
+                "max_price": round(t.get("max_price", entry), 2),
+                "min_price": round(t.get("min_price", entry), 2),
+                "max_pnl_pct": round(t.get("max_pnl_pct", 0), 2),
+                "stock_price": round(t.get("stock_price", 0) or 0, 2),
+                "lot_size": t.get("lot_size", 0),
+                "snapshot_time": t.get("snapshot_time", ""),
+            }
+            # Fill price history columns
+            for i, h in enumerate(t.get("price_history", [])):
+                row[f"price_t{i}"] = round(h["price"], 2)
+                row[f"time_t{i}"] = h["timestamp"]
+            writer.writerow(row)
+
+    avg_score = total_score / trade_count if trade_count else 0
+    avg_pnl = total_pnl / trade_count if trade_count else 0
+
+    db.record_csv_export(snapshot_id, filename, filepath, trade_count, avg_score, avg_pnl)
+    label = "update" if is_update else "new"
+    log.info(f"Auto CSV export ({label}): {filename} ({trade_count} trades, avg score {avg_score:.1f}, avg PnL {avg_pnl:+.1f}%)")
+
+
 async def accuracy_sampler_loop():
-    """Takes a snapshot of suggested trades every 15 minutes."""
-    log.info("Accuracy sampler loop started.")
+    """Takes a snapshot of directional suggested trades every 10 minutes and auto-exports to CSV."""
+    log.info("Accuracy sampler loop started (10 min interval + auto CSV export).")
+    from .constants import LOT_SIZES
     while True:
         try:
             if _is_market_open_fn and _is_market_open_fn():
                 if _scan_all_symbols_fn:
                     log.info("Accuracy Tracking: Sampling suggested trades...")
                     results = await _scan_all_symbols_fn()
-                    # Filter for all suggested trades (must have top picks)
-                    suggested_trades = [r for r in results if len(r.get("top_picks", [])) > 0]
-                    
+                    # Only track directional signals with meaningful scores
+                    suggested_trades = [
+                        r for r in results
+                        if r.get("signal") in ("BULLISH", "BEARISH")
+                        and r.get("score", 0) >= 60
+                        and len(r.get("top_picks", [])) > 0
+                    ]
+
                     if suggested_trades:
-                        sid = db.create_accuracy_snapshot()
-                        count = 0
-                        from main import LOT_SIZES
+                        # Build trade list first, create snapshot only if we have trades
+                        pending = []
                         for r in suggested_trades:
+                            sig = r["signal"]
                             picks = r.get("top_picks", [])
                             ls = LOT_SIZES.get(r["symbol"], 1)
+                            # Only save picks matching signal direction
                             for p in picks:
+                                if (sig == "BULLISH" and p["type"] == "CE") or (sig == "BEARISH" and p["type"] == "PE"):
+                                    pending.append((r, p, ls))
+
+                        if pending:
+                            sid = db.create_accuracy_snapshot()
+                            count = 0
+                            for r, p, ls in pending:
                                 tid = db.add_accuracy_trade(
-                                    sid, r["symbol"], p["type"], p["strike"], 
-                                    p["ltp"], r["score"], r["ltp"], lot_size=ls
+                                    sid, r["symbol"], p["type"], p["strike"],
+                                    p["ltp"], r["score"], r["ltp"], lot_size=ls, signal=r.get("signal", "NEUTRAL")
                                 )
-                                # Add initial history point
                                 if tid:
                                     db.update_accuracy_trade_price(tid, p["ltp"])
                                 count += 1
-                        log.info(f"Accuracy Tracking: Created snapshot {sid} with {count} trades.")
-            
-            await asyncio.sleep(900)  # 15 minutes
+                            log.info(f"Accuracy Tracking: Created snapshot {sid} with {count} directional trades.")
+
+                            # ── Auto-export this snapshot to CSV ──
+                            try:
+                                await asyncio.to_thread(_auto_export_snapshot_csv, sid)
+                            except Exception as csv_err:
+                                log.error(f"Auto CSV export failed for snapshot {sid}: {csv_err}")
+                        else:
+                            log.info("Accuracy Tracking: No directional trades to save this cycle.")
+
+            await asyncio.sleep(600)  # 10 minutes
         except Exception as e:
             log.error(f"Accuracy sampler loop error: {e}")
-            await asyncio.sleep(900)
+            await asyncio.sleep(600)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Task 8: Accuracy Tracker - Price Updater (every 5 min)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def accuracy_price_updater_loop():
-    """Updates current prices for all active accuracy trades every 5 minutes."""
-    log.info("Accuracy price updater loop started.")
+    """Updates current prices for all active accuracy trades every 5 minutes, then re-exports updated CSVs."""
+    log.info("Accuracy price updater loop started (5 min interval).")
     while True:
         try:
             if _is_market_open_fn and _is_market_open_fn():
@@ -422,7 +522,7 @@ async def accuracy_price_updater_loop():
                 if active_trades:
                     symbols = list({t["symbol"] for t in active_trades})
                     log.info(f"Accuracy Tracking: Updating prices for {len(symbols)} symbols...")
-                    
+
                     sem = asyncio.Semaphore(3)
                     async def update_sym(sym):
                         async with sem:
@@ -436,7 +536,7 @@ async def accuracy_price_updater_loop():
                                     for side in ["CE", "PE"]:
                                         ltp = row.get(side, {}).get("lastPrice", 0)
                                         if ltp: prices[(strike, side)] = ltp
-                                
+
                                 # Update all trades for this symbol
                                 for t in active_trades:
                                     if t["symbol"] == sym:
@@ -448,6 +548,15 @@ async def accuracy_price_updater_loop():
 
                     await asyncio.gather(*[update_sym(s) for s in symbols])
                     log.info("Accuracy Tracking: Price updates completed.")
+
+                    # Re-export updated CSVs for today's snapshots
+                    try:
+                        snapshot_ids = list({t["snapshot_id"] for t in active_trades})
+                        for sid in snapshot_ids:
+                            await asyncio.to_thread(_auto_export_snapshot_csv, sid, True)
+                        log.info(f"Accuracy Tracking: Re-exported {len(snapshot_ids)} CSV(s) with updated prices.")
+                    except Exception as csv_err:
+                        log.error(f"CSV re-export failed: {csv_err}")
 
             await asyncio.sleep(300)  # 5 minutes
         except Exception as e:

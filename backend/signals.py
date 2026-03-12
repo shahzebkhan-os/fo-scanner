@@ -12,7 +12,7 @@ import asyncio, logging
 from datetime import date, datetime
 from typing import Optional
 import httpx
-import db
+from . import db
 
 log = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ def screen_straddle(
     if atm_iv <= 0 or atm_iv > 60:
         return None
 
-    from analytics import nearest_atm, get_strike_interval
+    from .analytics import nearest_atm, get_strike_interval
     atm = nearest_atm(spot, symbol)
     interval = get_strike_interval(symbol)
 
@@ -315,6 +315,9 @@ async def fetch_bulk_deals() -> list:
                 # NSE requires a session cookie — hit the homepage first
                 await client.get("https://www.nseindia.com", timeout=5)
                 r = await client.get(url, timeout=8)
+                if r.status_code == 404:
+                    log.info(f"Bulk deals endpoint unavailable ({deal_label}): {url}")
+                    continue
                 r.raise_for_status()
                 data = r.json().get("data", [])
 

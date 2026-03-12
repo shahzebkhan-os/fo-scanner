@@ -24,9 +24,9 @@ lsof -ti:5173,5174,5175 | xargs kill -9 2>/dev/null
 echo "[2/3] Starting Python Backend Server..."
 # Assuming venv is in the root directory
 if [ -f "venv/bin/python" ]; then
-    venv/bin/python backend/main.py &
+    venv/bin/python -m backend.main &
 else
-    python3 backend/main.py &
+    python3 -m backend.main &
 fi
 BACKEND_PID=$!
 
