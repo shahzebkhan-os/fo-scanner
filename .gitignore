@@ -12,3 +12,5 @@ __pycache__/
 historical_data/
 *.whl
 *.log
+*.swp
+.*.swp
