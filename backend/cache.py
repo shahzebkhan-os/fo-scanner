@@ -19,6 +19,7 @@ class Cache:
     """
     Unified cache with Redis primary + in-memory fallback.
     All TTLs in seconds.
+    Thread-safe for in-memory cache operations using asyncio.Lock.
     """
     DEFAULT_TTLS = {
         "option_chain": 5,      # Refresh every 5s during market hours
@@ -34,6 +35,7 @@ class Cache:
         self._memory: dict = {}
         self._memory_ttl: dict = {}
         self._redis_url = redis_url
+        self._lock = asyncio.Lock()  # Thread safety for in-memory cache
 
     async def connect(self):
         if not REDIS_AVAILABLE:
@@ -55,15 +57,16 @@ class Cache:
             except Exception:
                 # Fallback to memory on Redis error
                 pass
-        # In-memory fallback with TTL check
-        if key in self._memory:
-            expires_at = self._memory_ttl.get(key, 0)
-            if datetime.now().timestamp() < expires_at:
-                return self._memory[key]
-            else:
-                # Clean up expired entry
-                self._memory.pop(key, None)
-                self._memory_ttl.pop(key, None)
+        # In-memory fallback with TTL check (thread-safe)
+        async with self._lock:
+            if key in self._memory:
+                expires_at = self._memory_ttl.get(key, 0)
+                if datetime.now().timestamp() < expires_at:
+                    return self._memory[key]
+                else:
+                    # Clean up expired entry
+                    self._memory.pop(key, None)
+                    self._memory_ttl.pop(key, None)
         return None
 
     async def set(self, key: str, value: Any, ttl: int = 60):
@@ -75,8 +78,10 @@ class Cache:
             except Exception:
                 # Fallback to memory on Redis error
                 pass
-        self._memory[key] = value
-        self._memory_ttl[key] = datetime.now().timestamp() + ttl
+        # In-memory fallback (thread-safe)
+        async with self._lock:
+            self._memory[key] = value
+            self._memory_ttl[key] = datetime.now().timestamp() + ttl
 
     async def delete(self, key: str):
         if self._redis:
@@ -84,8 +89,9 @@ class Cache:
                 await self._redis.delete(key)
             except Exception:
                 pass
-        self._memory.pop(key, None)
-        self._memory_ttl.pop(key, None)
+        async with self._lock:
+            self._memory.pop(key, None)
+            self._memory_ttl.pop(key, None)
 
     def cache_key(self, prefix: str, *args) -> str:
         return f"fo_scanner:{prefix}:{':'.join(str(a) for a in args)}"

@@ -3,7 +3,6 @@ pytest configuration and fixtures for NSE F&O Scanner tests.
 """
 
 import pytest
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 import sys
 import os
@@ -11,13 +10,8 @@ import os
 # Add backend directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create event loop for async tests."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+# Note: pytest-asyncio >= 0.21.0 provides event loop management automatically
+# No need for custom event_loop fixture
 
 
 @pytest.fixture

@@ -25,7 +25,7 @@ except ImportError:
     LGB_AVAILABLE = False
 
 MODEL_PATH = Path(os.path.dirname(__file__)) / "models" / "lgbm_signal.txt"
-CALIBRATOR_PATH = Path(os.path.dirname(__file__)) / "models" / "isotonic_calibrator.pkl"
+CALIBRATOR_PATH = Path(os.path.dirname(__file__)) / "models" / "isotonic_calibrator.joblib"
 MIN_ROWS_TO_TRAIN = 500  # Need at least 500 historical snapshots
 
 
@@ -151,9 +151,12 @@ def train_model(db_path: str = None) -> dict:
     MODEL_PATH.parent.mkdir(exist_ok=True)
     final_model.booster_.save_model(str(MODEL_PATH))
     
-    import pickle
-    with open(CALIBRATOR_PATH, "wb") as f:
-        pickle.dump(calibrator, f)
+    # Use joblib for safer serialization (from scikit-learn)
+    from joblib import dump
+    dump(calibrator, CALIBRATOR_PATH)
+    
+    # Clear cached model so it reloads on next prediction
+    _clear_model_cache()
     
     importances = dict(zip(feature_names, map(float, final_model.feature_importances_)))
     return {
@@ -165,26 +168,53 @@ def train_model(db_path: str = None) -> dict:
     }
 
 
+# Cached model and calibrator for efficient prediction
+_cached_model = None
+_cached_calibrator = None
+
+
+def _clear_model_cache():
+    """Clear the cached model and calibrator."""
+    global _cached_model, _cached_calibrator
+    _cached_model = None
+    _cached_calibrator = None
+
+
+def _load_model_if_needed():
+    """Load and cache the model and calibrator if not already loaded."""
+    global _cached_model, _cached_calibrator
+    
+    if _cached_model is not None and _cached_calibrator is not None:
+        return _cached_model, _cached_calibrator
+    
+    if not MODEL_PATH.exists() or not CALIBRATOR_PATH.exists():
+        return None, None
+    
+    try:
+        import lightgbm as lgb
+        from joblib import load
+        
+        _cached_model = lgb.Booster(model_file=str(MODEL_PATH))
+        _cached_calibrator = load(CALIBRATOR_PATH)
+        return _cached_model, _cached_calibrator
+    except Exception as e:
+        log.warning(f"Failed to load ML model: {e}")
+        return None, None
+
+
 def predict(features: dict) -> Optional[float]:
     """
     Returns calibrated probability (0-1) of bullish next bar.
     Returns None if model not trained yet.
     """
-    if not LGB_AVAILABLE or not MODEL_PATH.exists():
+    if not LGB_AVAILABLE:
+        return None
+    
+    model, calibrator = _load_model_if_needed()
+    if model is None or calibrator is None:
         return None
     
     try:
-        import lightgbm as lgb
-        import pickle
-        
-        model = lgb.Booster(model_file=str(MODEL_PATH))
-        
-        if not CALIBRATOR_PATH.exists():
-            return None
-            
-        with open(CALIBRATOR_PATH, "rb") as f:
-            calibrator = pickle.load(f)
-        
         regime_map = {"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3}
         X = np.array([[
             float(features.get("weighted_score", features.get("score", 0))),

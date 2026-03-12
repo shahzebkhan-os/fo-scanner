@@ -746,18 +746,24 @@ from typing import List
 import asyncio
 
 
-def _reconstruct_day_features(snapshot_row: dict, analytics_module) -> dict:
+def _reconstruct_day_features(snapshot_row: dict) -> dict:
     """
     Worker function — runs in separate process.
     Takes a raw EOD snapshot row, returns computed features.
     Must be top-level function (picklable for multiprocessing).
+    
+    Note: Import analytics directly inside the function because
+    modules cannot be pickled and passed to multiprocessing workers.
     """
     try:
+        # Import analytics module inside worker (not passed as parameter)
+        import analytics
+        
         # Call existing compute_stock_score_v2 logic on this row
-        score_data = analytics_module.compute_stock_score_v2(
+        score_data = analytics.compute_stock_score_v2(
             chain_data=snapshot_row["raw_chain"],
             spot=snapshot_row["spot_price"],
-            regime=snapshot_row.get("regime", "TRENDING"),
+            symbol=snapshot_row.get("symbol", "NIFTY"),
         )
         return {
             "snapshot_id": snapshot_row["id"],
@@ -788,16 +794,14 @@ async def reconstruct_features_parallel(
     if not snapshot_rows:
         return []
     
-    # Import analytics module for workers
-    import analytics
-    
-    worker_fn = partial(_reconstruct_day_features, analytics_module=analytics)
+    # Note: _reconstruct_day_features imports analytics internally
+    # Don't pass module as partial argument (can't pickle modules)
     
     loop = asyncio.get_event_loop()
     with mp.Pool(processes=workers) as pool:
         results = await loop.run_in_executor(
             None,
-            lambda: pool.map(worker_fn, snapshot_rows)
+            lambda: pool.map(_reconstruct_day_features, snapshot_rows)
         )
     
     errors = [r for r in results if "error" in r]
