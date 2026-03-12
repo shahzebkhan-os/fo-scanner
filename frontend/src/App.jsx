@@ -8,6 +8,7 @@ import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   CartesianGrid, Cell, ReferenceLine, AreaChart, Area
 } from "recharts";
+import StrategyBuilder from "./components/StrategyBuilder";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const API = "http://localhost:8000";   // same-origin; set to http://localhost:8000 for dev
@@ -24,6 +25,7 @@ const TABS = [
   { id: "manual", label: "Trade", icon: "🚀" },
   { id: "accuracy", label: "Accuracy", icon: "📈" },
   { id: "backtest", label: "Backtest", icon: "🕰" },
+  { id: "strategy", label: "Strategy", icon: "🧪" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
 
@@ -207,6 +209,7 @@ export default function App() {
         <div style={{ display: tab === "manual"    ? "block" : "none" }}><ManualTradeTab theme={theme} /></div>
         <div style={{ display: tab === "accuracy"  ? "block" : "none" }}><AccuracyTab theme={theme} /></div>
         <div style={{ display: tab === "backtest"  ? "block" : "none" }}><BacktestTab theme={theme} /></div>
+        <div style={{ display: tab === "strategy"  ? "block" : "none" }}><StrategyBuilder /></div>
         <div style={{ display: tab === "settings"  ? "block" : "none" }}><SettingsTab theme={theme} /></div>
       </main>
     </div>
@@ -286,6 +289,8 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
   const [countdown, setCountdown] = useState(60);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [savingSnapshot, setSavingSnapshot] = useState(false);
+  const [scanMeta, setScanMeta] = useState({ stale: false, stale_count: 0 });
+  const [mlStatus, setMlStatus] = useState({ trained: false });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -293,12 +298,34 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
       const r = await apiFetch("/api/scan?limit=51");
       const rows = r.data || [];
       setData(rows);
+      setScanMeta({ stale: r.stale, stale_count: r.stale_count || 0, _fetched_at: r._fetched_at });
       if (onData) onData(rows);
       setLastUpdated(new Date());
       setCountdown(60);
     } catch (e) { console.error(e); }
     setLoading(false);
   }, []);
+
+  // Check ML model status
+  useEffect(() => {
+    apiFetch("/api/ml/status").then(setMlStatus).catch(() => {});
+  }, []);
+
+  // Train ML model
+  const trainMLModel = async () => {
+    try {
+      const result = await apiFetch("/api/ml/train", { method: "POST" });
+      if (result.error) {
+        alert(result.error);
+      } else {
+        alert(`Model trained! CV Log Loss: ${result.cv_log_loss_mean}`);
+        setMlStatus({ trained: true });
+        load(); // Reload to get ML predictions
+      }
+    } catch (e) {
+      alert("Training failed: " + e.message);
+    }
+  };
 
   // Auto-refresh countdown
   useEffect(() => {
@@ -340,6 +367,72 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
 
   return (
     <div>
+      {/* Stale Data Warning Banner */}
+      {scanMeta.stale && (
+        <div style={{
+          background: "rgba(251, 146, 60, 0.15)",
+          border: "1px solid #fb923c",
+          borderRadius: 8,
+          padding: "12px 16px",
+          marginBottom: 16,
+          display: "flex",
+          alignItems: "center",
+          gap: 12
+        }}>
+          <span style={{ fontSize: 20 }}>⚠️</span>
+          <div>
+            <div style={{ fontWeight: 600, color: "#fb923c" }}>
+              Stale Data Detected ({scanMeta.stale_count} symbols)
+            </div>
+            <div style={{ fontSize: 11, color: theme.muted }}>
+              Some NSE responses may be outdated. Session refresh recommended.
+            </div>
+          </div>
+          <button 
+            onClick={load}
+            style={{
+              marginLeft: "auto", padding: "6px 12px", borderRadius: 6,
+              background: "#fb923c", color: "#000", border: "none",
+              cursor: "pointer", fontWeight: 600
+            }}>
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* ML Model Status */}
+      {!mlStatus.trained && (
+        <div style={{
+          background: "rgba(99, 102, 241, 0.1)",
+          border: "1px solid #6366f1",
+          borderRadius: 8,
+          padding: "10px 16px",
+          marginBottom: 16,
+          display: "flex",
+          alignItems: "center",
+          gap: 12
+        }}>
+          <span style={{ fontSize: 16 }}>🤖</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 600, color: "#6366f1", fontSize: 12 }}>
+              ML Model Not Trained
+            </div>
+            <div style={{ fontSize: 11, color: theme.muted }}>
+              Train the LightGBM model to get AI-powered signal refinement.
+            </div>
+          </div>
+          <button 
+            onClick={trainMLModel}
+            style={{
+              padding: "6px 12px", borderRadius: 6,
+              background: "#6366f1", color: "#fff", border: "none",
+              cursor: "pointer", fontWeight: 600, fontSize: 11
+            }}>
+            Train Model
+          </button>
+        </div>
+      )}
+
       {/* Controls */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
         <button onClick={() => { load(); setCountdown(60); }} disabled={loading}
@@ -515,6 +608,40 @@ function ScanCard({ r, theme, onChain, onGreeks, isWatched, onToggleWL }) {
           <div style={{ marginTop: 8, fontSize: 11, color: theme.muted }}>
             Max Pain: <span style={{ color: theme.text }}>₹{r.max_pain}</span>
             {r.days_to_expiry && <span style={{ marginLeft: 8 }}>DTE: {r.days_to_expiry}d</span>}
+          </div>
+        )}
+
+        {/* ML Bullish Probability */}
+        {r.ml_bullish_probability !== null && r.ml_bullish_probability !== undefined && (
+          <div style={{
+            marginTop: 8, padding: "6px 10px", background: theme.bg,
+            borderRadius: 6, display: "flex", alignItems: "center", gap: 8
+          }}>
+            <span style={{ fontSize: 10, color: theme.muted }}>🤖 ML Signal:</span>
+            <div style={{ flex: 1, height: 6, background: theme.border, borderRadius: 3, overflow: "hidden" }}>
+              <div style={{
+                width: `${r.ml_bullish_probability * 100}%`,
+                height: "100%",
+                background: r.ml_bullish_probability > 0.5 ? "#22c55e" : "#ef4444",
+                transition: "width 0.3s ease"
+              }} />
+            </div>
+            <span style={{
+              fontSize: 11, fontWeight: 600,
+              color: r.ml_bullish_probability > 0.5 ? "#22c55e" : "#ef4444"
+            }}>
+              {(r.ml_bullish_probability * 100).toFixed(0)}%
+            </span>
+          </div>
+        )}
+
+        {/* Stale Data Warning */}
+        {r.stale && (
+          <div style={{
+            marginTop: 8, padding: "6px 10px", background: "rgba(251, 146, 60, 0.1)",
+            borderRadius: 6, border: "1px solid #fb923c", fontSize: 10, color: "#fb923c"
+          }}>
+            ⚠️ Data may be stale — NSE session refresh recommended
           </div>
         )}
 

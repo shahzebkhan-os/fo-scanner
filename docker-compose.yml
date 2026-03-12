@@ -1,12 +1,35 @@
-version: '3.8'
-
+version: "3.9"
 services:
-  fo-scanner:
-    build:
+  backend:
+    build: 
       context: .
-    container_name: fo-scanner
+      dockerfile: Dockerfile
+    container_name: fo-scanner-backend
     ports:
       - "8000:8000"
     environment:
       - INDSTOCKS_TOKEN=${INDSTOCKS_TOKEN:-""}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
     restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: fo-scanner-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: fo-scanner-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+

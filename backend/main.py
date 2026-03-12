@@ -3,7 +3,7 @@ NSE F&O Option Chain Scanner — Backend v3 (Akamai fix)
 """
 
 import os, time, asyncio, logging
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime, time as dtime
 import json
 from curl_cffi.requests import AsyncSession
@@ -16,7 +16,9 @@ import signals as Signals
 import scheduler as Scheduler
 from analytics import compute_stock_score_v2 as compute_stock_score, score_option_v2 as score_option, black_scholes_greeks, days_to_expiry
 from signals import build_sector_heatmap, detect_uoa, screen_straddle, get_pcr_history
-import db
+from cache import cache
+from ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status
+from historical_loader import get_backfill_progress, run_backfill_with_progress, reset_backfill_progress
 
 # ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
 # Bug 6 fix: tracks which trades have already been entered today
@@ -155,6 +157,9 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    
+    # Connect Redis cache (falls back to in-memory if unavailable)
+    await cache.connect()
 
     # Wire up the scheduler
     Scheduler.init_scheduler(
@@ -168,6 +173,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(paper_trade_manager())
     await Scheduler.start_all()
     yield
+    
+    # Cleanup on shutdown
+    await cache.close()
 
 app = FastAPI(title="NSE F&O Scanner API", version="4.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -611,6 +619,13 @@ async def debug_indstocks(token: str = Query(...)):
 
 @app.get("/api/scan")
 async def scan_all(limit: int = Query(48, ge=1, le=100)):
+    # Check cache first for the full scan result
+    cache_key = cache.cache_key("scan_result", "all", limit)
+    cached = await cache.get(cache_key)
+    if cached:
+        log.info(f"=== SCAN: returning cached result ===")
+        return cached
+    
     all_symbols = INDEX_SYMBOLS + FO_STOCKS
     log.info(f"=== SCAN: {len(all_symbols)} symbols ===")
 
@@ -626,6 +641,12 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
             live = ltp_map.get(symbol, {})
             try:
                 cj       = await fetch_nse_chain(symbol)
+                
+                # Validate chain structure
+                if not cj or "records" not in cj:
+                    log.warning(f"  {symbol}: Invalid chain structure from NSE")
+                    return None
+                
                 records  = cj.get("records", {})
                 spot     = records.get("underlyingValue") or live.get("ltp") or 0
                 expiries = records.get("expiryDates", [])
@@ -636,6 +657,10 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
                 if not spot:
                     return None
+                
+                # Add ML prediction if model is trained
+                ml_prob = ml_predict(stats)
+                stats["ml_bullish_probability"] = ml_prob
 
                 stock_score  = stats.get("score", 0)
                 signal       = stats.get("signal", "NEUTRAL")
@@ -707,16 +732,21 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                     "change_pct":     round(live.get("change", 0), 2),
                     "expiries":       expiries[:4],
                     "signal_reasons": stats.get("signal_reasons", []),
-                    **{k: v for k, v in stats.items() if k != "signal_reasons"},
+                    "ml_bullish_probability": ml_prob,
+                    **{k: v for k, v in stats.items() if k not in ["signal_reasons", "ml_bullish_probability"]},
                 }
 
+            except RuntimeError as e:
+                log.error(f"  {symbol}: Runtime error: {e}")
+                return {"symbol": symbol, "error": str(e), "stale": True}
             except Exception as e:
                 log.error(f"  {symbol}: {e}")
                 return None
 
     raw    = await asyncio.gather(*[process(s) for s in all_symbols[:limit]])
-    result = [r for r in raw if r]
-    result.sort(key=lambda x: x["score"], reverse=True)
+    result = [r for r in raw if r and not r.get("stale")]
+    stale_results = [r for r in raw if r and r.get("stale")]
+    result.sort(key=lambda x: x.get("score", 0), reverse=True)
     log.info(f"=== SCAN DONE: {len(result)} stocks ===")
     
     # ── Dispatch Batched Telegram Alert CSV ─────────────────
@@ -727,12 +757,21 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
         caption = f"🚀 *{len(batch_alerts_csv_rows)} High Confidence Trades Detected*\nSee attached CSV for details."
         asyncio.create_task(send_telegram_document(filename, csv_content, caption))
         log.info(f"Dispatched {len(batch_alerts_csv_rows)} telegram alerts via batched CSV.")
-    return {
+    
+    response = {
         "timestamp":     datetime.now().isoformat(),
+        "_fetched_at":   datetime.now(IST).isoformat(),
         "market_status": market_status(),
         "count":         len(result),
         "data":          result,
+        "stale":         len(stale_results) > 0,
+        "stale_count":   len(stale_results),
     }
+    
+    # Cache the result for 60 seconds
+    await cache.set(cache_key, response, ttl=cache.DEFAULT_TTLS["scan_result"])
+    
+    return response
 
 
 # ── Accuracy Tracker ──────────────────────────────────────────────────────────
@@ -1800,6 +1839,85 @@ async def fii_dii_data():
     except Exception as e:
         log.error(f"FII/DII fetch error: {e}")
         return {"data": [], "error": str(e)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ML Model Endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/ml/train")
+async def train_ml_model_endpoint():
+    """Train the LightGBM model on historical market_snapshots data."""
+    result = await asyncio.to_thread(ml_train_model)
+    return result
+
+
+@app.get("/api/ml/status")
+async def ml_status_endpoint():
+    """Check if the ML model is trained and available."""
+    return ml_get_status()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Backfill Endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/backfill/progress")
+async def backfill_progress_endpoint():
+    """Get current backfill progress."""
+    return get_backfill_progress()
+
+
+@app.post("/api/backfill/start")
+async def start_backfill_endpoint(days: int = 252):
+    """Start historical data backfill (runs in background)."""
+    current_progress = get_backfill_progress()
+    if current_progress["status"] == "running":
+        return {"status": "already_running", "progress": current_progress}
+    
+    reset_backfill_progress()
+    asyncio.create_task(run_backfill_with_progress(days))
+    return {"status": "started", "days": days}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Strategy Builder / Backtest Endpoint
+# ══════════════════════════════════════════════════════════════════════════════
+
+class BacktestParams(BaseModel):
+    symbol: str = "NIFTY"
+    regime_filter: List[str] = ["TRENDING", "SQUEEZE"]
+    min_score: float = 0.6
+    strategy_type: str = "SHORT_STRADDLE"
+    entry_time: str = "10:00"
+    exit_time: str = "15:00"
+    stop_loss_pct: float = 50.0
+    target_pct: float = 75.0
+    lookback_days: int = 90
+    lot_size: int = 1
+
+
+@app.post("/api/backtest/run")
+async def run_backtest_endpoint(params: BacktestParams):
+    """
+    Run backtest with user-provided parameters from Strategy Builder UI.
+    Returns equity curve + trade log as JSON.
+    """
+    from backtest_runner import run_strategy_backtest
+    results = await asyncio.to_thread(
+        run_strategy_backtest,
+        symbol=params.symbol,
+        regime_filter=params.regime_filter,
+        min_score=params.min_score,
+        strategy_type=params.strategy_type,
+        entry_time=params.entry_time,
+        exit_time=params.exit_time,
+        stop_loss_pct=params.stop_loss_pct,
+        target_pct=params.target_pct,
+        lookback_days=params.lookback_days,
+        lot_size=params.lot_size,
+    )
+    return results
 
 
 # ── Frontend Catch-all ────────────────────────────────────────────────────────
