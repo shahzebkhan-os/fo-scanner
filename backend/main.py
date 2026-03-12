@@ -27,6 +27,7 @@ from .constants import (
 from .data_source import (
     fetch_nse_chain, fetch_indstocks_ltp
 )
+from .backtest_runner import EODBacktester
 
 load_dotenv()
 
@@ -207,6 +208,10 @@ async def _internal_scan() -> list:
                 cj    = await fetch_nse_chain(symbol)
                 recs  = cj.get("records", {})
                 spot  = recs.get("underlyingValue") or ltp_map.get(symbol, {}).get("ltp") or 0
+                try:
+                    spot = float(spot)
+                except (ValueError, TypeError):
+                    spot = 0
                 if spot == 0: return None
                 ivr   = db.get_iv_rank(symbol)
                 exp   = recs.get("expiryDates", [""])[0]
@@ -260,6 +265,10 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 cj = await fetch_nse_chain(symbol)
                 recs = cj.get("records", {})
                 spot = recs.get("underlyingValue") or ltp_map.get(symbol, {}).get("ltp") or 0
+                try:
+                    spot = float(spot)
+                except (ValueError, TypeError):
+                    spot = 0
                 if not spot: return None
 
                 ivr = db.get_iv_rank(symbol)
@@ -514,6 +523,67 @@ async def get_fii():
             r = await c.get("https://www.nseindia.com/api/fiidiiTradeReact")
             return {"data": [row for row in r.json() if row.get("category") in ("FII/FPI", "DII")]}
     except: return {"data": []}
+
+# ── Historical Backtest ───────────────────────────────────────────────────────
+
+class BacktestRequest(BaseModel):
+    start: str = "2023-01-01"
+    end: str = "2024-12-31"
+    score: int = 20
+    confidence: float = 0
+    tp: float = 40
+    sl: float = 25
+    signal: str = "ALL"
+    regime: str = "ALL"
+    symbols: str = ""
+
+@app.post("/api/historical-backtest")
+async def run_historical_backtest(req: BacktestRequest):
+    db_path = os.path.join(os.path.dirname(__file__), "scanner.db")
+    if not os.path.exists(db_path):
+        raise HTTPException(400, "scanner.db not found – load historical data first")
+    try:
+        bt = EODBacktester(db_path)
+        signal_filter = req.signal if req.signal not in ("ALL", "") else None
+        regime_filter = req.regime if req.regime not in ("ALL", "") else None
+        symbols = [s.strip() for s in req.symbols.split(",") if s.strip()] or None
+        result = bt.run(
+            start_date=req.start,
+            end_date=req.end,
+            score_threshold=req.score,
+            confidence_threshold=req.confidence,
+            tp_pct=req.tp,
+            sl_pct=req.sl,
+            signal_filter=signal_filter,
+            regime_filter=regime_filter,
+            symbols=symbols,
+        )
+        data = result.to_dict()
+        if "error" in data:
+            return data
+        s = data["summary"]
+        # Flatten top-level fields the frontend expects, plus full detail
+        return {
+            "win_rate": round(s["win_rate"], 1),
+            "total_trades": s["total"],
+            "avg_pnl": round(s["expectancy"], 2),
+            "wins": s["wins"],
+            "losses": s["losses"],
+            "avg_win": round(s["avg_win"], 2),
+            "avg_loss": round(s["avg_loss"], 2),
+            "profit_factor": round(s["profit_factor"], 2),
+            "max_drawdown_pct": round(s["max_drawdown_pct"], 1),
+            "sharpe": s["sharpe"],
+            "significant": s["significant"],
+            "by_signal": data.get("by_signal", {}),
+            "by_regime": data.get("by_regime", {}),
+            "by_dte": data.get("by_dte", {}),
+            "top_symbols": data.get("top_symbols", []),
+            "equity_curve": data.get("equity_curve", []),
+        }
+    except Exception as e:
+        log.exception("Backtest failed")
+        raise HTTPException(500, str(e))
 
 @app.get("/api/paper-trades/active")
 async def pt_active(): return db.get_open_trades()
