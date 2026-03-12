@@ -317,6 +317,134 @@ class BacktestResult:
         }
 
 
+def run_strategy_backtest(
+    symbol: str = "NIFTY",
+    regime_filter: list = None,
+    min_score: float = 0.6,
+    strategy_type: str = "SHORT_STRADDLE",
+    entry_time: str = "10:00",
+    exit_time: str = "15:00",
+    stop_loss_pct: float = 50.0,
+    target_pct: float = 75.0,
+    lookback_days: int = 90,
+    lot_size: int = 1,
+    db_path: str = None,
+    **kwargs  # Accept additional params gracefully
+) -> dict:
+    """
+    Run backtest with user-provided parameters from Strategy Builder UI.
+    Returns equity curve + trade log as JSON.
+    
+    Returns:
+    {
+        "equity_curve": [{"date": str, "pnl": float, "cumulative_pnl": float}],
+        "trades": [{"date": str, "entry": float, "exit": float, "pnl": float, "regime": str, "score": float}],
+        "stats": {"total_trades": int, "win_rate": float, "avg_pnl": float, "max_drawdown": float, "sharpe": float},
+        "regime_breakdown": {"TRENDING": {"trades": int, "win_rate": float}, ...}
+    }
+    """
+    if db_path is None:
+        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner.db")
+    
+    if regime_filter is None:
+        regime_filter = ["TRENDING", "SQUEEZE"]
+    
+    # Calculate date range based on lookback_days
+    from datetime import datetime, timedelta
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    
+    # Convert min_score from 0-1 to 0-100 scale (backtest uses 0-100)
+    score_threshold = int(min_score * 100)
+    
+    # Run backtest
+    bt = EODBacktester(db_path)
+    
+    # Build regime filter string (if single regime)
+    regime_str = regime_filter[0] if len(regime_filter) == 1 else None
+    
+    result = bt.run(
+        start_date=start_date,
+        end_date=end_date,
+        score_threshold=score_threshold,
+        confidence_threshold=0.5,
+        tp_pct=target_pct,
+        sl_pct=stop_loss_pct,
+        signal_filter=None,
+        regime_filter=regime_str,
+        symbols=[symbol] if symbol else None
+    )
+    
+    # Format output for Strategy Builder UI
+    trades_list = []
+    equity_curve_list = []
+    
+    if not result.trades.empty:
+        # Build trades list
+        for _, row in result.trades.iterrows():
+            trades_list.append({
+                "date": row["date"].strftime("%Y-%m-%d") if hasattr(row["date"], "strftime") else str(row["date"]),
+                "entry": float(row["entry"]),
+                "exit": float(row["entry"] * (1 + row["pnl_pct"] / 100)),
+                "pnl": float(row["pnl_abs"]),
+                "regime": row["regime"],
+                "score": 0,  # Not directly available in current structure
+                "symbol": row["symbol"],
+                "signal": row["signal"],
+            })
+        
+        # Build equity curve
+        cumulative = 0
+        for i, cap in enumerate(result.cap_curve):
+            if i == 0:
+                pnl = 0
+            else:
+                pnl = cap - result.cap_curve[i-1]
+            cumulative = cap - result.cap_curve[0]
+            equity_curve_list.append({
+                "date": trades_list[min(i, len(trades_list)-1)]["date"] if trades_list else str(i),
+                "pnl": float(pnl),
+                "cumulative_pnl": float(cumulative)
+            })
+    
+    # Build stats
+    result_dict = result.to_dict()
+    stats = {
+        "total_trades": result_dict.get("summary", {}).get("total", 0),
+        "win_rate": result_dict.get("summary", {}).get("win_rate", 0),
+        "avg_pnl": (result_dict.get("summary", {}).get("avg_win", 0) + result_dict.get("summary", {}).get("avg_loss", 0)) / 2,
+        "max_drawdown": result_dict.get("summary", {}).get("max_drawdown_pct", 0),
+        "sharpe": result_dict.get("summary", {}).get("sharpe", 0),
+    }
+    
+    # Build regime breakdown
+    regime_breakdown = {}
+    for regime, data in result_dict.get("by_regime", {}).items():
+        regime_breakdown[regime] = {
+            "trades": data.get("trades", 0),
+            "win_rate": data.get("wr", 0)
+        }
+    
+    return {
+        "equity_curve": equity_curve_list,
+        "trades": trades_list,
+        "stats": stats,
+        "regime_breakdown": regime_breakdown,
+        "params": {
+            "symbol": symbol,
+            "regime_filter": regime_filter,
+            "min_score": min_score,
+            "strategy_type": strategy_type,
+            "entry_time": entry_time,
+            "exit_time": exit_time,
+            "stop_loss_pct": stop_loss_pct,
+            "target_pct": target_pct,
+            "lookback_days": lookback_days,
+            "lot_size": lot_size,
+        }
+    }
+
+
 def run_optimiser(db_path: str, start: str, end: str):
     grid = {
         "score_threshold":     [40, 45, 50, 55, 60, 65, 70],
