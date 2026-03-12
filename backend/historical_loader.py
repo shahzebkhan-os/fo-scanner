@@ -132,58 +132,74 @@ def download_spot_prices(symbols: list, start_date_str: str, end_date_str: str, 
         return existing_data
 
     logger.info(f"Fetching spot prices from {start_date_str} to {end_date_str}...")
-
-    res = {}
     logger.info(f"Downloading spot prices from {start} to {end}...")
 
-    # Mapping to Yahoo Finance tickers
-    yf_mapping = {
-        "NIFTY": "^NSEI",
-        "BANKNIFTY": "^NSEBANK",
-        "FINNIFTY": "NIFTY_FIN_SERVICE.NS", # Note: FinNifty YF ticker is notoriously unreliable, but we'll try it or fallback
+    # Mapping to Yahoo Finance tickers — ordered fallback lists per symbol.
+    # yfinance is flaky; the first ticker that returns data wins.
+    yf_fallbacks = {
+        "NIFTY":      ["^NSEI"],
+        "BANKNIFTY":  ["^NSEBANK"],
+        "FINNIFTY":   ["NIFTY_FIN_SERVICE.NS", "^CNXFIN"],
+        "TATAMOTORS": ["TATAMOTORS.NS", "TATAMTRDVT.NS", "TATAMOTOR.NS"],
     }
 
+    end_buf = (end + timedelta(days=1)).strftime("%Y-%m-%d")
+
     for sym in symbols:
-        logger.info(f"  Fetching {sym} (via yfinance)...")
-        try:
-            yf_ticker = yf_mapping.get(sym, f"{sym}.NS")
-            if sym == "FINNIFTY":
-                # FinNifty on yf is often missing/broken, use manual mapping if possible,
-                # but ^CNXFIN is sometimes used. Let's try ^CNXFIN
-                yf_ticker = "^CNXFIN"
+        # Already have enough data for this symbol? Skip the download.
+        if sym in existing_data and len(existing_data[sym]) > 200:
+            logger.info(f"  {sym}: using {len(existing_data[sym])} cached prices (skip download)")
+            continue
 
-            # Add 1 day buffer to end date because yfinance end date is strictly exclusive
-            end_buf = (end + timedelta(days=1)).strftime("%Y-%m-%d")
-            ticker_df = yf.download(yf_ticker, start=start_date_str, end=end_buf, progress=False)
-            if ticker_df.empty:
-                logger.warning(f"Failed spot download for {sym}: Empty Data")
-                continue
+        candidates = yf_fallbacks.get(sym, [f"{sym}.NS"])
+        downloaded = False
 
-            ticker_df.index = pd.to_datetime(ticker_df.index).strftime("%Y-%m-%d")
+        for yf_ticker in candidates:
+            logger.info(f"  Fetching {sym} → {yf_ticker} ...")
+            try:
+                ticker_df = yf.download(yf_ticker, start=start_date_str, end=end_buf, progress=False)
+                if ticker_df.empty:
+                    logger.warning(f"    {yf_ticker}: empty data, trying next fallback")
+                    continue
 
-            # yfinance MultiIndex output handling
-            if isinstance(ticker_df.columns, pd.MultiIndex):
-                # Usually ('Close', 'RELIANCE.NS') format in newer yfinance versions
-                close_series = ticker_df[("Close", yf_ticker)]
+                ticker_df.index = pd.to_datetime(ticker_df.index).strftime("%Y-%m-%d")
+
+                # yfinance MultiIndex output handling (newer versions)
+                if isinstance(ticker_df.columns, pd.MultiIndex):
+                    close_series = ticker_df[("Close", yf_ticker)]
+                else:
+                    close_series = ticker_df["Close"]
+
+                new_prices = close_series.to_dict()
+
+                if sym not in existing_data:
+                    existing_data[sym] = new_prices
+                else:
+                    existing_data[sym].update(new_prices)
+
+                logger.info(f"    ✅ {sym}: got {len(new_prices)} prices via {yf_ticker}")
+                downloaded = True
+                break  # success — stop trying fallbacks
+
+            except Exception as e:
+                logger.warning(f"    {yf_ticker} failed: {e}")
+
+            time.sleep(0.5)
+
+        if not downloaded:
+            if sym in existing_data and existing_data[sym]:
+                logger.warning(f"  ⚠️  {sym}: all tickers failed, using {len(existing_data[sym])} cached prices")
             else:
-                close_series = ticker_df["Close"]
+                logger.error(f"  ❌ {sym}: no spot data available (all tickers failed, no cache)")
 
-            new_prices = close_series.to_dict()
-
-            # Merge with existing
-            if sym not in existing_data:
-                existing_data[sym] = new_prices
-            else:
-                existing_data[sym].update(new_prices)
-
-        except Exception as e:
-            logger.warning(f"Failed spot download for {sym}: {e}")
-        time.sleep(0.5) # small delay to be nice to yf api
+        time.sleep(0.5)
 
     with open(out_file, "w") as f:
         import json
         json.dump(existing_data, f)
 
+    loaded = {s: len(v) for s, v in existing_data.items() if v}
+    logger.info(f"Spot prices ready: {loaded}")
     return existing_data
 
 
