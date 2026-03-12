@@ -41,8 +41,8 @@ class StraddleSignal(BaseSignal):
     # Historical volatility annualization factor
     TRADING_DAYS = 252
     
-    # Decay expectations
-    NORMAL_DECAY_PER_DAY_PCT = 0.22  # 22% per day is normal near expiry
+    # Decay expectations (22% per day near expiry, stored as decimal)
+    NORMAL_DECAY_PER_DAY_PCT = 0.22
     
     def compute(
         self,
@@ -257,7 +257,7 @@ class StraddleSignal(BaseSignal):
         actual_decay_pct = (prev_price - current_price) / prev_price * 100
         decay_per_day = actual_decay_pct / days_passed
         
-        # Expected decay
+        # Expected decay - NORMAL_DECAY_PER_DAY_PCT is already in decimal (0.22 = 22%)
         expected_decay = self.NORMAL_DECAY_PER_DAY_PCT * 100 * days_passed
         
         # Ratio of actual to expected

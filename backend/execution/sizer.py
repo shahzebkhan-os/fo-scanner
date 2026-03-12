@@ -66,10 +66,10 @@ class OptionsSizer:
         "FINNIFTY": 40,
     }
     
-    # Risk parameters
-    MAX_LOSS_PER_TRADE_PCT = 0.02     # 2% of bankroll per trade
-    MAX_UNDEFINED_RISK_PCT = 0.10     # 10% of bankroll for undefined risk
-    KELLY_FRACTION = 0.5              # Half-Kelly for conservative sizing
+    # Default risk parameters (can be overridden in constructor)
+    DEFAULT_MAX_LOSS_PER_TRADE_PCT = 0.02     # 2% of bankroll per trade
+    DEFAULT_MAX_UNDEFINED_RISK_PCT = 0.10     # 10% of bankroll for undefined risk
+    DEFAULT_KELLY_FRACTION = 0.5              # Half-Kelly for conservative sizing
     
     # Defined risk strategies
     DEFINED_RISK_STRATEGIES = [
@@ -99,6 +99,8 @@ class OptionsSizer:
         self,
         bankroll: float = 500000,      # Default 5 lakh
         max_loss_per_trade: float = None,
+        max_loss_per_trade_pct: float = None,
+        max_undefined_risk_pct: float = None,
         kelly_fraction: float = None,
     ):
         """
@@ -106,12 +108,16 @@ class OptionsSizer:
         
         Args:
             bankroll: Total available capital (INR)
-            max_loss_per_trade: Maximum loss per trade (INR), defaults to 2% of bankroll
+            max_loss_per_trade: Maximum loss per trade (INR), overrides percentage
+            max_loss_per_trade_pct: Max loss as percentage of bankroll (0-1), default 0.02
+            max_undefined_risk_pct: Max undefined risk as percentage (0-1), default 0.10
             kelly_fraction: Kelly criterion fraction (0-1), defaults to 0.5
         """
         self.bankroll = bankroll
-        self.max_loss_per_trade = max_loss_per_trade or (bankroll * self.MAX_LOSS_PER_TRADE_PCT)
-        self.kelly_fraction = kelly_fraction or self.KELLY_FRACTION
+        self.max_loss_pct = max_loss_per_trade_pct or self.DEFAULT_MAX_LOSS_PER_TRADE_PCT
+        self.max_undefined_risk_pct = max_undefined_risk_pct or self.DEFAULT_MAX_UNDEFINED_RISK_PCT
+        self.kelly_fraction = kelly_fraction or self.DEFAULT_KELLY_FRACTION
+        self.max_loss_per_trade = max_loss_per_trade or (bankroll * self.max_loss_pct)
     
     def calculate_lots(
         self,
@@ -212,12 +218,12 @@ class OptionsSizer:
         """
         Size for undefined risk strategies.
         
-        lots = floor(bankroll × MAX_UNDEFINED_RISK_PCT / margin_per_lot)
+        lots = floor(bankroll × max_undefined_risk_pct / margin_per_lot)
         """
         if margin_per_lot <= 0:
             return 1, "Default 1 lot (no margin data)"
         
-        max_margin = self.bankroll * self.MAX_UNDEFINED_RISK_PCT
+        max_margin = self.bankroll * self.max_undefined_risk_pct
         lots = math.floor(max_margin / margin_per_lot)
         lots = min(lots, max_lots)
         lots = max(1, lots)
@@ -302,7 +308,7 @@ class OptionsSizer:
     def update_bankroll(self, new_bankroll: float):
         """Update bankroll and recalculate max loss per trade."""
         self.bankroll = new_bankroll
-        self.max_loss_per_trade = new_bankroll * self.MAX_LOSS_PER_TRADE_PCT
+        self.max_loss_per_trade = new_bankroll * self.max_loss_pct
     
     def set_max_loss_per_trade(self, max_loss: float):
         """Set fixed max loss per trade."""
@@ -313,6 +319,8 @@ class OptionsSizer:
         return {
             "bankroll": self.bankroll,
             "max_loss_per_trade": self.max_loss_per_trade,
+            "max_loss_pct": self.max_loss_pct,
+            "max_undefined_risk_pct": self.max_undefined_risk_pct,
             "kelly_fraction": self.kelly_fraction,
             "max_lots": self.MAX_LOTS,
             "lot_sizes": self.LOT_SIZES,

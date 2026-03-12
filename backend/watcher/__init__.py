@@ -5,6 +5,6 @@ Contains:
 - OptionsTradeState: Trade state management
 """
 
-from .state import OptionsTradeState, TradeLeg
+from .state import OptionsTradeState, TradeLeg, TradeWatcher
 
-__all__ = ["OptionsTradeState", "TradeLeg"]
+__all__ = ["OptionsTradeState", "TradeLeg", "TradeWatcher"]

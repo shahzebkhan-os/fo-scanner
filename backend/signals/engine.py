@@ -397,9 +397,9 @@ class MasterSignalEngine:
                 weighted_confidence += result.confidence * weight
                 total_weight += weight
         
-        # Normalize
+        # Normalize by total weight to get weighted average
         if total_weight > 0:
-            composite_score = composite_score / total_weight * total_weight  # Preserve scale
+            composite_score = composite_score / total_weight
             weighted_confidence = weighted_confidence / total_weight
         
         # Determine if we should trade
