@@ -3,9 +3,11 @@ NSE F&O Option Chain Scanner — Backend v3 (Akamai fix)
 """
 
 import os, time, asyncio, logging
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime, time as dtime
+from contextlib import asynccontextmanager
 import json
+import csv, io
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
@@ -16,7 +18,6 @@ import signals as Signals
 import scheduler as Scheduler
 from analytics import compute_stock_score_v2 as compute_stock_score, score_option_v2 as score_option, black_scholes_greeks, days_to_expiry
 from signals import build_sector_heatmap, detect_uoa, screen_straddle, get_pcr_history
-import db
 
 # ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
 # Bug 6 fix: tracks which trades have already been entered today
@@ -53,7 +54,7 @@ import httpx, uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -149,8 +150,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(
 log = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
-
-from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -765,7 +764,6 @@ async def get_tracker_snapshot(snapshot_id: int):
             
     return details
 
-from pydantic import BaseModel
 class ManualSnapshotRequest(BaseModel):
     results: list
 
@@ -904,8 +902,6 @@ async def get_lot_sizes():
 
 # ── Manual Paper Trade Entry ──────────────────────────────────────────────────
 
-from pydantic import BaseModel
-
 class ManualTradeRequest(BaseModel):
     symbol:      str
     type:        str          # "CE" or "PE"
@@ -957,9 +953,6 @@ async def exit_manual_trade(trade_id: int, exit_price: Optional[float] = None):
 
 
 # ── Backtester API ────────────────────────────────────────────────────────────
-
-from pydantic import BaseModel
-from typing import List
 
 class BacktestRequest(BaseModel):
     mode: str = "live"
@@ -1392,9 +1385,6 @@ async def refresh_bulk_deals():
 
 
 # ── CSV Export ────────────────────────────────────────────────────────────────
-
-from fastapi.responses import StreamingResponse
-import csv, io
 
 CSV_HEADERS = [
     "id", "symbol", "type", "strike", "entry_price", "current_price",
