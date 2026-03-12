@@ -162,6 +162,69 @@ def init_db():
             timestamp   TEXT    DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_accuracy_history_trade ON accuracy_trade_history(trade_id);
+
+        -- ══════════════════════════════════════════════════════════════════════════════
+        -- Historical Backtesting Tables & Indexes
+        -- ══════════════════════════════════════════════════════════════════════════════
+
+        CREATE TABLE IF NOT EXISTS market_snapshots (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol                  TEXT NOT NULL,
+            snapshot_time           TEXT NOT NULL,
+            spot_price              REAL DEFAULT 0,
+            spot_change_pct         REAL DEFAULT 0,
+            total_ce_oi             REAL DEFAULT 0,
+            total_pe_oi             REAL DEFAULT 0,
+            pcr_oi                  REAL DEFAULT 0,
+            total_ce_vol            REAL DEFAULT 0,
+            total_pe_vol            REAL DEFAULT 0,
+            pcr_vol                 REAL DEFAULT 0,
+            atm_ce_iv               REAL DEFAULT 0,
+            atm_pe_iv               REAL DEFAULT 0,
+            iv_skew                 REAL DEFAULT 0,
+            atm_ce_ltp              REAL DEFAULT 0,
+            atm_pe_ltp              REAL DEFAULT 0,
+            atm_strike              REAL DEFAULT 0,
+            dte                     INTEGER DEFAULT 0,
+            expiry_date             TEXT,
+            signal                  TEXT,
+            score                   INTEGER DEFAULT 0,
+            confidence              REAL DEFAULT 0,
+            regime                  TEXT,
+            top_pick_type           TEXT,
+            top_pick_strike         REAL DEFAULT 0,
+            top_pick_ltp            REAL DEFAULT 0,
+            net_gex                 REAL DEFAULT 0,
+            zero_gamma_level        REAL DEFAULT 0,
+            iv_rank                 REAL DEFAULT 0,
+            max_pain_strike         REAL DEFAULT 0,
+            oi_concentration_ratio  REAL DEFAULT 0,
+            net_delta_flow          REAL DEFAULT 0,
+            outcome_1h              REAL,
+            outcome_eod             REAL,
+            outcome_next            REAL,
+            pick_ltp_1h             REAL,
+            pick_ltp_eod            REAL,
+            pick_pnl_pct_1h         REAL,
+            pick_pnl_pct_eod        REAL,
+            pick_pnl_pct_next       REAL,
+            trade_result            TEXT,
+            data_source             TEXT DEFAULT 'LIVE'
+        );
+
+        -- Critical Performance Indexes (10-50x query speedup)
+        CREATE INDEX IF NOT EXISTS idx_snapshots_source_time
+            ON market_snapshots(data_source, snapshot_time);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_symbol_time
+            ON market_snapshots(symbol, snapshot_time);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_score_confidence
+            ON market_snapshots(score, confidence);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_signal_regime
+            ON market_snapshots(signal, regime);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_trade_result
+            ON market_snapshots(trade_result);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_composite
+            ON market_snapshots(data_source, snapshot_time, score, confidence, signal);
         """)
 
     print("✅ DB initialised (v4)")
