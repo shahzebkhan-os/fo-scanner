@@ -12,6 +12,8 @@
 **Full-featured NSE options chain scanner with live signals, Greeks calculation, OI heatmaps, sector analysis, unusual activity detection, and paper trading.**
 
 > **🚀 New to this project?** Start here: **[QUICKSTART.md](QUICKSTART.md)** - Simple step-by-step guide to get running in minutes!
+>
+> **📊 Want to run backtesting?** See: **[HOW_TO_RUN_BACKTESTING.md](HOW_TO_RUN_BACKTESTING.md)** - Complete guide to historical strategy testing!
 
 [Features](#-features) • [Quick Start](#-quick-start) • [Documentation](#-documentation) • [API Reference](#-api-reference) • [Contributing](#-contributing)
 
@@ -302,35 +304,33 @@ docker-compose up -d
 ## 📚 Documentation
 
 ### Getting Started
-- **[QUICKSTART.md](QUICKSTART.md)** - 🚀 Simple step-by-step guide to get started (NEW!)
+- **[QUICKSTART.md](QUICKSTART.md)** - 🚀 Simple step-by-step guide to get started
+- **[HOW_TO_RUN_BACKTESTING.md](HOW_TO_RUN_BACKTESTING.md)** - 📊 Complete guide to running backtests (NEW!)
 - **[HOW_TO_RUN.txt](HOW_TO_RUN.txt)** - Quick reference text file for running the project
 
 ### Technical Documentation
+- **[README_BACKTESTING.md](README_BACKTESTING.md)** - Technical backtesting documentation
 - **[README2.md](README2.md)** - Trade scoring & selection logic deep-dive
-- **[README_BACKTESTING.md](README_BACKTESTING.md)** - Historical backtesting guide
 - **[PROJECT_IMPROVEMENTS.md](PROJECT_IMPROVEMENTS.md)** - Recommended improvements
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines
 - **[SECURITY.md](SECURITY.md)** - Security policy & best practices
 
 ### Backtesting
 
-Load historical data and test your strategies:
+Want to test your strategies on historical data? See **[HOW_TO_RUN_BACKTESTING.md](HOW_TO_RUN_BACKTESTING.md)** for a complete step-by-step guide!
 
+**Quick Example:**
 ```bash
-# Download and process historical data
-python backend/historical_loader.py full --start 2024-01-01
-
-# Run backtest with default parameters
-python backend/backtest_runner.py
-
-# Optimize parameters with grid search
-python backend/backtest_runner.py --optimise
-
-# Test specific strategy
-python backend/backtest_runner.py --score 85 --signal BULLISH
+# One-liner to get started (3 months of data)
+cd backend && \
+python -c "import db; db.init_db()" && \
+python historical_loader.py full --start 2024-10-01 --end 2024-12-31 && \
+python backtest_runner.py --start 2024-10-01 --end 2024-12-31
 ```
 
-See [README_BACKTESTING.md](README_BACKTESTING.md) for detailed documentation.
+For detailed documentation, see:
+- **[HOW_TO_RUN_BACKTESTING.md](HOW_TO_RUN_BACKTESTING.md)** - Step-by-step guide with examples
+- **[README_BACKTESTING.md](README_BACKTESTING.md)** - Technical details and architecture
 
 ## 📝 Important Notes
 
