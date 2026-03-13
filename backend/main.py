@@ -17,7 +17,7 @@ from . import scheduler as Scheduler
 from .analytics import compute_stock_score_v2 as compute_stock_score, score_option_v2 as score_option, black_scholes_greeks, days_to_expiry
 from .signals_legacy import build_sector_heatmap, detect_uoa, screen_straddle, get_pcr_history
 from .cache import cache
-from .ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status
+from .ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status, get_model_details as ml_get_details, get_symbol_predictions as ml_get_predictions
 from .historical_loader import get_backfill_progress, run_backfill_with_progress, reset_backfill_progress
 
 # ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
@@ -1574,6 +1574,19 @@ async def train_ml_model_endpoint():
 async def ml_status_endpoint():
     """Check if the ML model is trained and available."""
     return ml_get_status()
+
+
+@app.get("/api/ml/details")
+async def ml_details_endpoint():
+    """Return comprehensive model architecture, metrics, and training data stats."""
+    return await asyncio.to_thread(ml_get_details)
+
+
+@app.get("/api/ml/predictions")
+async def ml_predictions_endpoint():
+    """Return per-symbol LightGBM vs Neural Network prediction breakdown."""
+    preds = await asyncio.to_thread(ml_get_predictions)
+    return {"predictions": preds}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

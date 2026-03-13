@@ -9,6 +9,7 @@ import {
   CartesianGrid, Cell, ReferenceLine, AreaChart, Area
 } from "recharts";
 import StrategyBuilder from "./components/StrategyBuilder";
+import MLTab from "./components/MLTab";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const API = "http://localhost:8000";   // same-origin; set to http://localhost:8000 for dev
@@ -24,6 +25,7 @@ const TABS = [
   { id: "portfolio", label: "P&L", icon: "💰" },
   { id: "manual", label: "Trade", icon: "🚀" },
   { id: "tracker", label: "Tracker", icon: "📍" },
+  { id: "ml", label: "ML/NN", icon: "🧠" },
   { id: "backtest", label: "Backtest", icon: "🕰" },
   { id: "strategy", label: "Strategy", icon: "🧪" },
   { id: "settings", label: "Settings", icon: "⚙" },
@@ -238,6 +240,7 @@ export default function App() {
         <div style={{ display: tab === "portfolio" ? "block" : "none" }}><PortfolioTab theme={theme} /></div>
         <div style={{ display: tab === "manual"    ? "block" : "none" }}><ManualTradeTab theme={theme} /></div>
         <div style={{ display: tab === "tracker"   ? "block" : "none" }}><TradeTrackerTab theme={theme} /></div>
+        <div style={{ display: tab === "ml"        ? "block" : "none" }}><MLTab theme={theme} /></div>
         <div style={{ display: tab === "backtest"  ? "block" : "none" }}><BacktestTab theme={theme} /></div>
         <div style={{ display: tab === "strategy"  ? "block" : "none" }}><StrategyBuilder /></div>
         <div style={{ display: tab === "settings"  ? "block" : "none" }}><SettingsTab theme={theme} /></div>

@@ -265,3 +265,213 @@ def get_model_status() -> dict:
         "lgb_available": LGB_AVAILABLE,
         **nn_status,
     }
+
+
+def get_model_details(db_path: str = None) -> dict:
+    """Return comprehensive model details for the ML visualization tab."""
+    import pickle
+
+    if db_path is None:
+        db_path = os.path.join(os.path.dirname(__file__), "scanner.db")
+
+    status = get_model_status()
+    details = {**status}
+
+    # Ensemble configuration
+    details["ensemble"] = {
+        "lgb_weight": LGB_WEIGHT,
+        "nn_weight": NN_WEIGHT,
+        "description": f"P = {LGB_WEIGHT:.0%} × LightGBM + {NN_WEIGHT:.0%} × NeuralNetwork",
+    }
+
+    # LightGBM model details
+    lgb_details = {
+        "available": LGB_AVAILABLE,
+        "trained": status.get("lgb_trained", False),
+        "model_type": "LightGBM Gradient Boosted Trees",
+        "features": ["weighted_score", "gex", "iv_skew", "pcr", "regime_encoded", "oi_velocity_score", "uoa_detected"],
+        "hyperparameters": {
+            "objective": "binary",
+            "metric": "binary_logloss",
+            "learning_rate": 0.05,
+            "num_leaves": 31,
+            "min_child_samples": 20,
+            "n_estimators": 200,
+        },
+        "calibration": "Isotonic Regression",
+        "feature_importances": None,
+    }
+
+    # Try to load feature importances from saved model
+    if LGB_AVAILABLE and MODEL_PATH.exists():
+        try:
+            model = lgb.Booster(model_file=str(MODEL_PATH))
+            feat_names = model.feature_name()
+            feat_imp = model.feature_importance(importance_type="gain")
+            total = sum(feat_imp) if sum(feat_imp) > 0 else 1
+            # Use known feature names as fallback if model has generic names
+            known_features = ["weighted_score", "gex", "iv_skew", "pcr", "regime_encoded", "oi_velocity_score", "uoa_detected"]
+            if feat_names and feat_names[0].startswith("Column_") and len(known_features) >= len(feat_names):
+                feat_names = known_features[: len(feat_names)]
+            lgb_details["feature_importances"] = {
+                name: round(float(imp / total * 100), 2) for name, imp in zip(feat_names, feat_imp)
+            }
+            lgb_details["num_trees"] = model.num_trees()
+        except Exception as e:
+            log.warning(f"Could not load LGB feature importances: {e}")
+
+    details["lgb"] = lgb_details
+
+    # Neural Network model details
+    from .nn_model import NN_MODEL_PATH, NN_META_PATH, SEQ_LEN, FEATURES as NN_FEATURES, TORCH_AVAILABLE as NN_AVAILABLE
+
+    nn_details = {
+        "available": NN_AVAILABLE,
+        "trained": status.get("nn_trained", False),
+        "model_type": "LSTM (Long Short-Term Memory) Neural Network",
+        "architecture": {
+            "type": "2-Layer LSTM + MLP Head",
+            "hidden_size": 64,
+            "num_layers": 2,
+            "dropout": 0.3,
+            "mlp_hidden": 32,
+            "activation": "ReLU → Sigmoid",
+            "output": "P(bullish) ∈ [0, 1]",
+        },
+        "features": list(NN_FEATURES),
+        "sequence_length": SEQ_LEN,
+        "hyperparameters": {
+            "epochs": 30,
+            "batch_size": 64,
+            "learning_rate": 0.001,
+            "weight_decay": 1e-5,
+            "early_stopping_patience": 5,
+            "gradient_clipping": 1.0,
+        },
+    }
+
+    # Load NN metadata if available
+    if NN_META_PATH.exists():
+        try:
+            with open(NN_META_PATH, "rb") as f:
+                meta = pickle.load(f)
+            nn_details["input_size"] = meta.get("input_size")
+            nn_details["saved_features"] = meta.get("features")
+        except Exception:
+            pass
+
+    details["nn"] = nn_details
+
+    # Training data statistics
+    data_stats = {"available": False}
+    if os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='market_snapshots'")
+            if cursor.fetchone():
+                cursor.execute("SELECT COUNT(*) FROM market_snapshots WHERE spot_price IS NOT NULL AND spot_price > 0")
+                total_rows = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(DISTINCT symbol) FROM market_snapshots WHERE spot_price IS NOT NULL AND spot_price > 0")
+                unique_symbols = cursor.fetchone()[0]
+                cursor.execute("SELECT MIN(snapshot_time), MAX(snapshot_time) FROM market_snapshots WHERE spot_price IS NOT NULL AND spot_price > 0")
+                row = cursor.fetchone()
+                min_time, max_time = row if row else (None, None)
+                cursor.execute(
+                    "SELECT regime, COUNT(*) FROM market_snapshots WHERE spot_price IS NOT NULL AND spot_price > 0 GROUP BY regime"
+                )
+                regime_dist = {r: c for r, c in cursor.fetchall()}
+                data_stats = {
+                    "available": True,
+                    "total_rows": total_rows,
+                    "unique_symbols": unique_symbols,
+                    "min_rows_required": MIN_ROWS_TO_TRAIN,
+                    "ready_to_train": total_rows >= MIN_ROWS_TO_TRAIN,
+                    "date_range": {"from": min_time, "to": max_time},
+                    "regime_distribution": regime_dist,
+                }
+            conn.close()
+        except Exception as e:
+            log.warning(f"Could not load training data stats: {e}")
+
+    details["training_data"] = data_stats
+
+    # Schedule info
+    details["schedule"] = {
+        "auto_retrain": "Daily at 15:45 IST (after market close)",
+        "manual_train": "POST /api/ml/train",
+        "min_rows": MIN_ROWS_TO_TRAIN,
+    }
+
+    return details
+
+
+def get_symbol_predictions(db_path: str = None) -> list:
+    """Return per-symbol ML prediction breakdown (LGB vs NN) for recently scanned symbols."""
+    if db_path is None:
+        db_path = os.path.join(os.path.dirname(__file__), "scanner.db")
+
+    if not os.path.exists(db_path):
+        return []
+
+    results = []
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='market_snapshots'")
+        if not cursor.fetchone():
+            conn.close()
+            return []
+
+        # Get the latest snapshot per symbol
+        cursor.execute("""
+            SELECT symbol, score, COALESCE(net_gex, 0), COALESCE(iv_skew, 0),
+                   COALESCE(pcr_oi, 1), regime, spot_price
+            FROM market_snapshots
+            WHERE snapshot_time = (
+                SELECT MAX(snapshot_time) FROM market_snapshots AS ms2
+                WHERE ms2.symbol = market_snapshots.symbol
+                  AND ms2.spot_price IS NOT NULL AND ms2.spot_price > 0
+            )
+            ORDER BY score DESC
+            LIMIT 30
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+
+        for row in rows:
+            symbol, score, gex, iv_skew, pcr, regime, spot = row
+            features = {
+                "weighted_score": float(score or 0),
+                "gex": float(gex or 0),
+                "iv_skew": float(iv_skew or 0),
+                "pcr": float(pcr or 1),
+                "regime": regime or "TRENDING",
+                "score": float(score or 0),
+            }
+
+            lgb_prob = _predict_lgb(features)
+            nn_prob = predict_nn(symbol, features, db_path)
+
+            ensemble_prob = None
+            if lgb_prob is not None and nn_prob is not None:
+                ensemble_prob = round(LGB_WEIGHT * lgb_prob + NN_WEIGHT * nn_prob, 4)
+            elif lgb_prob is not None:
+                ensemble_prob = lgb_prob
+            elif nn_prob is not None:
+                ensemble_prob = nn_prob
+
+            results.append({
+                "symbol": symbol,
+                "spot_price": float(spot or 0),
+                "regime": regime or "TRENDING",
+                "quant_score": float(score or 0),
+                "lgb_probability": lgb_prob,
+                "nn_probability": nn_prob,
+                "ensemble_probability": ensemble_prob,
+                "signal": "BULLISH" if ensemble_prob and ensemble_prob > 0.55 else "BEARISH" if ensemble_prob and ensemble_prob < 0.45 else "NEUTRAL",
+            })
+    except Exception as e:
+        log.warning(f"Could not generate symbol predictions: {e}")
+
+    return results
