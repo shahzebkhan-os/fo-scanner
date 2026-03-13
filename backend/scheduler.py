@@ -376,98 +376,18 @@ async def auto_tpsl_loop():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Task 7: Accuracy Tracker - Sampler (every 10 min) + Auto CSV Export
+# Task 7: Trade Tracker - Sampler (every 15 min)
 # ══════════════════════════════════════════════════════════════════════════════
 
-CSV_EXPORT_DIR = os.path.join(os.path.dirname(__file__), "csv_exports")
-
-def _auto_export_snapshot_csv(snapshot_id: int, is_update: bool = False):
-    """
-    Exports a single snapshot to a timestamped CSV file.
-    On initial save creates a new file; on update overwrites the same session file.
-    Includes 5-min price history columns for each trade.
-    """
-    import csv as _csv
-    os.makedirs(CSV_EXPORT_DIR, exist_ok=True)
-
-    trades = db.get_accuracy_trades_with_history(snapshot_id)
-    if not trades:
-        return
-
-    ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
-    filename = f"accuracy_{snapshot_id}_{ts}.csv"
-
-    # Determine the max number of price updates across all trades
-    max_history = max((len(t.get("price_history", [])) for t in trades), default=0)
-
-    fieldnames = [
-        "symbol", "signal", "score", "ml_score", "ltp",
-        "suggested_trade", "trade_ltp", "trade_score", "trade_ml_score", "lot_value",
-        "entry_price", "pnl_pct", "max_price", "min_price", "max_pnl_pct",
-        "vol_spike", "snapshot_time",
-    ]
-    # Add dynamic 5-min price columns
-    for i in range(max_history):
-        fieldnames.append(f"price_t{i}")
-        fieldnames.append(f"time_t{i}")
-
-    trade_count = len(trades)
-    total_score = 0
-    total_pnl = 0.0
-
-    filepath = os.path.join(CSV_EXPORT_DIR, filename)
-    with open(filepath, "w", newline="") as f:
-        writer = _csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for t in trades:
-            entry = t.get("entry_price", 0) or 0
-            current = t.get("current_price") or entry
-            pnl_pct = t.get("pnl_pct", 0)
-            total_score += t.get("score", 0)
-            total_pnl += pnl_pct
-
-            row = {
-                "symbol": t.get("symbol", ""),
-                "signal": t.get("signal", "NEUTRAL"),
-                "score": t.get("score", 0),
-                "ml_score": t.get("ml_score", 0),
-                "ltp": round(t.get("stock_price", 0) or 0, 2),
-                "suggested_trade": f"{t.get('strike')} {t.get('type')}",
-                "trade_ltp": round(current, 2),
-                "trade_score": t.get("score", 0),
-                "trade_ml_score": t.get("ml_score", 0),
-                "lot_value": round((t.get("entry_price", 0) * t.get("lot_size", 0)), 2) if t.get("lot_size") else "",
-                "entry_price": round(entry, 2),
-                "pnl_pct": round(pnl_pct, 2),
-                "max_price": round(t.get("max_price", entry), 2),
-                "min_price": round(t.get("min_price", entry), 2),
-                "max_pnl_pct": round(t.get("max_pnl_pct", 0), 2),
-                "vol_spike": round(t.get("vol_spike", 0) or 0, 2),
-                "snapshot_time": t.get("snapshot_time", ""),
-            }
-            # Fill price history columns
-            for i, h in enumerate(t.get("price_history", [])):
-                row[f"price_t{i}"] = round(h["price"], 2)
-                row[f"time_t{i}"] = h["timestamp"]
-            writer.writerow(row)
-
-    avg_score = total_score / trade_count if trade_count else 0
-    avg_pnl = total_pnl / trade_count if trade_count else 0
-
-    db.record_csv_export(snapshot_id, filename, filepath, trade_count, avg_score, avg_pnl)
-    label = "update" if is_update else "new"
-    log.info(f"Auto CSV export ({label}): {filename} ({trade_count} trades, avg score {avg_score:.1f}, avg PnL {avg_pnl:+.1f}%)")
-
-
 async def accuracy_sampler_loop():
-    """Takes a snapshot of directional suggested trades every 10 minutes and auto-exports to CSV."""
-    log.info("Accuracy sampler loop started (10 min interval + auto CSV export).")
+    """Takes a snapshot of directional suggested trades every 15 minutes."""
+    log.info("Trade tracker sampler loop started (15 min interval).")
     from .constants import LOT_SIZES
     while True:
         try:
             if _is_market_open_fn and _is_market_open_fn():
                 if _scan_all_symbols_fn:
-                    log.info("Accuracy Tracking: Sampling suggested trades...")
+                    log.info("Trade Tracker: Sampling suggested trades...")
                     results = await _scan_all_symbols_fn()
                     # Only track directional signals with meaningful scores
                     suggested_trades = [
@@ -511,35 +431,29 @@ async def accuracy_sampler_loop():
                                 if tid:
                                     db.update_accuracy_trade_price(tid, p["ltp"])
                                 count += 1
-                            log.info(f"Accuracy Tracking: Created snapshot {sid} with {count} directional trades.")
-
-                            # ── Auto-export this snapshot to CSV ──
-                            try:
-                                await asyncio.to_thread(_auto_export_snapshot_csv, sid)
-                            except Exception as csv_err:
-                                log.error(f"Auto CSV export failed for snapshot {sid}: {csv_err}")
+                            log.info(f"Trade Tracker: Created snapshot {sid} with {count} directional trades.")
                         else:
-                            log.info("Accuracy Tracking: No directional trades to save this cycle.")
+                            log.info("Trade Tracker: No directional trades to save this cycle.")
 
             await asyncio.sleep(900)  # 15 minutes
         except Exception as e:
-            log.error(f"Accuracy sampler loop error: {e}")
+            log.error(f"Trade tracker sampler loop error: {e}")
             await asyncio.sleep(600)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Task 8: Accuracy Tracker - Price Updater (every 5 min)
+# Task 8: Trade Tracker - Price Updater (every 5 min)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def accuracy_price_updater_loop():
-    """Updates current prices for all active accuracy trades every 5 minutes, then re-exports updated CSVs."""
-    log.info("Accuracy price updater loop started (5 min interval).")
+    """Updates current prices for all active trades every 5 minutes."""
+    log.info("Trade tracker price updater loop started (5 min interval).")
     while True:
         try:
             if _is_market_open_fn and _is_market_open_fn():
                 active_trades = db.get_active_accuracy_trades()
                 if active_trades:
                     symbols = list({t["symbol"] for t in active_trades})
-                    log.info(f"Accuracy Tracking: Updating prices for {len(symbols)} symbols...")
+                    log.info(f"Trade Tracker: Updating prices for {len(symbols)} symbols...")
 
                     sem = asyncio.Semaphore(3)
                     async def update_sym(sym):
@@ -562,23 +476,14 @@ async def accuracy_price_updater_loop():
                                         if key in prices:
                                             db.update_accuracy_trade_price(t["id"], prices[key])
                             except Exception as e:
-                                log.warning(f"Accuracy price update failed for {sym}: {e}")
+                                log.warning(f"Trade tracker price update failed for {sym}: {e}")
 
                     await asyncio.gather(*[update_sym(s) for s in symbols])
-                    log.info("Accuracy Tracking: Price updates completed.")
-
-                    # Re-export updated CSVs for today's snapshots
-                    try:
-                        snapshot_ids = list({t["snapshot_id"] for t in active_trades})
-                        for sid in snapshot_ids:
-                            await asyncio.to_thread(_auto_export_snapshot_csv, sid, True)
-                        log.info(f"Accuracy Tracking: Re-exported {len(snapshot_ids)} CSV(s) with updated prices.")
-                    except Exception as csv_err:
-                        log.error(f"CSV re-export failed: {csv_err}")
+                    log.info("Trade Tracker: Price updates completed.")
 
             await asyncio.sleep(300)  # 5 minutes
         except Exception as e:
-            log.error(f"Accuracy price updater loop error: {e}")
+            log.error(f"Trade tracker price updater loop error: {e}")
             await asyncio.sleep(300)
 
 
@@ -629,6 +534,6 @@ async def start_all():
     asyncio.create_task(accuracy_sampler_loop())
     asyncio.create_task(accuracy_price_updater_loop())
     asyncio.create_task(ml_retrain_loop())
-    log.info("All scheduler tasks started (including Accuracy Tracker & ML Retraining).")
+    log.info("All scheduler tasks started (including Trade Tracker & ML Retraining).")
 
 

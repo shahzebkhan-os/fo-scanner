@@ -464,20 +464,6 @@ def add_accuracy_trade(snapshot_id, symbol, opt_type, strike, entry_price, score
         ))
         return cursor.lastrowid
 
-def get_accuracy_snapshots(limit=50):
-    with _conn() as c:
-        rows = c.execute("""
-            SELECT s.*, (SELECT COUNT(*) FROM accuracy_trades WHERE snapshot_id = s.id) as trade_count
-            FROM accuracy_snapshots s
-            ORDER BY s.timestamp DESC
-            LIMIT ?
-        """, (limit,)).fetchall()
-    return [dict(r) for r in rows]
-
-def delete_accuracy_snapshot(snapshot_id: int):
-    with _conn() as c:
-        c.execute("DELETE FROM accuracy_snapshots WHERE id=?", (snapshot_id,))
-    return True
 
 def get_latest_accuracy_snapshot():
     """Returns the most recent snapshot from today, or None if no snapshots exist today."""
@@ -539,83 +525,6 @@ def get_active_accuracy_trades():
             WHERE s.timestamp >= date('now')
         """).fetchall()
     return [dict(r) for r in rows]
-
-def get_accuracy_backtest_report():
-    """Aggregates historical accuracy data for the backtest report."""
-    with _conn() as c:
-        # Get all trades that have at least one history point
-        trades = c.execute("""
-            SELECT 
-                t.id, t.symbol, t.type, t.strike, t.entry_price, t.score, t.lot_size,
-                MAX(h.price) as max_price,
-                MIN(h.price) as min_price
-            FROM accuracy_trades t
-            JOIN accuracy_trade_history h ON t.id = h.trade_id
-            GROUP BY t.id
-        """).fetchall()
-
-    if not trades:
-        return {"total_trades": 0, "win_rate": 0, "avg_max_pnl": 0, "best_trade": None, "score_brackets": {}}
-
-    total = len(trades)
-    winning_trades = 0
-    total_max_pnl_pct = 0
-    best_trade = None
-    best_pnl_pct = -100
-
-    score_brackets = {
-        ">=90": {"total": 0, "wins": 0, "avg_pnl": 0},
-        "80-89": {"total": 0, "wins": 0, "avg_pnl": 0},
-        "<80": {"total": 0, "wins": 0, "avg_pnl": 0}
-    }
-
-    for r in trades:
-        entry = r["entry_price"]
-        if entry <= 0: continue
-        
-        # Win is defined as reaching at least +5% (or any positive threshold) at max
-        # Here we'll define a "Win" as max_price > entry_price at all
-        max_pnl_pct = ((r["max_price"] - entry) / entry) * 100
-        
-        if max_pnl_pct > 0:
-            winning_trades += 1
-
-        total_max_pnl_pct += max_pnl_pct
-
-        if max_pnl_pct > best_pnl_pct:
-            best_pnl_pct = max_pnl_pct
-            best_trade = {
-                "symbol": r["symbol"], "type": r["type"], "strike": r["strike"],
-                "entry": entry, "max_price": r["max_price"], "pnl_pct": round(max_pnl_pct, 2),
-                "score": r["score"]
-            }
-
-        # Bracket logic
-        score = r["score"]
-        if score >= 90: b = ">=90"
-        elif score >= 80: b = "80-89"
-        else: b = "<80"
-
-        score_brackets[b]["total"] += 1
-        if max_pnl_pct > 0: score_brackets[b]["wins"] += 1
-        score_brackets[b]["avg_pnl"] += max_pnl_pct
-
-    # Finalize brackets
-    for b, data in score_brackets.items():
-        if data["total"] > 0:
-            data["win_rate"] = round((data["wins"] / data["total"]) * 100, 1)
-            data["avg_pnl"] = round(data["avg_pnl"] / data["total"], 2)
-        else:
-            data["win_rate"] = 0
-            data["avg_pnl"] = 0
-
-    return {
-        "total_trades": total,
-        "win_rate": round((winning_trades / total) * 100, 1) if total > 0 else 0,
-        "avg_max_pnl": round(total_max_pnl_pct / total, 2) if total > 0 else 0,
-        "best_trade": best_trade,
-        "score_brackets": score_brackets
-    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -882,59 +791,3 @@ def get_partial_exits(trade_id: int) -> list:
             (trade_id,)
         ).fetchall()
     return [dict(r) for r in rows]
-
-# ── Missing Accuracy Tracking Helpers ───────────────────────────────────────────
-
-def get_accuracy_trades_with_history(snapshot_id: int) -> list:
-    """Fetches trades for a snapshot, including calculated max/min PnL from history spikes."""
-    with _conn() as c:
-        trades_rows = c.execute("SELECT * FROM accuracy_trades WHERE snapshot_id=?", (snapshot_id,)).fetchall()
-        trades = [dict(r) for r in trades_rows]
-        
-        for t in trades:
-            hist_rows = c.execute("""
-                SELECT price, timestamp FROM accuracy_trade_history 
-                WHERE trade_id=? ORDER BY timestamp ASC
-            """, (t["id"],)).fetchall()
-            t["price_history"] = [dict(r) for r in hist_rows]
-            
-            entry = t["entry_price"] or 0.1
-            if t["price_history"]:
-                prices = [h["price"] for h in t["price_history"]]
-                t["max_price"] = max(prices)
-                t["min_price"] = min(prices)
-                t["pnl_pct"] = round(((t["current_price"] - entry) / entry * 100), 2)
-                t["max_pnl_pct"] = round(((t["max_price"] - entry) / entry * 100, 2))
-            else:
-                t["max_price"] = t["current_price"]
-                t["min_price"] = t["current_price"]
-                t["pnl_pct"] = 0
-                t["max_pnl_pct"] = 0
-                
-        return trades
-
-def record_csv_export(snapshot_id, filename, filepath, trade_count, avg_score, avg_pnl):
-    with _conn() as c:
-        c.execute("""
-            INSERT INTO csv_exports (snapshot_id, filename, filepath, trade_count, avg_score, avg_pnl_pct)
-            VALUES (?,?,?,?,?,?)
-        """, (snapshot_id, filename, filepath, trade_count, avg_score, avg_pnl))
-
-def get_csv_exports():
-    with _conn() as c:
-        rows = c.execute("SELECT * FROM csv_exports ORDER BY created_at DESC LIMIT 100").fetchall()
-    return [dict(r) for r in rows]
-
-def get_csv_export_by_id(export_id: int):
-    with _conn() as c:
-        row = c.execute("SELECT * FROM csv_exports WHERE id=?", (export_id,)).fetchone()
-    return dict(row) if row else None
-
-def delete_csv_export(export_id: int):
-    with _conn() as c:
-        exp = c.execute("SELECT filepath FROM csv_exports WHERE id=?", (export_id,)).fetchone()
-        if exp and os.path.exists(exp["filepath"]):
-            try: os.remove(exp["filepath"])
-            except: pass
-        c.execute("DELETE FROM csv_exports WHERE id=?", (export_id,))
-    return True
