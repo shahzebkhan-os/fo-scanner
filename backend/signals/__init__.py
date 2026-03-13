@@ -17,6 +17,7 @@ from .fii_dii import FiiDiiSignal
 from .straddle_pricing import StraddleSignal
 from .news_scanner import NewsSignal
 from .greeks_signal import GreeksSignal
+from .oi_velocity import OiVelocitySignal
 from .engine import MasterSignalEngine
 
 __all__ = [
@@ -32,5 +33,6 @@ __all__ = [
     "StraddleSignal",
     "NewsSignal",
     "GreeksSignal",
+    "OiVelocitySignal",
     "MasterSignalEngine",
 ]
