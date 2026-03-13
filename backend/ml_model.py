@@ -311,7 +311,7 @@ def get_model_details(db_path: str = None) -> dict:
             total = sum(feat_imp) if sum(feat_imp) > 0 else 1
             # Use known feature names as fallback if model has generic names
             known_features = ["weighted_score", "gex", "iv_skew", "pcr", "regime_encoded", "oi_velocity_score", "uoa_detected"]
-            if feat_names and feat_names[0].startswith("Column_"):
+            if feat_names and feat_names[0].startswith("Column_") and len(known_features) >= len(feat_names):
                 feat_names = known_features[: len(feat_names)]
             lgb_details["feature_importances"] = {
                 name: round(float(imp / total * 100), 2) for name, imp in zip(feat_names, feat_imp)
@@ -323,10 +323,10 @@ def get_model_details(db_path: str = None) -> dict:
     details["lgb"] = lgb_details
 
     # Neural Network model details
-    from .nn_model import NN_MODEL_PATH, NN_META_PATH, SEQ_LEN, FEATURES as NN_FEATURES, TORCH_AVAILABLE as _torch
+    from .nn_model import NN_MODEL_PATH, NN_META_PATH, SEQ_LEN, FEATURES as NN_FEATURES, TORCH_AVAILABLE as NN_AVAILABLE
 
     nn_details = {
-        "available": _torch,
+        "available": NN_AVAILABLE,
         "trained": status.get("nn_trained", False),
         "model_type": "LSTM (Long Short-Term Memory) Neural Network",
         "architecture": {
