@@ -43,30 +43,35 @@ RANDOM_BASELINE_LOSS = 0.693  # ln(2) — log-loss of a coin-flip classifier
 # ── Model architecture ────────────────────────────────────────────────────────
 
 
-class LSTMPredictor(nn.Module):
-    """Two-layer LSTM followed by a small MLP head → P(bullish)."""
+if TORCH_AVAILABLE:
 
-    def __init__(self, input_size: int, hidden_size: int = 64, num_layers: int = 2, dropout: float = 0.3):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size,
-            hidden_size,
-            num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0,
-        )
-        self.dropout = nn.Dropout(dropout)
-        self.fc1 = nn.Linear(hidden_size, 32)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(32, 1)
+    class LSTMPredictor(nn.Module):
+        """Two-layer LSTM followed by a small MLP head → P(bullish)."""
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        lstm_out, _ = self.lstm(x)
-        last_hidden = lstm_out[:, -1, :]  # only the final time-step
-        x = self.dropout(last_hidden)
-        x = self.relu(self.fc1(x))
-        x = torch.sigmoid(self.fc2(x))
-        return x.squeeze(-1)
+        def __init__(self, input_size: int, hidden_size: int = 64, num_layers: int = 2, dropout: float = 0.3):
+            super().__init__()
+            self.lstm = nn.LSTM(
+                input_size,
+                hidden_size,
+                num_layers,
+                batch_first=True,
+                dropout=dropout if num_layers > 1 else 0,
+            )
+            self.dropout = nn.Dropout(dropout)
+            self.fc1 = nn.Linear(hidden_size, 32)
+            self.relu = nn.ReLU()
+            self.fc2 = nn.Linear(32, 1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            lstm_out, _ = self.lstm(x)
+            last_hidden = lstm_out[:, -1, :]  # only the final time-step
+            x = self.dropout(last_hidden)
+            x = self.relu(self.fc1(x))
+            x = torch.sigmoid(self.fc2(x))
+            return x.squeeze(-1)
+
+else:
+    LSTMPredictor = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
