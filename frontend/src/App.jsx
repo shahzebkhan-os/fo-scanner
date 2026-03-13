@@ -348,8 +348,12 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
       if (result.error) {
         alert(result.error);
       } else {
-        alert(`Model trained! CV Log Loss: ${result.cv_log_loss_mean}`);
-        setMlStatus({ trained: true });
+        const nn = result.nn || {};
+        const nnMsg = nn.nn_cv_log_loss_mean
+          ? ` | NN Loss: ${nn.nn_cv_log_loss_mean}`
+          : nn.error ? ` | NN: ${nn.error}` : "";
+        alert(`Model trained! LGB CV Log Loss: ${result.cv_log_loss_mean}${nnMsg}`);
+        apiFetch("/api/ml/status").then(setMlStatus).catch(() => {});
         load(); // Reload to get ML predictions
       }
     } catch (e) {
@@ -445,10 +449,10 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
           <span style={{ fontSize: 16 }}>🤖</span>
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 600, color: "#6366f1", fontSize: 12 }}>
-              ML Model Not Trained
+              ML Models Not Trained
             </div>
             <div style={{ fontSize: 11, color: theme.muted }}>
-              Train the LightGBM model to get AI-powered signal refinement.
+              Train LightGBM + Neural Network (LSTM) to get AI-powered signal refinement.
             </div>
           </div>
           <button 
@@ -458,7 +462,37 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
               background: "#6366f1", color: "#fff", border: "none",
               cursor: "pointer", fontWeight: 600, fontSize: 11
             }}>
-            Train Model
+            Train Models
+          </button>
+        </div>
+      )}
+      {mlStatus.trained && (
+        <div style={{
+          background: "rgba(34, 197, 94, 0.08)",
+          border: "1px solid rgba(34, 197, 94, 0.3)",
+          borderRadius: 8,
+          padding: "8px 16px",
+          marginBottom: 16,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          fontSize: 11
+        }}>
+          <span style={{ fontSize: 14 }}>🧠</span>
+          <span style={{ color: theme.muted }}>
+            LightGBM {mlStatus.lgb_trained ? "✅" : "❌"}
+            {" · "}
+            Neural Network {mlStatus.nn_trained ? "✅" : "❌"}
+            {mlStatus.nn_trained ? " (LSTM)" : mlStatus.torch_available === false ? " (torch not installed)" : ""}
+          </span>
+          <button
+            onClick={trainMLModel}
+            style={{
+              marginLeft: "auto", padding: "4px 10px", borderRadius: 5,
+              background: "transparent", color: "#6366f1", border: "1px solid #6366f1",
+              cursor: "pointer", fontWeight: 600, fontSize: 10
+            }}>
+            Retrain
           </button>
         </div>
       )}

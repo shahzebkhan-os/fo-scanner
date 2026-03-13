@@ -496,7 +496,7 @@ async def accuracy_price_updater_loop():
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def ml_retrain_loop():
-    """Retrains the LightGBM model once daily after market close."""
+    """Retrains the LightGBM + Neural Network models once daily after market close."""
     log.info("ML retrain loop started.")
     _trained_today = None
 
@@ -507,13 +507,18 @@ async def ml_retrain_loop():
 
             # Run at 15:45, once per day
             if now.time() >= dtime(15, 45) and _trained_today != today:
-                log.info("Starting daily ML model retraining...")
+                log.info("Starting daily ML model retraining (LightGBM + Neural Network)...")
                 if _ml_train_fn:
                     res = await asyncio.to_thread(_ml_train_fn)
                     if "error" in res:
                         log.error(f"ML retraining failed: {res['error']}")
                     else:
-                        log.info(f"ML retraining done: Loss {res.get('cv_log_loss_mean')}, Rows {res.get('training_rows')}")
+                        log.info(f"ML retraining done: LGB Loss {res.get('cv_log_loss_mean')}, Rows {res.get('training_rows')}")
+                        nn = res.get("nn", {})
+                        if nn.get("nn_cv_log_loss_mean"):
+                            log.info(f"NN retraining done: Loss {nn['nn_cv_log_loss_mean']}, Sequences {nn.get('nn_training_sequences')}")
+                        elif nn.get("error"):
+                            log.warning(f"NN retraining skipped: {nn['error']}")
                         _trained_today = today
 
             await asyncio.sleep(600)   # check every 10 min
@@ -534,6 +539,6 @@ async def start_all():
     asyncio.create_task(accuracy_sampler_loop())
     asyncio.create_task(accuracy_price_updater_loop())
     asyncio.create_task(ml_retrain_loop())
-    log.info("All scheduler tasks started (including Trade Tracker & ML Retraining).")
+    log.info("All scheduler tasks started (including Trade Tracker & ML Retraining with Neural Network).")
 
 

@@ -12,3 +12,4 @@ __pycache__/
 historical_data/
 *.whl
 .idea/
+*.pt

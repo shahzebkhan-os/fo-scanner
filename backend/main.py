@@ -660,7 +660,7 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                     return None
                 
                 # Add ML prediction if model is trained
-                ml_prob = ml_predict(stats)
+                ml_prob = ml_predict(stats, symbol=symbol)
                 stats["ml_bullish_probability"] = ml_prob
 
                 stock_score  = stats.get("score", 0)
