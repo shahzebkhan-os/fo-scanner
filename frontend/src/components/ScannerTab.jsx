@@ -96,6 +96,19 @@ function ScanCard({ r, theme, onChain, onGreeks, isWatched, onToggleWL }) {
           </div>
         </div>
 
+        {r.uoa_detected && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6, marginTop: 6,
+            padding: "4px 8px", background: "rgba(239,68,68,.1)",
+            border: "0.5px solid rgba(239,68,68,.3)", borderRadius: 4, fontSize: 11
+          }}>
+            <span>⚡</span>
+            <span style={{ color: "#ef4444", fontWeight: 500 }}>
+              UOA Detected: {r.uoa_side} at {r.uoa_strike}
+            </span>
+          </div>
+        )}
+
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 12 }}>
           {[["PCR", fmt(r.pcr, 3)], ["IV", `${fmt(r.iv)}%`], ["V/OI", fmt(r.vol_spike, 3)]].map(([k, v]) => (
             <div key={k} style={{ background: theme.bg, borderRadius: 6, padding: "6px 10px", textAlign: "center" }}>

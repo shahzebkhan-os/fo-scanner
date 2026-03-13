@@ -82,6 +82,10 @@ def _load_training_data(db_path: str = None) -> tuple:
     
     features = ["weighted_score", "gex", "iv_skew", "pcr", "regime_encoded"]
     
+    # Add OI velocity / UOA features if present in the data
+    extra = ["oi_velocity_score", "uoa_detected"]
+    features = features + [f for f in extra if f in df.columns and f not in features]
+
     # Handle missing values
     for col in features:
         if col in df.columns:

@@ -6,7 +6,19 @@ Covers: Black-Scholes Greeks, IV Rank, Max Pain, OI Walls,
 
 from __future__ import annotations
 import math
+from datetime import datetime
 from typing import Optional
+
+import pytz
+
+try:
+    from .signals.oi_velocity import OiVelocitySignal
+except ImportError:
+    from signals.oi_velocity import OiVelocitySignal
+
+# Module-level singleton — maintains rolling OI history across scans
+_oi_velocity = OiVelocitySignal()
+_IST = pytz.timezone("Asia/Kolkata")
 
 # ── Strike Intervals ──────────────────────────────────────────────────────────
 STRIKE_INTERVALS = {
@@ -187,10 +199,10 @@ def oi_walls(records: list, spot: float, n: int = 3) -> dict:
 DEFAULT_LOT_SIZE = {"NIFTY": 50, "BANKNIFTY": 15, "FINNIFTY": 25}
 
 REGIME_WEIGHTS = {
-    "PINNED":   {"gex": 0.30, "vol_pcr": 0.10, "dwoi": 0.40, "skew": 0.10, "buildup": 0.10},
-    "TRENDING": {"gex": 0.15, "vol_pcr": 0.25, "dwoi": 0.15, "skew": 0.20, "buildup": 0.25},
-    "EXPIRY":   {"gex": 0.10, "vol_pcr": 0.40, "dwoi": 0.10, "skew": 0.10, "buildup": 0.30},
-    "SQUEEZE":  {"gex": 0.40, "vol_pcr": 0.30, "dwoi": 0.10, "skew": 0.10, "buildup": 0.10},
+    "PINNED":   {"gex": 0.30, "vol_pcr": 0.10, "dwoi": 0.40, "skew": 0.10, "buildup": 0.02, "oi_velocity": 0.08},
+    "TRENDING": {"gex": 0.15, "vol_pcr": 0.25, "dwoi": 0.15, "skew": 0.20, "buildup": 0.13, "oi_velocity": 0.12},
+    "EXPIRY":   {"gex": 0.10, "vol_pcr": 0.40, "dwoi": 0.10, "skew": 0.10, "buildup": 0.18, "oi_velocity": 0.12},
+    "SQUEEZE":  {"gex": 0.40, "vol_pcr": 0.30, "dwoi": 0.10, "skew": 0.10, "buildup": 0.02, "oi_velocity": 0.08},
 }
 
 PCR_BULLISH_THRESHOLD = 1.2
@@ -391,7 +403,17 @@ def compute_stock_score_v2(
     )
     if not records or spot <= 0:
         return _empty
-        
+
+    # Push new OI snapshot to velocity tracker
+    _oi_velocity.push_snapshot(
+        symbol=symbol,
+        records=records,
+        spot=spot,
+        timestamp=datetime.now(_IST),
+    )
+    # Compute velocity signal
+    velocity_result = _oi_velocity._compute_velocity(symbol, records, spot)
+
     dte = days_to_expiry(expiry_str) if expiry_str else 5
     iv_rank = (iv_rank_data or {}).get("iv_rank", 50.0)
     
@@ -497,17 +519,24 @@ def compute_stock_score_v2(
     sub_dwoipcr = min(100, max(0, dwoi_pcr * 50))
     sub_skew    = 100 - skew_data["skew_percentile"]
     sub_build   = 100 if factors[4] == 1 else (0 if factors[4] == -1 else 50)
+    sub_velocity = max(0, min(100, 50 + (velocity_result.score * 40)))
     
     weighted_score = (
-        (sub_gex     * weights["gex"]) +
-        (sub_volpcr  * weights["vol_pcr"]) +
-        (sub_dwoipcr * weights["dwoi"]) +
-        (sub_skew    * weights["skew"]) +
-        (sub_build   * weights["buildup"])
+        (sub_gex      * weights["gex"]) +
+        (sub_volpcr   * weights["vol_pcr"]) +
+        (sub_dwoipcr  * weights["dwoi"]) +
+        (sub_skew     * weights["skew"]) +
+        (sub_build    * weights["buildup"]) +
+        (sub_velocity * weights["oi_velocity"])
     )
     
     if direction == "BEARISH" and fii_net < 0 and symbol in ["NIFTY", "BANKNIFTY"]:
         weighted_score = max(0, weighted_score / 1.15)
+
+    # UOA override: if UOA detected with high confidence, boost/dampen score
+    if velocity_result.is_uoa and velocity_result.confidence > 0.6:
+        uoa_boost = 8 if velocity_result.score > 0 else -8
+        weighted_score = max(0, min(100, weighted_score + uoa_boost))
         
     def _directional_picks(options, signal):
         if signal == "BULLISH":
@@ -545,6 +574,13 @@ def compute_stock_score_v2(
 
     atm_iv = round((atm_iv_ce + atm_iv_pe) / 2, 1)
 
+    # Build UOA stats for frontend
+    uoa_stats = {}
+    if velocity_result.is_uoa and velocity_result.confidence > 0.6:
+        uoa_stats["uoa_detected"] = True
+        uoa_stats["uoa_strike"] = velocity_result.top_strike
+        uoa_stats["uoa_side"] = "CE" if velocity_result.top_ce_velocity > abs(velocity_result.top_pe_velocity) else "PE"
+
     return dict(
         pcr            = round(pcr, 3),
         iv             = atm_iv,
@@ -566,6 +602,10 @@ def compute_stock_score_v2(
             "vol_pcr": round(vol_pcr, 2),
             "dwoi_pcr": round(dwoi_pcr, 2),
             "iv_skew": round(skew_data["skew_value"], 2)
-        }
+        },
+        oi_velocity_score  = velocity_result.score,
+        oi_velocity_conf   = velocity_result.confidence,
+        oi_velocity_reason = velocity_result.reason,
+        **uoa_stats,
     )
 

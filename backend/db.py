@@ -259,6 +259,20 @@ def init_db():
             try: c.execute(f"ALTER TABLE accuracy_trades ADD COLUMN {col} {dtype}")
             except: pass
 
+    # Migration: Add OI velocity / UOA columns to market_snapshots
+    with _conn() as c:
+        for col, defn in [
+            ("oi_velocity_score", "REAL DEFAULT 0"),
+            ("oi_velocity_conf", "REAL DEFAULT 0"),
+            ("uoa_detected", "INTEGER DEFAULT 0"),
+            ("uoa_strike", "INTEGER"),
+            ("uoa_side", "TEXT"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {defn}")
+            except Exception:
+                pass  # Column already exists — safe
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Paper Trades
