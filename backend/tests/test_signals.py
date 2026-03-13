@@ -9,7 +9,7 @@ import os
 # Add backend directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from signals import (
+from signals_legacy import (
     detect_uoa,
     screen_straddle,
     build_sector_heatmap,
