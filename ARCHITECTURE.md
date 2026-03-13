@@ -18,6 +18,7 @@
    - [scheduler.py — Background Tasks](#schedulerpy--background-tasks)
    - [cache.py — Caching Layer](#cachepy--caching-layer)
    - [ml_model.py — Machine Learning](#ml_modelpy--machine-learning)
+   - [nn_model.py — LSTM Neural Network](#nn_modelpy--lstm-neural-network)
 4. [Signal System (12 Signals)](#signal-system-12-signals)
    - [base.py — Signal Framework](#basepy--signal-framework)
    - [engine.py — Master Signal Engine](#enginepy--master-signal-engine)
@@ -79,7 +80,7 @@
 │  │ db.py   │  │ scheduler.py │  └───────────────────────────┘  │
 │  │ SQLite  │  │ cron tasks   │                                  │
 │  └─────────┘  └──────────────┘  ┌───────────────────────────┐  │
-│                                 │ ml_model.py (LightGBM)    │  │
+│                                 │ ml_model.py (LightGBM+NN) │  │
 │  ┌──────────────┐               └───────────────────────────┘  │
 │  │ data_source.py│  ┌────────────────────────────────────────┐  │
 │  │ NSE fetching  │  │ market/ · execution/ · watcher/        │  │
@@ -98,7 +99,7 @@
 | **Frontend** | React 19, Vite 7, Recharts, CSS custom properties |
 | **Backend** | Python 3.11+, FastAPI 0.135, uvicorn |
 | **Database** | SQLite (paper_trades.db) |
-| **ML** | LightGBM, isotonic calibration |
+| **ML** | LightGBM + LSTM neural network, isotonic calibration |
 | **Caching** | Redis (production) / in-memory dict (dev) |
 | **Scheduling** | APScheduler (background tasks) |
 | **Data Sources** | INDmoney (chains), NSE (LTP/FII), IndStocks (fallback) |
@@ -118,7 +119,8 @@ fo-scanner/
 │   ├── constants.py            # Symbols, lot sizes, API config
 │   ├── scheduler.py            # Background tasks (OI snapshots, reports)
 │   ├── cache.py                # Redis/in-memory cache with TTL
-│   ├── ml_model.py             # LightGBM training & prediction
+│   ├── ml_model.py             # LightGBM + NN ensemble training & prediction
+│   ├── nn_model.py             # LSTM neural network for historical sequences
 │   ├── signals_legacy.py       # UOA, straddle, sector helpers
 │   ├── backtest.py             # Live-signal backtesting
 │   ├── backtest_runner.py      # Historical EOD backtesting
@@ -444,7 +446,7 @@ Centralizes all static configuration:
 | **DB Cleanup** | Sunday midnight | Purges snapshots > 30 days old |
 | **Accuracy Sampler** | Every 10 min | Snapshots predictions for backtesting |
 | **Price Updater** | Every 5 min | Updates current prices in accuracy trades |
-| **ML Retrain** | On-demand / weekly | Retrains LightGBM on rolling window |
+| **ML Retrain** | On-demand / daily | Retrains LightGBM + LSTM neural network |
 
 ---
 
@@ -471,9 +473,9 @@ Cache()
 
 ### ml_model.py — Machine Learning
 
-**Purpose**: LightGBM classifier predicting next-bar direction (bullish/bearish).
+**Purpose**: Ensemble of LightGBM classifier + LSTM neural network predicting next-bar direction (bullish/bearish).
 
-#### Training Pipeline
+#### Training Pipeline — LightGBM
 
 ```
 1. Load market_snapshots (requires 500+ rows)
@@ -488,6 +490,21 @@ Cache()
 7. Save only if CV loss < 0.693 (better than random)
 ```
 
+#### Training Pipeline — LSTM Neural Network (nn_model.py)
+
+```
+1. Load market_snapshots ordered by symbol + time
+2. Normalize features with StandardScaler
+3. Create sliding-window sequences (10 bars per sample) per symbol
+4. Time-series cross-validation (no future leakage)
+5. Train 2-layer LSTM (hidden=64) + MLP head with early stopping
+6. Save only if CV loss < 0.693 (better than random)
+```
+
+The neural network captures temporal patterns in the historical data
+that the point-in-time LightGBM classifier may miss (trends, momentum,
+regime transitions).
+
 #### Score Blending
 
 Final score combines three sources:
@@ -496,12 +513,51 @@ Final score combines three sources:
 Ensemble = QUANT (50%) + ML (up to 30%) + Engine (up to 20%)
 ```
 
+ML probability is itself an ensemble when both models are trained:
+
+```
+ML = LightGBM (60%) + Neural Network LSTM (40%)
+```
+
 - **QUANT**: `compute_stock_score_v2()` output (0–100)
-- **ML**: LightGBM probability × confidence scaling
+- **ML (LightGBM)**: Calibrated probability from isotonic regression
+- **ML (Neural Net)**: LSTM probability from last 10 historical bars
 - **Engine**: `MasterSignalEngine.compute_all_signals()` composite
 
 Time-of-day adjustments apply discounts: morning (−15%), expiry afternoon
 (−10%), EOD (−20%).
+
+---
+
+### nn_model.py — LSTM Neural Network
+
+**Purpose**: PyTorch LSTM that processes sliding windows of historical
+market data to capture temporal patterns (trends, momentum, regime shifts).
+
+#### Architecture
+
+```
+Input (batch, 10, 5)          ← 10 historical bars × 5 features
+  → LSTM(hidden=64, layers=2, dropout=0.3)
+  → last time-step hidden state
+  → Dropout(0.3)
+  → Linear(64 → 32) + ReLU
+  → Linear(32 → 1) + Sigmoid
+Output: P(bullish) ∈ [0, 1]
+```
+
+#### Prediction Flow
+
+```
+1. Query last 10 market_snapshots for the symbol
+2. Append current live features as the newest bar
+3. Normalize with the saved StandardScaler
+4. Feed through the trained LSTM
+5. Return P(bullish)
+```
+
+Falls back gracefully to `None` if torch is not installed or the model
+is not yet trained.
 
 ---
 
@@ -1034,7 +1090,7 @@ Entry (manual or auto)
 | POST | `/api/backtest/run` | Run backtest (backtest_runner) |
 | GET | `/api/backfill/progress` | Historical data load progress |
 | POST | `/api/backfill/start` | Start historical data load |
-| POST | `/api/ml/train` | Train LightGBM model |
+| POST | `/api/ml/train` | Train LightGBM + Neural Network models |
 | GET | `/api/ml/status` | Check if model is trained |
 | GET | `/api/settings/watchlist` | Get user watchlist |
 | POST | `/api/settings/watchlist` | Update user watchlist |

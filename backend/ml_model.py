@@ -1,7 +1,14 @@
 """
-LightGBM model trained on market_snapshots to predict next-bar direction.
-Used to validate/calibrate the quantitative weighted_score from analytics.py.
-Does NOT replace compute_stock_score_v2 — runs alongside it as a second opinion.
+LightGBM + LSTM Neural Network ensemble for next-bar direction prediction.
+
+LightGBM captures point-in-time feature interactions while the LSTM neural
+network processes historical sequences to detect temporal patterns.  When both
+models are trained the final probability is a weighted blend:
+
+    P = 0.60 × LightGBM + 0.40 × NeuralNetwork
+
+If only one model is available the other's weight is redistributed so the
+prediction still works.
 """
 
 import numpy as np
@@ -24,9 +31,16 @@ try:
 except ImportError:
     LGB_AVAILABLE = False
 
+from .nn_model import train_nn, predict_nn, get_nn_status, TORCH_AVAILABLE
+
 MODEL_PATH = Path(os.path.dirname(__file__)) / "models" / "lgbm_signal.txt"
 CALIBRATOR_PATH = Path(os.path.dirname(__file__)) / "models" / "isotonic_calibrator.pkl"
 MIN_ROWS_TO_TRAIN = 500  # Need at least 500 historical snapshots
+
+# Ensemble blend weights
+LGB_WEIGHT = 0.60
+NN_WEIGHT = 0.40
+assert abs(LGB_WEIGHT + NN_WEIGHT - 1.0) < 1e-9, "Ensemble weights must sum to 1.0"
 
 
 def _load_training_data(db_path: str = None) -> tuple:
@@ -160,7 +174,7 @@ def train_model(db_path: str = None) -> dict:
         pickle.dump(calibrator, f)
     
     importances = dict(zip(feature_names, map(float, final_model.feature_importances_)))
-    return {
+    result = {
         "cv_log_loss_mean": round(float(np.mean(val_losses)), 4),
         "cv_log_loss_std": round(float(np.std(val_losses)), 4),
         "feature_importances": importances,
@@ -168,32 +182,34 @@ def train_model(db_path: str = None) -> dict:
         "model_saved": str(MODEL_PATH),
     }
 
+    # ── Also train the LSTM neural network ────────────────────────────────
+    nn_result = train_nn(db_path)
+    if "error" in nn_result:
+        log.warning(f"NN training skipped: {nn_result['error']}")
+    else:
+        log.info(f"NN training done: loss={nn_result.get('nn_cv_log_loss_mean')}")
+    result["nn"] = nn_result
 
-def predict(features: dict) -> Optional[float]:
-    """
-    Returns calibrated probability (0-1) of bullish next bar.
-    Returns None if model not trained yet.
-    """
-    if not LGB_AVAILABLE or not MODEL_PATH.exists():
+    return result
+
+
+def _predict_lgb(features: dict) -> Optional[float]:
+    """LightGBM point-in-time prediction (calibrated)."""
+    if not LGB_AVAILABLE or not MODEL_PATH.exists() or not CALIBRATOR_PATH.exists():
         return None
-    
+
     try:
         import lightgbm as lgb
         import pickle
-        
+
         model = lgb.Booster(model_file=str(MODEL_PATH))
-        
-        if not CALIBRATOR_PATH.exists():
-            return None
-            
+
         with open(CALIBRATOR_PATH, "rb") as f:
             calibrator = pickle.load(f)
-        
+
         regime_map = {"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3}
-        
-        # Extract features with fallback to metrics sub-dict
         metrics = features.get("metrics", {})
-        
+
         X = np.array([[
             float(features.get("weighted_score", features.get("score", 0))),
             float(features.get("gex", metrics.get("gex", 0))),
@@ -201,20 +217,51 @@ def predict(features: dict) -> Optional[float]:
             float(features.get("pcr", metrics.get("pcr", features.get("pcr_oi", 1)))),
             float(regime_map.get(features.get("regime", "TRENDING"), 1)),
         ]])
-        
+
         raw_prob = model.predict(X)[0]
         calibrated_prob = calibrator.predict([raw_prob])[0]
         return round(float(calibrated_prob), 4)
     except Exception as e:
-        log.warning(f"ML prediction failed: {e}")
+        log.warning(f"LGB prediction failed: {e}")
         return None
 
 
+def predict(features: dict, symbol: str = None) -> Optional[float]:
+    """Ensemble prediction blending LightGBM and LSTM neural network.
+
+    Returns calibrated probability (0-1) of bullish next bar.
+    Returns None if no model is trained.
+
+    Blend weights (when both models available):
+        LightGBM  60 %  — strong on feature interactions
+        LSTM NN   40 %  — captures temporal / sequential patterns
+    """
+    lgb_prob = _predict_lgb(features)
+
+    # Neural network needs the symbol to fetch historical sequence
+    nn_prob = None
+    if symbol:
+        nn_prob = predict_nn(symbol, features)
+
+    # Ensemble blending
+    if lgb_prob is not None and nn_prob is not None:
+        blended = LGB_WEIGHT * lgb_prob + NN_WEIGHT * nn_prob
+        return round(float(blended), 4)
+    elif lgb_prob is not None:
+        return lgb_prob
+    elif nn_prob is not None:
+        return nn_prob
+    return None
+
+
 def get_model_status() -> dict:
-    """Check if model is trained and return status."""
-    trained = MODEL_PATH.exists() and CALIBRATOR_PATH.exists()
+    """Check if models are trained and return status."""
+    lgb_trained = MODEL_PATH.exists() and CALIBRATOR_PATH.exists()
+    nn_status = get_nn_status()
     return {
-        "trained": trained,
-        "model_path": str(MODEL_PATH) if trained else None,
+        "trained": lgb_trained or nn_status["nn_trained"],
+        "lgb_trained": lgb_trained,
+        "model_path": str(MODEL_PATH) if lgb_trained else None,
         "lgb_available": LGB_AVAILABLE,
+        **nn_status,
     }
