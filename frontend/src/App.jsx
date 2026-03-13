@@ -38,6 +38,18 @@ const signalColor = (s) =>
 const signalBg = (s) =>
   s === "BULLISH" ? "rgba(34,197,94,.15)" : s === "BEARISH" ? "rgba(239,68,68,.15)" : "rgba(148,163,184,.1)";
 
+// Parse timestamp safely - handles both ISO format with and without Z suffix
+const parseTimestamp = (ts) => {
+  if (!ts) return new Date();
+  try {
+    // If timestamp doesn't have timezone info, treat it as UTC by appending Z
+    const normalized = ts.endsWith("Z") || ts.includes("+") || ts.includes("-", 10) ? ts : ts + "Z";
+    return new Date(normalized);
+  } catch {
+    return new Date();
+  }
+};
+
 async function apiFetch(path, options = {}) {
   const r = await fetch(API + path, options);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2063,7 +2075,7 @@ function TradeTrackerTab({ theme }) {
             <Card theme={theme} style={{ padding: 14, textAlign: "center" }}>
               <div style={{ fontSize: 10, color: theme.muted, marginBottom: 4 }}>SNAPSHOT TIME</div>
               <div style={{ fontSize: 13, fontWeight: 700 }}>
-                {new Date(data.snapshot.timestamp + (data.snapshot.timestamp.endsWith("Z") ? "" : "Z")).toLocaleTimeString("en-IN", {
+                {parseTimestamp(data.snapshot?.timestamp).toLocaleTimeString("en-IN", {
                   hour: '2-digit', minute: '2-digit'
                 })}
               </div>

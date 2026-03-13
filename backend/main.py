@@ -976,17 +976,23 @@ async def get_latest_tracked_trades():
     
     # Add performance calculations
     for t in details["trades"]:
-        entry = t.get("entry_price", 0) or 0.01
-        current = t.get("current_price", entry)
-        t["pnl_pct"] = round(((current - entry) / entry) * 100, 2) if entry > 0 else 0
+        entry = t.get("entry_price") or 0
+        current = t.get("current_price") or entry
+        # Only calculate P&L if we have valid entry price
+        if entry > 0:
+            t["pnl_pct"] = round(((current - entry) / entry) * 100, 2)
+        else:
+            t["pnl_pct"] = 0
         t["lot_value"] = round(current * (t.get("lot_size", 1) or 1), 2)
         
         # Get recent price history for 5m change
         history = db.get_accuracy_trade_history(t["id"])
         if len(history) >= 2:
-            prev = history[-2]["price"]
-            curr = history[-1]["price"]
-            t["diff_5m"] = round(curr - prev, 2)
+            prev_entry = history[-2]
+            curr_entry = history[-1]
+            prev = prev_entry.get("price", 0) if isinstance(prev_entry, dict) else 0
+            curr = curr_entry.get("price", 0) if isinstance(curr_entry, dict) else 0
+            t["diff_5m"] = round(curr - prev, 2) if prev and curr else 0
             t["diff_5m_pct"] = round((t["diff_5m"] / prev * 100), 2) if prev > 0 else 0
         else:
             t["diff_5m"] = 0
@@ -1006,9 +1012,13 @@ async def get_all_today_trades():
     
     # Add performance calculations
     for t in trades:
-        entry = t.get("entry_price", 0) or 0.01
-        current = t.get("current_price", entry)
-        t["pnl_pct"] = round(((current - entry) / entry) * 100, 2) if entry > 0 else 0
+        entry = t.get("entry_price") or 0
+        current = t.get("current_price") or entry
+        # Only calculate P&L if we have valid entry price
+        if entry > 0:
+            t["pnl_pct"] = round(((current - entry) / entry) * 100, 2)
+        else:
+            t["pnl_pct"] = 0
         t["lot_value"] = round(current * (t.get("lot_size", 1) or 1), 2)
     
     return {
