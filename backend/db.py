@@ -269,6 +269,7 @@ def migrate_market_snapshots():
     Call this during app startup before any queries run.
     
     Phase 2A: Add columns for expanded ML features.
+    OI Velocity + Global Influence: Add velocity and global market columns.
     """
     new_columns = [
         ("vix",                "REAL DEFAULT 15.0"),
@@ -277,6 +278,16 @@ def migrate_market_snapshots():
         ("engine_score",       "REAL"),
         ("engine_confidence",  "REAL"),
         ("ensemble_score",     "REAL"),
+        # OI Velocity columns
+        ("oi_velocity_score",  "REAL DEFAULT 0"),
+        ("oi_velocity_conf",   "REAL DEFAULT 0"),
+        ("uoa_detected",       "INTEGER DEFAULT 0"),
+        ("uoa_strike",         "INTEGER"),
+        ("uoa_side",           "TEXT"),
+        # Global Market Influence columns
+        ("global_score",       "REAL DEFAULT 0"),
+        ("global_driver",      "TEXT"),
+        ("is_premarket",       "INTEGER DEFAULT 0"),
     ]
     with _conn() as c:
         for col_name, col_def in new_columns:

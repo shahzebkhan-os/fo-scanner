@@ -579,6 +579,47 @@ async def retrain_ml_model_weekly():
             await asyncio.sleep(3600)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Task 10: Global Market Prefetch (at 08:45 IST before market open)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def global_market_prefetch_loop():
+    """
+    Pre-market refresh: fetch all global markets at 08:45 IST so data is warm by 09:15.
+    Ensures first scan result at 09:15 has real data, not empty.
+    """
+    log.info("Global market prefetch loop started.")
+    _fetched_today = None
+
+    while True:
+        try:
+            now = datetime.now(IST)
+            today = now.date()
+            
+            # Run once per day at 08:45 (before market opens at 09:15)
+            if now.time() >= dtime(8, 45) and now.time() < dtime(9, 0) and _fetched_today != today:
+                log.info("[global_prefetch] Warming up global market data cache...")
+                try:
+                    from .signals.global_influence import GlobalInfluenceSignal
+                    _global_sig = GlobalInfluenceSignal()
+                    result = await _global_sig.compute()
+                    log.info(
+                        f"[global_prefetch] score={result.score:.3f} "
+                        f"confidence={result.confidence:.2f} "
+                        f"driver={result.dominant_driver} "
+                        f"markets_fetched={len(result.markets)}"
+                    )
+                    _fetched_today = today
+                except Exception as e:
+                    log.warning(f"[global_prefetch] Failed to fetch global markets: {e}")
+            
+            await asyncio.sleep(300)  # Check every 5 minutes
+
+        except Exception as e:
+            log.error(f"Global market prefetch loop error: {e}")
+            await asyncio.sleep(300)
+
+
 async def start_all():
     """Launch all background tasks. Call from FastAPI lifespan."""
     asyncio.create_task(oi_snapshot_loop())
@@ -591,6 +632,7 @@ async def start_all():
     asyncio.create_task(accuracy_price_updater_loop())
     asyncio.create_task(ml_retrain_loop())
     asyncio.create_task(retrain_ml_model_weekly())
-    log.info("All scheduler tasks started (including Trade Tracker & ML Retraining).")
+    asyncio.create_task(global_market_prefetch_loop())
+    log.info("All scheduler tasks started (including Trade Tracker, ML Retraining & Global Prefetch).")
 
 

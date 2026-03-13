@@ -13,6 +13,10 @@ from zoneinfo import ZoneInfo
 # Timezone for market time calculations
 _IST = ZoneInfo("Asia/Kolkata")
 
+# OI Velocity singleton for tracking velocity across scans
+from backend.signals.oi_velocity import OiVelocitySignal
+_oi_velocity = OiVelocitySignal()
+
 # ── Strike Intervals ──────────────────────────────────────────────────────────
 STRIKE_INTERVALS = {
     "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25,
@@ -192,10 +196,12 @@ def oi_walls(records: list, spot: float, n: int = 3) -> dict:
 DEFAULT_LOT_SIZE = {"NIFTY": 50, "BANKNIFTY": 15, "FINNIFTY": 25}
 
 REGIME_WEIGHTS = {
-    "PINNED":   {"gex": 0.30, "vol_pcr": 0.10, "dwoi": 0.40, "skew": 0.10, "buildup": 0.10},
-    "TRENDING": {"gex": 0.15, "vol_pcr": 0.25, "dwoi": 0.15, "skew": 0.20, "buildup": 0.25},
-    "EXPIRY":   {"gex": 0.10, "vol_pcr": 0.40, "dwoi": 0.10, "skew": 0.10, "buildup": 0.30},
-    "SQUEEZE":  {"gex": 0.40, "vol_pcr": 0.30, "dwoi": 0.10, "skew": 0.10, "buildup": 0.10},
+    # oi_velocity takes weight from buildup (which does a weaker version of velocity detection)
+    # global influences market sentiment, weighted higher during trending, lower during pinned/expiry
+    "PINNED":   {"gex": 0.30, "vol_pcr": 0.08, "dwoi": 0.35, "skew": 0.07, "buildup": 0.02, "oi_velocity": 0.10, "global": 0.08},
+    "TRENDING": {"gex": 0.12, "vol_pcr": 0.18, "dwoi": 0.12, "skew": 0.15, "buildup": 0.15, "oi_velocity": 0.13, "global": 0.15},
+    "EXPIRY":   {"gex": 0.08, "vol_pcr": 0.35, "dwoi": 0.08, "skew": 0.07, "buildup": 0.20, "oi_velocity": 0.17, "global": 0.05},
+    "SQUEEZE":  {"gex": 0.35, "vol_pcr": 0.25, "dwoi": 0.08, "skew": 0.07, "buildup": 0.05, "oi_velocity": 0.10, "global": 0.10},
 }
 
 PCR_BULLISH_THRESHOLD = 1.2
@@ -434,7 +440,9 @@ def compute_stock_score_v2(
     expiry_str:  str   = "",
     iv_rank_data: dict = None,
     prev_chain_data: dict = None,
-    fii_net: float = 0.0
+    fii_net: float = 0.0,
+    global_score: float = 0.0,
+    global_confidence: float = 0.0
 ) -> dict:
     
     records = chain_data.get("records", {}).get("data", [])
@@ -446,6 +454,16 @@ def compute_stock_score_v2(
     )
     if not records or spot <= 0:
         return _empty
+    
+    # Push OI snapshot to velocity tracker for this symbol
+    _oi_velocity.push_snapshot(
+        symbol=symbol,
+        records=records,
+        spot=spot,
+        timestamp=datetime.now(_IST)
+    )
+    # Compute OI velocity signal
+    velocity_result = _oi_velocity.compute(symbol, records, spot)
         
     dte = days_to_expiry(expiry_str) if expiry_str else 5
     is_expiry_day = (dte <= 1)  # Consider DTE 0 or 1 as expiry day
@@ -554,13 +572,40 @@ def compute_stock_score_v2(
     sub_skew    = 100 - skew_data["skew_percentile"]
     sub_build   = 100 if factors[4] == 1 else (0 if factors[4] == -1 else 50)
     
+    # OI Velocity sub-score: Convert -1..+1 to 10..90 range
+    sub_velocity = 50 + (velocity_result.score * 40)
+    sub_velocity = max(0, min(100, sub_velocity))
+    
+    # Global influence sub-score: Convert -1..+1 to 10..90 range
+    sub_global = 50 + (global_score * 40)
+    sub_global = max(0, min(100, sub_global))
+    
     weighted_score = (
-        (sub_gex     * weights["gex"]) +
-        (sub_volpcr  * weights["vol_pcr"]) +
-        (sub_dwoipcr * weights["dwoi"]) +
-        (sub_skew    * weights["skew"]) +
-        (sub_build   * weights["buildup"])
+        (sub_gex      * weights["gex"]) +
+        (sub_volpcr   * weights["vol_pcr"]) +
+        (sub_dwoipcr  * weights["dwoi"]) +
+        (sub_skew     * weights["skew"]) +
+        (sub_build    * weights["buildup"]) +
+        (sub_velocity * weights["oi_velocity"]) +
+        (sub_global   * weights["global"])
     )
+    
+    # UOA override: if UOA detected with high confidence, boost/dampen score
+    uoa_detected = False
+    uoa_strike = None
+    uoa_side = None
+    if velocity_result.is_uoa and velocity_result.confidence > 0.6:
+        uoa_boost = 8 if velocity_result.score > 0 else -8
+        weighted_score = max(0, min(100, weighted_score + uoa_boost))
+        uoa_detected = True
+        uoa_strike = velocity_result.top_strike
+        uoa_side = "CE" if velocity_result.top_ce_velocity > abs(velocity_result.top_pe_velocity) else "PE"
+    
+    # Pre-market double weight for global cues (09:00–09:45 IST)
+    now_ist = datetime.now(_IST).time()
+    if dtime(9, 0) <= now_ist <= dtime(9, 45) and global_confidence > 0.3:
+        # Boost the global component influence during pre-market/opening
+        weighted_score = (weighted_score * 0.80) + (sub_global * 0.20)
     
     if direction == "BEARISH" and fii_net < 0 and symbol in ["NIFTY", "BANKNIFTY"]:
         weighted_score = max(0, weighted_score / 1.15)
@@ -625,6 +670,15 @@ def compute_stock_score_v2(
             "vol_pcr": round(vol_pcr, 2),
             "dwoi_pcr": round(dwoi_pcr, 2),
             "iv_skew": round(skew_data["skew_value"], 2)
-        }
+        },
+        # OI Velocity output
+        oi_velocity_score  = velocity_result.score,
+        oi_velocity_conf   = velocity_result.confidence,
+        oi_velocity_reason = velocity_result.reason,
+        uoa_detected       = uoa_detected,
+        uoa_strike         = uoa_strike,
+        uoa_side           = uoa_side,
+        # Global influence output (passed through from main.py)
+        global_score       = global_score,
     )
 

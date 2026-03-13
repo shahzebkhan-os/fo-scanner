@@ -106,7 +106,7 @@ def _load_training_data(db_path: str = None) -> tuple:
     df["max_pain_distance"] = ((df["spot_price"] - df["max_pain"])
                                / df["spot_price"].replace(0, np.nan) * 100).fillna(0)
     
-    # Features list - expanded from 5 to 13
+    # Features list - expanded from 5 to 13 + OI velocity/global influence
     FEATURES = [
         # Original 5 (keep all)
         "weighted_score", "gex", "iv_skew", "pcr", "regime_encoded",
@@ -116,6 +116,8 @@ def _load_training_data(db_path: str = None) -> tuple:
         "hour_sin", "hour_cos", "day_of_week",
         # New price context
         "price_momentum_5", "volume_ratio", "max_pain_distance",
+        # OI Velocity + Global Influence features (new)
+        "oi_velocity_score", "uoa_detected", "global_score", "is_premarket",
     ]
     # Only use available columns (graceful degradation for older databases)
     FEATURES = [f for f in FEATURES if f in df.columns]

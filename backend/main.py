@@ -20,9 +20,13 @@ from .cache import cache
 from .ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status, predict_ensemble
 from .historical_loader import get_backfill_progress, run_backfill_with_progress, reset_backfill_progress
 from .signals.engine import MasterSignalEngine
+from .signals.global_influence import GlobalInfluenceSignal, get_global_influence
 
 # Module-level singleton for 12-signal engine (Phase 1A)
 _signal_engine = MasterSignalEngine()
+
+# Module-level singleton for global market influence (OI Velocity + Global prompt)
+_global_influence = GlobalInfluenceSignal()
 
 # ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
 # Bug 6 fix: tracks which trades have already been entered today
@@ -636,6 +640,18 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
 
     _maybe_reset_daily()                        # Bug 6 fix: reset dedup sets on new day
 
+    # Fetch global market influence before processing symbols (OI Velocity + Global prompt)
+    try:
+        global_result = await asyncio.wait_for(_global_influence.compute(), timeout=10.0)
+        global_score = global_result.score
+        global_conf = global_result.confidence
+        log.info(f"  Global influence: score={global_score:.3f} conf={global_conf:.2f} driver={global_result.dominant_driver}")
+    except Exception as e:
+        log.warning(f"  Global influence fetch failed (non-fatal): {e}")
+        global_result = None
+        global_score = 0.0
+        global_conf = 0.0
+
     ltp_map = await fetch_indstocks_ltp(all_symbols)
     sem = asyncio.Semaphore(3)
     
@@ -656,12 +672,25 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 spot     = records.get("underlyingValue") or live.get("ltp") or 0
                 expiries = records.get("expiryDates", [])
 
-                # Analytics v4 args mapping
+                # Analytics v4 args mapping - pass global score to compute_stock_score
                 ivr   = db.get_iv_rank(symbol)
                 exp   = expiries[0] if expiries else ""
-                stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
+                stats = compute_stock_score(
+                    cj, float(spot or 1), symbol, exp, ivr, 
+                    prev_chain_data=None, fii_net=0.0,
+                    global_score=global_score, global_confidence=global_conf
+                )
                 if not spot:
                     return None
+                
+                # Add global market info to stats
+                if global_result:
+                    stats["global_driver"] = global_result.dominant_driver
+                    stats["global_markets"] = [
+                        {"name": m.name, "pct": m.pct_change, "signal": m.signal_contribution}
+                        for m in (global_result.markets or [])[:5]  # Top 5 only
+                    ]
+                    stats["is_premarket"] = global_result.is_premarket
                 
                 # Get option chain records for signal engine
                 chain_records = records.get("data", [])
