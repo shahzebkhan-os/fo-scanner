@@ -950,6 +950,74 @@ async def get_trade_history(trade_id: int):
     return {"trade_id": trade_id, "history": history}
 
 
+# ── Trade Tracker (Today's Live Trades) ───────────────────────────────────────
+
+@app.get("/api/trade-tracker/latest")
+async def get_latest_tracked_trades():
+    """Returns the latest snapshot from today with all trades and their current prices."""
+    latest_snapshot = db.get_latest_accuracy_snapshot()
+    if not latest_snapshot:
+        return {
+            "status": "empty",
+            "message": "No trades tracked today yet. Snapshots are taken every 15 minutes during market hours.",
+            "snapshot": None,
+            "trades": []
+        }
+    
+    # Get the full details for this snapshot
+    details = db.get_accuracy_snapshot_details(latest_snapshot["id"])
+    if not details:
+        return {
+            "status": "empty",
+            "message": "No trades found",
+            "snapshot": latest_snapshot,
+            "trades": []
+        }
+    
+    # Add performance calculations
+    for t in details["trades"]:
+        entry = t.get("entry_price", 0) or 0.01
+        current = t.get("current_price", entry)
+        t["pnl_pct"] = round(((current - entry) / entry) * 100, 2) if entry > 0 else 0
+        t["lot_value"] = round(current * (t.get("lot_size", 1) or 1), 2)
+        
+        # Get recent price history for 5m change
+        history = db.get_accuracy_trade_history(t["id"])
+        if len(history) >= 2:
+            prev = history[-2]["price"]
+            curr = history[-1]["price"]
+            t["diff_5m"] = round(curr - prev, 2)
+            t["diff_5m_pct"] = round((t["diff_5m"] / prev * 100), 2) if prev > 0 else 0
+        else:
+            t["diff_5m"] = 0
+            t["diff_5m_pct"] = 0
+    
+    return {
+        "status": "ok",
+        "snapshot": details["snapshot"],
+        "trades": details["trades"],
+        "trade_count": len(details["trades"])
+    }
+
+@app.get("/api/trade-tracker/today")
+async def get_all_today_trades():
+    """Returns all trades from all snapshots taken today."""
+    trades = db.get_all_today_accuracy_trades()
+    
+    # Add performance calculations
+    for t in trades:
+        entry = t.get("entry_price", 0) or 0.01
+        current = t.get("current_price", entry)
+        t["pnl_pct"] = round(((current - entry) / entry) * 100, 2) if entry > 0 else 0
+        t["lot_value"] = round(current * (t.get("lot_size", 1) or 1), 2)
+    
+    return {
+        "status": "ok",
+        "trades": trades,
+        "trade_count": len(trades)
+    }
+
+
 @app.get("/api/chain/{symbol}")
 async def get_chain(symbol: str, expiry: str = None):
     symbol = symbol.upper()

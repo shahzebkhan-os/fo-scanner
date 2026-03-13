@@ -23,6 +23,7 @@ const TABS = [
   { id: "straddle", label: "Straddle", icon: "⚖" },
   { id: "portfolio", label: "P&L", icon: "💰" },
   { id: "manual", label: "Trade", icon: "🚀" },
+  { id: "tracker", label: "Tracker", icon: "📍" },
   { id: "accuracy", label: "Accuracy", icon: "📈" },
   { id: "backtest", label: "Backtest", icon: "🕰" },
   { id: "strategy", label: "Strategy", icon: "🧪" },
@@ -223,6 +224,7 @@ export default function App() {
         <div style={{ display: tab === "straddle"  ? "block" : "none" }}><StraddleTab theme={theme} /></div>
         <div style={{ display: tab === "portfolio" ? "block" : "none" }}><PortfolioTab theme={theme} /></div>
         <div style={{ display: tab === "manual"    ? "block" : "none" }}><ManualTradeTab theme={theme} /></div>
+        <div style={{ display: tab === "tracker"   ? "block" : "none" }}><TradeTrackerTab theme={theme} /></div>
         <div style={{ display: tab === "accuracy"  ? "block" : "none" }}><AccuracyTab theme={theme} /></div>
         <div style={{ display: tab === "backtest"  ? "block" : "none" }}><BacktestTab theme={theme} /></div>
         <div style={{ display: tab === "strategy"  ? "block" : "none" }}><StrategyBuilder /></div>
@@ -1926,6 +1928,282 @@ function PortfolioTab({ theme }) {
 // Settings Tab
 // ══════════════════════════════════════════════════════════════════════════════
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Trade Tracker Tab - Live Tracking of Scanner Trades (every 15 min)
+// ══════════════════════════════════════════════════════════════════════════════
+
+function TradeTrackerTab({ theme }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [countdown, setCountdown] = useState(60);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [sortConfig, setSortConfig] = useState({ key: 'pnl_pct', direction: 'desc' });
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await apiFetch("/api/trade-tracker/latest");
+      setData(res);
+      setCountdown(60);
+    } catch (e) {
+      console.error("Failed to load tracker data:", e);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Auto-refresh every 60 seconds
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const interval = setInterval(() => {
+      setCountdown(c => {
+        if (c <= 1) {
+          load();
+          return 60;
+        }
+        return c - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [autoRefresh, load]);
+
+  const sortedTrades = useMemo(() => {
+    if (!data?.trades) return [];
+    let sortable = [...data.trades];
+    if (sortConfig.key !== null) {
+      sortable.sort((a, b) => {
+        let aVal = a[sortConfig.key];
+        let bVal = b[sortConfig.key];
+        if (aVal == null) aVal = 0;
+        if (bVal == null) bVal = 0;
+        if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return sortable;
+  }, [data, sortConfig]);
+
+  const requestSort = (key) => {
+    let direction = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
+    setSortConfig({ key, direction });
+  };
+
+  // Summary stats
+  const stats = useMemo(() => {
+    if (!data?.trades?.length) return null;
+    const trades = data.trades;
+    const winners = trades.filter(t => t.pnl_pct > 0).length;
+    const losers = trades.filter(t => t.pnl_pct < 0).length;
+    const avgPnl = trades.reduce((sum, t) => sum + (t.pnl_pct || 0), 0) / trades.length;
+    const bestTrade = trades.reduce((best, t) => (t.pnl_pct > (best?.pnl_pct || -Infinity)) ? t : best, null);
+    const worstTrade = trades.reduce((worst, t) => (t.pnl_pct < (worst?.pnl_pct || Infinity)) ? t : worst, null);
+    return { total: trades.length, winners, losers, avgPnl, bestTrade, worstTrade };
+  }, [data]);
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 20, alignItems: "center", flexWrap: "wrap" }}>
+        <h2 style={{ margin: 0, fontSize: 18, color: theme.accent }}>📍 Trade Tracker</h2>
+        <div style={{ fontSize: 11, color: theme.muted }}>
+          Auto-tracked every 15 min during market hours
+        </div>
+        <div style={{ flex: 1 }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label style={{ fontSize: 11, color: theme.muted, display: "flex", alignItems: "center", gap: 4 }}>
+            <input 
+              type="checkbox" 
+              checked={autoRefresh} 
+              onChange={e => setAutoRefresh(e.target.checked)}
+              style={{ accentColor: theme.accent }}
+            />
+            Auto-refresh
+          </label>
+          <span style={{ fontSize: 11, color: theme.muted }}>
+            {autoRefresh && `(${countdown}s)`}
+          </span>
+        </div>
+        <button onClick={() => { load(); setCountdown(60); }} disabled={loading}
+          className="clickable-btn"
+          style={{
+            padding: "8px 16px", borderRadius: 6, background: theme.accent,
+            color: "#fff", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600,
+            opacity: loading ? 0.6 : 1
+          }}>
+          {loading ? "⟳ Loading..." : "⟳ Refresh"}
+        </button>
+      </div>
+
+      {/* Empty State */}
+      {data?.status === "empty" && (
+        <Card theme={theme} style={{ textAlign: "center", padding: 60, color: theme.muted }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>📍</div>
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>No trades tracked today yet</div>
+          <div style={{ fontSize: 13 }}>{data.message}</div>
+          <div style={{ fontSize: 11, marginTop: 12, color: theme.accent }}>
+            Scanner will automatically track trades during market hours (9:15 AM - 3:30 PM IST)
+          </div>
+        </Card>
+      )}
+
+      {/* Loading */}
+      {loading && !data && <Loader theme={theme} />}
+
+      {/* Data View */}
+      {data?.status === "ok" && data.trades?.length > 0 && (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          {/* Snapshot Info & Stats */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 20 }}>
+            <Card theme={theme} style={{ padding: 14, textAlign: "center" }}>
+              <div style={{ fontSize: 10, color: theme.muted, marginBottom: 4 }}>SNAPSHOT TIME</div>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>
+                {new Date(data.snapshot.timestamp + (data.snapshot.timestamp.endsWith("Z") ? "" : "Z")).toLocaleTimeString("en-IN", {
+                  hour: '2-digit', minute: '2-digit'
+                })}
+              </div>
+            </Card>
+            <Card theme={theme} style={{ padding: 14, textAlign: "center" }}>
+              <div style={{ fontSize: 10, color: theme.muted, marginBottom: 4 }}>TRADES</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: theme.accent }}>{stats?.total || 0}</div>
+            </Card>
+            <Card theme={theme} style={{ padding: 14, textAlign: "center" }}>
+              <div style={{ fontSize: 10, color: theme.muted, marginBottom: 4 }}>WINNERS</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: theme.green }}>{stats?.winners || 0}</div>
+            </Card>
+            <Card theme={theme} style={{ padding: 14, textAlign: "center" }}>
+              <div style={{ fontSize: 10, color: theme.muted, marginBottom: 4 }}>LOSERS</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: theme.red }}>{stats?.losers || 0}</div>
+            </Card>
+            <Card theme={theme} style={{ padding: 14, textAlign: "center" }}>
+              <div style={{ fontSize: 10, color: theme.muted, marginBottom: 4 }}>AVG P&L</div>
+              <div style={{ 
+                fontSize: 18, fontWeight: 700, 
+                color: (stats?.avgPnl || 0) >= 0 ? theme.green : theme.red 
+              }}>
+                {(stats?.avgPnl || 0) >= 0 ? "+" : ""}{fmt(stats?.avgPnl || 0, 1)}%
+              </div>
+            </Card>
+          </div>
+
+          {/* Trades Table */}
+          <Card theme={theme} style={{ padding: 0, overflow: "hidden" }}>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr style={{ color: theme.muted, borderBottom: `2px solid ${theme.border}`, textAlign: "left", background: theme.bg }}>
+                    {[
+                      { label: "Symbol", key: "symbol" },
+                      { label: "Signal", key: "signal" },
+                      { label: "Option", key: "strike" },
+                      { label: "Score", key: "score", align: "center" },
+                      { label: "Entry", key: "entry_price", align: "right" },
+                      { label: "LTP", key: "current_price", align: "right" },
+                      { label: "5m Chg", key: "diff_5m_pct", align: "right" },
+                      { label: "P&L %", key: "pnl_pct", align: "right" },
+                      { label: "Lot Value", key: "lot_value", align: "right" },
+                    ].map(({ label, key, align }) => (
+                      <th 
+                        key={key} 
+                        onClick={() => requestSort(key)}
+                        style={{ 
+                          padding: "12px 14px", textAlign: align || "left", 
+                          cursor: "pointer", userSelect: "none",
+                          fontSize: 11, fontWeight: 600
+                        }}
+                        onMouseOver={e => e.currentTarget.style.color = theme.text}
+                        onMouseOut={e => e.currentTarget.style.color = theme.muted}
+                      >
+                        {label} {sortConfig.key === key ? (sortConfig.direction === "asc" ? "▲" : "▼") : "↕"}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedTrades.map((t, idx) => {
+                    const pnlColor = (t.pnl_pct || 0) > 0 ? theme.green : (t.pnl_pct || 0) < 0 ? theme.red : theme.muted;
+                    const diffColor = (t.diff_5m_pct || 0) > 0 ? theme.green : (t.diff_5m_pct || 0) < 0 ? theme.red : theme.muted;
+                    const signalBgColor = t.signal === "BULLISH" ? "rgba(34,197,94,.1)" : t.signal === "BEARISH" ? "rgba(239,68,68,.1)" : "transparent";
+                    const signalTextColor = t.signal === "BULLISH" ? theme.green : t.signal === "BEARISH" ? theme.red : theme.muted;
+
+                    return (
+                      <tr 
+                        key={idx} 
+                        className="trade-row"
+                        style={{ 
+                          borderBottom: `1px solid ${theme.border}`,
+                          transition: "background 0.15s"
+                        }}
+                        onMouseOver={e => e.currentTarget.style.background = theme.bg}
+                        onMouseOut={e => e.currentTarget.style.background = "transparent"}
+                      >
+                        <td style={{ padding: "12px 14px", fontWeight: 600 }}>{t.symbol}</td>
+                        <td style={{ padding: "12px 14px" }}>
+                          <span style={{
+                            fontSize: 10, padding: "3px 8px", borderRadius: 4,
+                            background: signalBgColor, color: signalTextColor, fontWeight: 600
+                          }}>
+                            {t.signal}
+                          </span>
+                        </td>
+                        <td style={{ padding: "12px 14px" }}>
+                          <span style={{ fontWeight: 500 }}>{t.strike}</span>
+                          <span style={{ 
+                            marginLeft: 6, fontSize: 10, padding: "2px 6px", borderRadius: 3,
+                            background: t.type === "CE" ? "rgba(34,197,94,.1)" : "rgba(239,68,68,.1)",
+                            color: t.type === "CE" ? theme.green : theme.red,
+                            fontWeight: 600
+                          }}>
+                            {t.type}
+                          </span>
+                        </td>
+                        <td style={{ padding: "12px 14px", textAlign: "center" }}>
+                          <span style={{
+                            fontSize: 11, padding: "3px 8px", borderRadius: 4,
+                            background: t.score >= 85 ? "rgba(34,197,94,.15)" : t.score >= 70 ? "rgba(99,102,241,.15)" : "rgba(148,163,184,.1)",
+                            color: t.score >= 85 ? theme.green : t.score >= 70 ? theme.accent : theme.muted,
+                            fontWeight: 600
+                          }}>
+                            {t.score}
+                          </span>
+                        </td>
+                        <td style={{ padding: "12px 14px", textAlign: "right", fontFamily: "monospace" }}>
+                          ₹{fmt(t.entry_price)}
+                        </td>
+                        <td style={{ padding: "12px 14px", textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>
+                          ₹{fmt(t.current_price)}
+                        </td>
+                        <td style={{ padding: "12px 14px", textAlign: "right", fontFamily: "monospace", color: diffColor, fontSize: 11 }}>
+                          {(t.diff_5m_pct || 0) >= 0 ? "+" : ""}{fmt(t.diff_5m_pct || 0, 1)}%
+                        </td>
+                        <td style={{ padding: "12px 14px", textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: pnlColor }}>
+                          {(t.pnl_pct || 0) >= 0 ? "+" : ""}{fmt(t.pnl_pct || 0, 1)}%
+                        </td>
+                        <td style={{ padding: "12px 14px", textAlign: "right", fontFamily: "monospace", fontSize: 11 }}>
+                          ₹{(t.lot_value || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+
+          {/* Footer info */}
+          <div style={{ marginTop: 16, fontSize: 11, color: theme.muted, textAlign: "center" }}>
+            💡 Trades are automatically sampled from scanner every 15 minutes. LTP is updated every 5 minutes during market hours.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Accuracy Tracker Tab

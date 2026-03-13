@@ -479,6 +479,34 @@ def delete_accuracy_snapshot(snapshot_id: int):
         c.execute("DELETE FROM accuracy_snapshots WHERE id=?", (snapshot_id,))
     return True
 
+def get_latest_accuracy_snapshot():
+    """Returns the most recent snapshot from today, or None if no snapshots exist today."""
+    with _conn() as c:
+        snapshot = c.execute("""
+            SELECT s.*, (SELECT COUNT(*) FROM accuracy_trades WHERE snapshot_id = s.id) as trade_count
+            FROM accuracy_snapshots s
+            WHERE date(s.timestamp) = date('now')
+            ORDER BY s.timestamp DESC
+            LIMIT 1
+        """).fetchone()
+        if not snapshot:
+            return None
+        return dict(snapshot)
+
+def get_all_today_accuracy_trades():
+    """Returns all accuracy trades from all snapshots taken today, with latest prices."""
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT 
+                t.*,
+                s.timestamp as snapshot_time
+            FROM accuracy_trades t
+            JOIN accuracy_snapshots s ON t.snapshot_id = s.id
+            WHERE date(s.timestamp) = date('now')
+            ORDER BY t.symbol ASC, s.timestamp DESC
+        """).fetchall()
+    return [dict(r) for r in rows]
+
 def get_accuracy_snapshot_details(snapshot_id):
     with _conn() as c:
         snapshot = c.execute("SELECT * FROM accuracy_snapshots WHERE id=?", (snapshot_id,)).fetchone()
