@@ -58,7 +58,9 @@ class OiVelocitySignal(BaseSignal):
         for row in records:
             strike = row.get("strikePrice", 0)
             # Only store strikes within ATM_BAND_PCT * 3 of spot (reduces memory)
-            if spot <= 0 or abs(strike - spot) / spot > ATM_BAND_PCT * 3:
+            if spot <= 0:
+                continue
+            if abs(strike - spot) / spot > ATM_BAND_PCT * 3:
                 continue
             oi_map[strike] = {
                 "ce": (row.get("CE") or {}).get("openInterest", 0) or 0,
