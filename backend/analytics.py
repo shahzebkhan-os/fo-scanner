@@ -412,7 +412,8 @@ def compute_stock_score_v2(
         timestamp=datetime.now(_IST),
     )
     # Compute velocity signal
-    velocity_result = _oi_velocity._compute_velocity(symbol, records, spot)
+    velocity_signal = _oi_velocity.compute(symbol=symbol, records=records, spot=spot)
+    velocity_meta = velocity_signal.metadata
 
     dte = days_to_expiry(expiry_str) if expiry_str else 5
     iv_rank = (iv_rank_data or {}).get("iv_rank", 50.0)
@@ -519,7 +520,7 @@ def compute_stock_score_v2(
     sub_dwoipcr = min(100, max(0, dwoi_pcr * 50))
     sub_skew    = 100 - skew_data["skew_percentile"]
     sub_build   = 100 if factors[4] == 1 else (0 if factors[4] == -1 else 50)
-    sub_velocity = max(0, min(100, 50 + (velocity_result.score * 40)))
+    sub_velocity = max(0, min(100, 50 + (velocity_signal.score * 40)))
     
     weighted_score = (
         (sub_gex      * weights["gex"]) +
@@ -534,8 +535,9 @@ def compute_stock_score_v2(
         weighted_score = max(0, weighted_score / 1.15)
 
     # UOA override: if UOA detected with high confidence, boost/dampen score
-    if velocity_result.is_uoa and velocity_result.confidence > 0.6:
-        uoa_boost = 8 if velocity_result.score > 0 else -8
+    UOA_SCORE_BOOST = 8  # Points added/subtracted when institutional UOA detected
+    if velocity_meta.get("is_uoa") and velocity_signal.confidence > 0.6:
+        uoa_boost = UOA_SCORE_BOOST if velocity_signal.score > 0 else -UOA_SCORE_BOOST
         weighted_score = max(0, min(100, weighted_score + uoa_boost))
         
     def _directional_picks(options, signal):
@@ -576,10 +578,12 @@ def compute_stock_score_v2(
 
     # Build UOA stats for frontend
     uoa_stats = {}
-    if velocity_result.is_uoa and velocity_result.confidence > 0.6:
+    if velocity_meta.get("is_uoa") and velocity_signal.confidence > 0.6:
         uoa_stats["uoa_detected"] = True
-        uoa_stats["uoa_strike"] = velocity_result.top_strike
-        uoa_stats["uoa_side"] = "CE" if velocity_result.top_ce_velocity > abs(velocity_result.top_pe_velocity) else "PE"
+        uoa_stats["uoa_strike"] = velocity_meta.get("top_strike")
+        ce_v = abs(velocity_meta.get("top_ce_velocity", 0))
+        pe_v = abs(velocity_meta.get("top_pe_velocity", 0))
+        uoa_stats["uoa_side"] = "CE" if ce_v > pe_v else "PE"
 
     return dict(
         pcr            = round(pcr, 3),
@@ -603,9 +607,9 @@ def compute_stock_score_v2(
             "dwoi_pcr": round(dwoi_pcr, 2),
             "iv_skew": round(skew_data["skew_value"], 2)
         },
-        oi_velocity_score  = velocity_result.score,
-        oi_velocity_conf   = velocity_result.confidence,
-        oi_velocity_reason = velocity_result.reason,
+        oi_velocity_score  = velocity_signal.score,
+        oi_velocity_conf   = velocity_signal.confidence,
+        oi_velocity_reason = velocity_signal.reason,
         **uoa_stats,
     )
 

@@ -144,8 +144,16 @@ class OiVelocitySignal(BaseSignal):
                     all_ce_v.append(abs(oi1[s]["ce"] - oi0[s]["ce"]) / dt)
                     all_pe_v.append(abs(oi1[s]["pe"] - oi0[s]["pe"]) / dt)
 
-        rolling_ce_mean = float(np.mean(all_ce_v)) if all_ce_v else 1.0
-        rolling_pe_mean = float(np.mean(all_pe_v)) if all_pe_v else 1.0
+        rolling_ce_mean = float(np.mean(all_ce_v)) if all_ce_v else 0.0
+        rolling_pe_mean = float(np.mean(all_pe_v)) if all_pe_v else 0.0
+
+        # Need meaningful rolling history to compute spike ratios
+        if rolling_ce_mean == 0.0 and rolling_pe_mean == 0.0:
+            return VelocityResult(
+                score=0.0,
+                confidence=0.0,
+                reason="insufficient_rolling_history",
+            )
 
         # Find strike with maximum velocity
         top_ce_strike = max(ce_velocities, key=lambda s: abs(ce_velocities[s]))
@@ -161,8 +169,10 @@ class OiVelocitySignal(BaseSignal):
         is_uoa = max(ce_spike, pe_spike) >= UOA_THRESHOLD
 
         # Score: positive = call velocity dominant (bullish), negative = put (bearish)
+        # Use rolling mean as scaling factor so tanh spreads across the velocity range
         net_velocity = top_ce_v - top_pe_v
-        raw_score = float(np.tanh(net_velocity / max(abs(net_velocity), 1.0)))
+        scaling_factor = max(rolling_ce_mean, rolling_pe_mean, 1.0)
+        raw_score = float(np.tanh(net_velocity / scaling_factor))
 
         # Confidence: scales with spike extremity, capped at 0.95
         max_spike = max(ce_spike, pe_spike, 0.001)
