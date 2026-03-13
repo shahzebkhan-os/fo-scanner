@@ -495,6 +495,31 @@ async def accuracy_price_updater_loop():
 # Task 9: ML Model Retraining (daily at 15:45)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _check_ml_retrain_result(result: dict, context: str = "ml_retrain") -> bool:
+    """
+    Helper to check ML retraining result and log appropriately.
+    Returns True if training was successful, False otherwise.
+    
+    Quality threshold: cv_loss < 0.693 (better than random guessing)
+    Why 0.693? log(2) ≈ 0.693 = binary cross-entropy for a model that
+    always predicts 0.5 (pure random guessing).
+    """
+    if "error" in result:
+        log.error(f"[{context}] ML retraining failed: {result['error']}")
+        return False
+    
+    cv_loss = result.get("cv_log_loss_mean", 1.0)
+    if cv_loss < 0.693:
+        log.info(f"[{context}] Success. CV loss: {cv_loss:.4f}, Rows: {result.get('training_rows')}")
+        return True
+    else:
+        log.warning(
+            f"[{context}] Quality check failed (loss={cv_loss:.4f} >= random 0.693). "
+            f"Keeping existing model."
+        )
+        return False
+
+
 async def ml_retrain_loop():
     """Retrains the LightGBM model once daily after market close."""
     log.info("ML retrain loop started.")
@@ -510,21 +535,8 @@ async def ml_retrain_loop():
                 log.info("Starting daily ML model retraining...")
                 if _ml_train_fn:
                     res = await asyncio.to_thread(_ml_train_fn)
-                    cv_loss = res.get("cv_log_loss_mean", 1.0)
-                    
-                    if "error" in res:
-                        log.error(f"ML retraining failed: {res['error']}")
-                    elif cv_loss < 0.693:
-                        # Quality check passed (better than random guessing)
-                        log.info(f"ML retraining done: Loss {cv_loss:.4f}, Rows {res.get('training_rows')}")
-                        _trained_today = today
-                    else:
-                        # Quality check failed - model no better than random
-                        log.warning(
-                            f"[ml_retrain] Quality check failed (loss={cv_loss:.4f} >= random 0.693). "
-                            f"Keeping existing model."
-                        )
-                        _trained_today = today  # Still mark as trained to avoid retrying
+                    _check_ml_retrain_result(res, "ml_retrain_daily")
+                    _trained_today = today  # Mark as trained regardless of success
 
             await asyncio.sleep(600)   # check every 10 min
 
@@ -540,9 +552,6 @@ async def retrain_ml_model_weekly():
     """
     Retrain every Sunday at 22:00 IST with latest market_snapshots.
     Only replaces the saved model if new CV loss < 0.693.
-
-    Why 0.693? log(2) ≈ 0.693 = binary cross-entropy for a model that
-    always predicts 0.5 (pure random guessing). Any useful model beats this.
     """
     log.info("Weekly ML retrain loop started.")
     _last_sunday_retrain = None
@@ -560,17 +569,7 @@ async def retrain_ml_model_weekly():
                 log.info("[ml_retrain_weekly] Starting Sunday ML model retraining...")
                 if _ml_train_fn:
                     result = await asyncio.to_thread(_ml_train_fn)
-                    cv_loss = result.get("cv_log_loss_mean", 1.0)
-
-                    if "error" in result:
-                        log.warning(f"[ml_retrain_weekly] Skipped: {result['error']}")
-                    elif cv_loss < 0.693:
-                        log.info(f"[ml_retrain_weekly] Success. CV loss: {cv_loss:.4f}, rows: {result.get('training_rows')}")
-                    else:
-                        log.warning(
-                            f"[ml_retrain_weekly] Quality check failed (loss={cv_loss:.4f} >= random 0.693). "
-                            f"Keeping existing model."
-                        )
+                    _check_ml_retrain_result(result, "ml_retrain_weekly")
                     _last_sunday_retrain = today
 
             await asyncio.sleep(3600)  # Check every hour

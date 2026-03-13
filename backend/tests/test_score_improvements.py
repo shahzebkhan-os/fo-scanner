@@ -25,7 +25,7 @@ class TestTimeOfDayAdjustment:
         with patch("backend.analytics.datetime") as mock_dt:
             mock_dt.now.return_value = self._mock_time(9, 45)
             result = _time_of_day_adjustment(100)
-        assert result <= 86  # 15% discount: 100 * 0.85 = 85
+        assert 84 <= result <= 86  # 15% discount: 100 * 0.85 = 85 (accounting for rounding)
 
     def test_normal_hours_no_discount(self):
         """No discount during normal trading hours (12:00)."""

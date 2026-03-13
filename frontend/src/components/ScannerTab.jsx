@@ -202,7 +202,7 @@ function ScanCard({ r, theme, onChain, onGreeks, isWatched, onToggleWL }) {
                       padding: "2px 4px", borderBottom: "1px solid rgba(255,255,255,.05)",
                       color: sig.score > 0.3 ? "#22c55e" : sig.score < -0.3 ? "#ef4444" : theme.muted
                     }}>
-                      {Math.round(sig.score * 100)}
+                      {sig.score > 0 ? '+' : ''}{Math.round(sig.score * 100)}
                     </td>
                     <td style={{ padding: "2px 4px", borderBottom: "1px solid rgba(255,255,255,.05)", color: theme.muted }}>
                       {Math.round(sig.confidence * 100)}%

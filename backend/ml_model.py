@@ -313,7 +313,8 @@ def predict_ensemble(features: dict, quant_score: float, engine_score: float = N
     quant_w  = 0.50
     ml_w     = 0.30 * ml_conf
     engine_w = 0.20 if engine_score is not None else 0.0
-    total_w  = quant_w + ml_w + engine_w or 1.0
+    weight_sum = quant_w + ml_w + engine_w
+    total_w  = weight_sum if weight_sum > 0 else 1.0
 
     blend = {
         "quant":  quant_w  / total_w,
