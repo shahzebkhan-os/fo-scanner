@@ -37,6 +37,7 @@ NN_META_PATH = Path(os.path.dirname(__file__)) / "models" / "nn_meta.pkl"
 SEQ_LEN = 10  # sliding-window length (number of past bars per sample)
 FEATURES = ["weighted_score", "gex", "iv_skew", "pcr", "regime_encoded"]
 MIN_ROWS_TO_TRAIN = 500
+RANDOM_BASELINE_LOSS = 0.693  # ln(2) — log-loss of a coin-flip classifier
 
 
 # ── Model architecture ────────────────────────────────────────────────────────
@@ -203,7 +204,7 @@ def train_nn(db_path: str = None) -> dict:
         y_val_t = torch.tensor(y[val_idx], dtype=torch.float32)
 
         train_ds = TensorDataset(X_train_t, y_train_t)
-        train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=False)  # preserve time order
+        train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=False)  # time-series integrity
 
         best_val_loss = float("inf")
         patience, wait = 5, 0
@@ -237,10 +238,10 @@ def train_nn(db_path: str = None) -> dict:
 
     mean_loss = float(np.mean(val_losses))
 
-    # Only save if better than random (log_loss < 0.693)
-    if mean_loss >= 0.693:
+    # Only save if better than random (log_loss < ln(2))
+    if mean_loss >= RANDOM_BASELINE_LOSS:
         return {
-            "error": f"NN cv_log_loss {mean_loss:.4f} ≥ 0.693 (random baseline). Model not saved.",
+            "error": f"NN cv_log_loss {mean_loss:.4f} ≥ {RANDOM_BASELINE_LOSS} (random baseline). Model not saved.",
             "cv_log_loss_mean": round(mean_loss, 4),
         }
 
@@ -332,7 +333,7 @@ def predict_nn(symbol: str, current_features: dict, db_path: str = None) -> Opti
         conn.close()
 
         if len(rows) < seq_len - 1:
-            return None  # not enough history
+            return None  # need at least seq_len-1 historical bars + 1 live bar
 
         regime_map = {"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3}
 

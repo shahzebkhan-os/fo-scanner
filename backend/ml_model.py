@@ -40,6 +40,7 @@ MIN_ROWS_TO_TRAIN = 500  # Need at least 500 historical snapshots
 # Ensemble blend weights
 LGB_WEIGHT = 0.60
 NN_WEIGHT = 0.40
+assert abs(LGB_WEIGHT + NN_WEIGHT - 1.0) < 1e-9, "Ensemble weights must sum to 1.0"
 
 
 def _load_training_data(db_path: str = None) -> tuple:
