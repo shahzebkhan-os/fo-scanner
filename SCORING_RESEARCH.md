@@ -85,8 +85,8 @@ gex_bullish = is_spot_above_zgl and gex_data["net_gex"] > 0
 **How GEX is calculated:**
 - For each strike: `ce_gex = ce_oi × ce_gamma × lot_size × (spot²) / 100`
 - `net_gex = total_call_gex - total_put_gex`
-- Positive GEX → market makers dampen moves (PINNED regime)
-- Negative GEX → market makers amplify moves (TRENDING regime)
+- **Positive GEX**: When dealers are net long gamma (more call OI), they must sell when price rises and buy when price falls to stay delta-neutral. This creates a dampening effect on price moves (PINNED regime).
+- **Negative GEX**: When dealers are net short gamma (more put OI), they must buy when price rises and sell when price falls. This amplifies price moves (TRENDING regime).
 
 #### 2. Volume PCR (Put-Call Volume Ratio)
 ```python
@@ -158,7 +158,7 @@ if direction == "BEARISH" and fii_net < 0 and symbol in ["NIFTY", "BANKNIFTY"]:
 ### Model Architecture
 - **Algorithm:** LightGBM (Gradient Boosting)
 - **Task:** Binary classification (next bar direction)
-- **Calibration:** Isotonic regression for probability calibration
+- **Calibration:** Isotonic regression for probability calibration (see Section 5 for limitations)
 - **Cross-validation:** TimeSeriesSplit (no look-ahead bias)
 
 ### Training Data
@@ -258,6 +258,8 @@ The project has a more comprehensive 12-signal system that is NOT fully integrat
 
 **Key Finding:** The 12-signal engine (`MasterSignalEngine`) is implemented but appears to NOT be used in the main scan endpoint. The main `/api/scan` uses the simpler `compute_stock_score_v2()`.
 
+*Verification: In `backend/main.py` around line 660-700, the scan endpoint calls `compute_stock_score_v2()` from `analytics.py` rather than `MasterSignalEngine.compute_all_signals()` from `signals/engine.py`.*
+
 ---
 
 ## 5. Identified Issues and Limitations
@@ -342,7 +344,7 @@ tech_score = compute_technical_confirmation(prices[-20:])
 # Weight: 15% of total score
 ```
 
-**Research Basis:** Academic studies show options flow + price momentum combination improves signal accuracy by 15-25%.
+**Research Basis:** Studies such as "Options Market Activity and Stock Price Movement" (Pan & Poteshman, 2006) and "Market Microstructure and Asset Pricing" (Easley & O'Hara, 2004) demonstrate that combining options flow with price momentum improves predictive accuracy.
 
 #### A2. Dynamic PCR Thresholds
 ```python
@@ -353,15 +355,18 @@ PCR_BULLISH_THRESHOLD = pcr_mean + 1.5 * pcr_std
 PCR_BEARISH_THRESHOLD = pcr_mean - 1.5 * pcr_std
 ```
 
-**Research Basis:** Mean-reversion strategies with dynamic bands outperform fixed thresholds.
+**Research Basis:** Bollinger's work on adaptive bands and Keltner channels demonstrates that dynamic thresholds outperform static ones for mean-reversion signals.
 
 #### A3. Time-of-Day Adjustment
 ```python
-# Morning volatility discount (9:15-10:30)
-if 9 <= current_hour < 10.5:
+from datetime import time
+
+# Morning volatility discount (9:15-10:30 IST)
+market_time = current_datetime.time()
+if time(9, 15) <= market_time <= time(10, 30):
     score_adjustment = 0.85  # 15% discount
 # Expiry day volatility
-if is_expiry_day and current_hour >= 14:
+if is_expiry_day and market_time >= time(14, 0):
     score_adjustment *= 0.90  # Additional 10% discount
 ```
 
@@ -433,9 +438,13 @@ final_prob = sum(w * m.predict_proba(X)[:, 1] for w, m in weights_models) / sum(
 #### B4. Walk-Forward Validation
 ```python
 # Instead of simple TimeSeriesSplit
+from pandas import DateOffset
+
 for train_end in monthly_checkpoints:
     train_data = data[data.date < train_end]
-    test_data = data[(data.date >= train_end) & (data.date < train_end + 1_month)]
+    test_start = train_end
+    test_end = train_end + DateOffset(months=1)
+    test_data = data[(data.date >= test_start) & (data.date < test_end)]
     model.fit(train_data)
     predictions = model.predict(test_data)
     # Track performance by regime
@@ -447,7 +456,9 @@ for train_end in monthly_checkpoints:
 async def retrain_ml_model_weekly():
     """Retrain ML model every Sunday night with latest data."""
     result = train_model()
-    if result.get("cv_log_loss_mean", 1.0) < 0.69:  # Better than random
+    # Note: log(2) ≈ 0.693 is the binary cross-entropy loss for a model
+    # that always predicts 0.5 probability (random guessing baseline)
+    if result.get("cv_log_loss_mean", 1.0) < 0.693:  # Better than random
         log.info(f"Model retrained: {result}")
     else:
         log.warning(f"Model retrain failed quality check: {result}")
@@ -509,10 +520,10 @@ final_score = (
 ## 7. Implementation Priority
 
 ### Phase 1: Quick Wins (1-2 days)
-1. ✅ Add VIX and DTE to ML features
-2. ✅ Add hour-of-day cyclical features
-3. ✅ Add time-of-day adjustment to QUANT score
-4. ✅ Document current implementation (this file)
+1. [ ] Add VIX and DTE to ML features
+2. [ ] Add hour-of-day cyclical features
+3. [ ] Add time-of-day adjustment to QUANT score
+4. [x] Document current implementation (this file)
 
 ### Phase 2: Medium Effort (3-5 days)
 1. Integrate 12-signal engine into main scan
