@@ -258,6 +258,38 @@ def init_db():
         ]:
             try: c.execute(f"ALTER TABLE accuracy_trades ADD COLUMN {col} {dtype}")
             except: pass
+    
+    # Phase 2A Migration: Add new ML feature columns to market_snapshots
+    migrate_market_snapshots()
+
+
+def migrate_market_snapshots():
+    """
+    Safe migration — ADD COLUMN IF NOT EXISTS never breaks existing data.
+    Call this during app startup before any queries run.
+    
+    Phase 2A: Add columns for expanded ML features.
+    """
+    new_columns = [
+        ("vix",                "REAL DEFAULT 15.0"),
+        ("max_pain",           "REAL"),
+        ("volume_ratio",       "REAL DEFAULT 1.0"),
+        ("engine_score",       "REAL"),
+        ("engine_confidence",  "REAL"),
+        ("ensemble_score",     "REAL"),
+    ]
+    with _conn() as c:
+        for col_name, col_def in new_columns:
+            try:
+                c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col_name} {col_def}")
+            except Exception:
+                pass  # Column already exists — safe to ignore
+
+        # Add index for walk-forward query performance
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_snapshots_symbol_time
+            ON market_snapshots(symbol, snapshot_time ASC)
+        """)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

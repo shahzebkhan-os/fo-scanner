@@ -17,8 +17,12 @@ from . import scheduler as Scheduler
 from .analytics import compute_stock_score_v2 as compute_stock_score, score_option_v2 as score_option, black_scholes_greeks, days_to_expiry
 from .signals_legacy import build_sector_heatmap, detect_uoa, screen_straddle, get_pcr_history
 from .cache import cache
-from .ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status
+from .ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status, predict_ensemble
 from .historical_loader import get_backfill_progress, run_backfill_with_progress, reset_backfill_progress
+from .signals.engine import MasterSignalEngine
+
+# Module-level singleton for 12-signal engine (Phase 1A)
+_signal_engine = MasterSignalEngine()
 
 # ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
 # Bug 6 fix: tracks which trades have already been entered today
@@ -659,26 +663,74 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 if not spot:
                     return None
                 
-                # Add ML prediction if model is trained
-                ml_prob = ml_predict(stats)
-                stats["ml_bullish_probability"] = ml_prob
+                # Get option chain records for signal engine
+                chain_records = records.get("data", [])
+                
+                # ── Phase 1A: 12-Signal Engine Integration ──
+                engine_score_100 = None
+                try:
+                    engine_result = _signal_engine.compute_all_signals(
+                        spot=spot,
+                        records=chain_records,
+                        pcr=stats.get("pcr", 1.0),
+                        dte=stats.get("days_to_expiry", 7),
+                        symbol=symbol,
+                    )
+                    # Engine returns composite_score in -1..1 range → convert to 0..100
+                    engine_score_100 = (engine_result.composite_score + 1) * 50
+                    conf = engine_result.confidence  # 0..1
 
+                    # Pass engine metadata through to frontend
+                    stats["engine_confidence"]      = round(conf, 3)
+                    stats["engine_regime"]          = engine_result.regime
+                    stats["recommended_strategy"]   = getattr(engine_result, "recommended_strategy", None)
+                    stats["individual_signals"]     = getattr(engine_result, "individual_scores", {})
+                    stats["blackout"]               = getattr(engine_result, "blackout", False)
+                    stats["engine_score_100"]       = round(engine_score_100)
+                except Exception as e:
+                    log.warning(f"[scan] MasterSignalEngine failed for {symbol} (non-fatal): {e}")
+                    stats.setdefault("engine_confidence", 0)
+                    stats.setdefault("engine_regime", stats.get("regime", "UNKNOWN"))
+                    stats.setdefault("blackout", False)
+
+                # ── Phase 3B: Ensemble Score Integration ──
+                # Build features dict for ML prediction
+                metrics = stats.get("metrics", {})
+                ensemble_features = {
+                    "weighted_score": stats["score"],
+                    "gex":            metrics.get("gex", 0),
+                    "iv_skew":        metrics.get("iv_skew", 0),
+                    "pcr":            stats.get("pcr", 1),
+                    "regime":         stats.get("regime", "TRENDING"),
+                    "vix":            15.0,  # TODO: Get actual VIX when available
+                    "dte":            stats.get("days_to_expiry", 7),
+                    "signal":         stats.get("signal", "NEUTRAL"),
+                }
+                
+                ensemble = predict_ensemble(
+                    features=ensemble_features,
+                    quant_score=stats["score"],
+                    engine_score=engine_score_100,
+                )
+
+                # Update stats with ensemble results
+                stats["score"] = ensemble["final_score"]
+                stats["ml_score"] = ensemble["ml_score"]
+                stats["ml_prob"] = ensemble["ml_prob"]
+                stats["ml_bullish_probability"] = ensemble["ml_prob"]
+                stats["blend_weights"] = ensemble["blend_weights"]
+                stats["ensemble_confidence"] = ensemble["confidence"]
+                stats["quant_score"] = ensemble["quant_score"]
+                
                 stock_score  = stats.get("score", 0)
-                signal       = stats.get("signal", "NEUTRAL")
+                signal       = stats.get("signal", "NEUTRAL")  # Preserve original signal
                 top_picks    = stats.get("top_picks", [])
                 reasons      = stats.get("signal_reasons", [])
-
-                # ── ML Signal Refinement ──
-                ml_score = 0
+                ml_prob      = ensemble["ml_prob"]
+                ml_score     = ensemble["ml_score"]
+                
+                # ── ML Signal Refinement Rules (preserved for backward compat) ──
                 if ml_prob is not None:
-                    # Directional ML score: probability in the direction of the bias
-                    if signal == "BULLISH":
-                        ml_score = int(ml_prob * 100)
-                    elif signal == "BEARISH":
-                        ml_score = int((1 - ml_prob) * 100)
-                    else:
-                        ml_score = int(max(ml_prob, 1 - ml_prob) * 100)
-
                     # Rule 1: Confirmation
                     if stock_score >= 80 and ((signal == "BULLISH" and ml_prob > 0.70) or (signal == "BEARISH" and ml_prob < 0.30)):
                         reasons.append("🤖 AI Confirmation: High Probability Setup")
@@ -686,9 +738,8 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                     
                     # Rule 2: Divergence Guard (Downgrade)
                     elif (signal == "BULLISH" and ml_prob < 0.40) or (signal == "BEARISH" and ml_prob > 0.60):
-                        stats["signal"] = "NEUTRAL"
+                        # Don't override signal here - it's used by frontend
                         reasons.append("⚠️ AI Divergence: Low Probability / Contrarian Bias")
-                        stats["score"] = max(0, stock_score - 15)
 
                 # Update shared stats
                 stats["ml_score"] = ml_score

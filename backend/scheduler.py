@@ -510,17 +510,74 @@ async def ml_retrain_loop():
                 log.info("Starting daily ML model retraining...")
                 if _ml_train_fn:
                     res = await asyncio.to_thread(_ml_train_fn)
+                    cv_loss = res.get("cv_log_loss_mean", 1.0)
+                    
                     if "error" in res:
                         log.error(f"ML retraining failed: {res['error']}")
-                    else:
-                        log.info(f"ML retraining done: Loss {res.get('cv_log_loss_mean')}, Rows {res.get('training_rows')}")
+                    elif cv_loss < 0.693:
+                        # Quality check passed (better than random guessing)
+                        log.info(f"ML retraining done: Loss {cv_loss:.4f}, Rows {res.get('training_rows')}")
                         _trained_today = today
+                    else:
+                        # Quality check failed - model no better than random
+                        log.warning(
+                            f"[ml_retrain] Quality check failed (loss={cv_loss:.4f} >= random 0.693). "
+                            f"Keeping existing model."
+                        )
+                        _trained_today = today  # Still mark as trained to avoid retrying
 
             await asyncio.sleep(600)   # check every 10 min
 
         except Exception as e:
             log.error(f"ML retrain loop error: {e}")
             await asyncio.sleep(600)
+
+
+# Task 10: Weekly ML Model Retraining (Sunday 22:00 IST) - Phase 2D
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def retrain_ml_model_weekly():
+    """
+    Retrain every Sunday at 22:00 IST with latest market_snapshots.
+    Only replaces the saved model if new CV loss < 0.693.
+
+    Why 0.693? log(2) ≈ 0.693 = binary cross-entropy for a model that
+    always predicts 0.5 (pure random guessing). Any useful model beats this.
+    """
+    log.info("Weekly ML retrain loop started.")
+    _last_sunday_retrain = None
+
+    while True:
+        try:
+            now = datetime.now(IST)
+            
+            # Check if it's Sunday (weekday=6) and time >= 22:00
+            is_sunday = now.weekday() == 6
+            is_after_22 = now.time() >= dtime(22, 0)
+            today = now.date()
+            
+            if is_sunday and is_after_22 and _last_sunday_retrain != today:
+                log.info("[ml_retrain_weekly] Starting Sunday ML model retraining...")
+                if _ml_train_fn:
+                    result = await asyncio.to_thread(_ml_train_fn)
+                    cv_loss = result.get("cv_log_loss_mean", 1.0)
+
+                    if "error" in result:
+                        log.warning(f"[ml_retrain_weekly] Skipped: {result['error']}")
+                    elif cv_loss < 0.693:
+                        log.info(f"[ml_retrain_weekly] Success. CV loss: {cv_loss:.4f}, rows: {result.get('training_rows')}")
+                    else:
+                        log.warning(
+                            f"[ml_retrain_weekly] Quality check failed (loss={cv_loss:.4f} >= random 0.693). "
+                            f"Keeping existing model."
+                        )
+                    _last_sunday_retrain = today
+
+            await asyncio.sleep(3600)  # Check every hour
+
+        except Exception as e:
+            log.error(f"Weekly ML retrain loop error: {e}")
+            await asyncio.sleep(3600)
 
 
 async def start_all():
@@ -534,6 +591,7 @@ async def start_all():
     asyncio.create_task(accuracy_sampler_loop())
     asyncio.create_task(accuracy_price_updater_loop())
     asyncio.create_task(ml_retrain_loop())
+    asyncio.create_task(retrain_ml_model_weekly())
     log.info("All scheduler tasks started (including Trade Tracker & ML Retraining).")
 
 

@@ -7,6 +7,11 @@ Covers: Black-Scholes Greeks, IV Rank, Max Pain, OI Walls,
 from __future__ import annotations
 import math
 from typing import Optional
+from datetime import datetime, time as dtime
+from zoneinfo import ZoneInfo
+
+# Timezone for market time calculations
+_IST = ZoneInfo("Asia/Kolkata")
 
 # ── Strike Intervals ──────────────────────────────────────────────────────────
 STRIKE_INTERVALS = {
@@ -196,6 +201,56 @@ REGIME_WEIGHTS = {
 PCR_BULLISH_THRESHOLD = 1.2
 PCR_BEARISH_THRESHOLD = 0.8
 IV_SKEW_CRITICAL_LEVEL = 2.0
+
+
+def _time_of_day_adjustment(score: float, is_expiry_day: bool = False) -> float:
+    """
+    Discount score during high-noise market periods.
+    Call at the end of compute_stock_score_v2() before returning.
+    
+    Time adjustments:
+    - 9:15-10:30 IST: 15% discount (morning volatility)
+    - 15:15+: 20% discount (end-of-day noise)
+    - Expiry day 14:00+: additional 10% discount
+    """
+    now = datetime.now(_IST).time()
+
+    if dtime(9, 15) <= now <= dtime(10, 30):
+        score = score * 0.85          # Morning volatility: 15% discount
+
+    if is_expiry_day and now >= dtime(14, 0):
+        score = score * 0.90          # Expiry afternoon: additional 10% discount
+
+    if now >= dtime(15, 15):
+        score = score * 0.80          # Last 15 min: 20% discount (end-of-day noise)
+
+    return round(min(100, max(0, score)))
+
+
+def _dynamic_pcr_thresholds(pcr_history: list) -> tuple:
+    """
+    Bollinger-band style adaptive PCR thresholds.
+    Falls back to fixed 1.2/0.8 if < 10 data points.
+    
+    Args:
+        pcr_history: List of recent PCR values from market_snapshots
+        
+    Returns:
+        Tuple of (bullish_threshold, bearish_threshold)
+    """
+    if not pcr_history or len(pcr_history) < 10:
+        return PCR_BULLISH_THRESHOLD, PCR_BEARISH_THRESHOLD   # Static fallback
+    
+    try:
+        import numpy as np
+        mean = np.mean(pcr_history)
+        std = np.std(pcr_history)
+        # Avoid extreme thresholds
+        bull = min(2.0, max(1.0, mean + 1.5 * std))
+        bear = max(0.5, min(1.0, mean - 1.5 * std))
+        return (bull, bear)
+    except Exception:
+        return PCR_BULLISH_THRESHOLD, PCR_BEARISH_THRESHOLD
 
 
 def compute_gex(records: list, spot: dict|float, lot_size: int = 50) -> dict:
@@ -393,6 +448,7 @@ def compute_stock_score_v2(
         return _empty
         
     dte = days_to_expiry(expiry_str) if expiry_str else 5
+    is_expiry_day = (dte <= 1)  # Consider DTE 0 or 1 as expiry day
     iv_rank = (iv_rank_data or {}).get("iv_rank", 50.0)
     
     regime = detect_regime(records, spot, symbol, dte, iv_rank)
@@ -544,6 +600,9 @@ def compute_stock_score_v2(
             break
 
     atm_iv = round((atm_iv_ce + atm_iv_pe) / 2, 1)
+    
+    # Apply time-of-day adjustment to score (Phase 1B)
+    weighted_score = _time_of_day_adjustment(weighted_score, is_expiry_day=is_expiry_day)
 
     return dict(
         pcr            = round(pcr, 3),

@@ -142,6 +142,83 @@ function ScanCard({ r, theme, onChain, onGreeks, isWatched, onToggleWL }) {
             {r.signal_reasons.map((reason, i) => <li key={i}>{reason}</li>)}
           </ul>
         )}
+
+        {/* Score Blend Panel (Phase: Frontend) */}
+        {r.blend_weights && (
+          <div style={{ marginTop: 8, padding: "6px 8px", background: "rgba(255,255,255,.04)", borderRadius: 4 }}>
+            <div style={{ fontSize: 10, color: theme.muted, marginBottom: 4 }}>Score Blend</div>
+            <div style={{ display: "flex", height: 14, borderRadius: 3, overflow: "hidden", gap: 1 }}>
+              <span style={{
+                background: "#3b82f6", fontSize: 9, display: "flex", alignItems: "center",
+                padding: "0 4px", color: "#fff", width: `${Math.round(r.blend_weights.quant * 100)}%`, minWidth: 20
+              }}>
+                Q {Math.round(r.blend_weights.quant * 100)}%
+              </span>
+              {r.blend_weights.ml > 0.01 && (
+                <span style={{
+                  background: "#8b5cf6", fontSize: 9, display: "flex", alignItems: "center",
+                  padding: "0 4px", color: "#fff", width: `${Math.round(r.blend_weights.ml * 100)}%`, minWidth: 20
+                }}>
+                  ML {Math.round(r.blend_weights.ml * 100)}%
+                </span>
+              )}
+              {r.blend_weights.engine > 0.01 && (
+                <span style={{
+                  background: "#22c55e", fontSize: 9, display: "flex", alignItems: "center",
+                  padding: "0 4px", color: "#fff", width: `${Math.round(r.blend_weights.engine * 100)}%`, minWidth: 20
+                }}>
+                  S {Math.round(r.blend_weights.engine * 100)}%
+                </span>
+              )}
+            </div>
+            {r.recommended_strategy && (
+              <span style={{
+                marginTop: 4, fontSize: 10, background: "rgba(59,130,246,.15)",
+                color: "#3b82f6", padding: "2px 6px", borderRadius: 10, display: "inline-block"
+              }}>
+                {r.recommended_strategy}
+              </span>
+            )}
+            {r.blackout && (
+              <div style={{ fontSize: 10, color: "#f59e0b", marginTop: 4 }}>
+                ⚠️ Event blackout active — no new signals
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 12-Signal Breakdown (Collapsible) */}
+        {r.individual_signals && Object.keys(r.individual_signals).length > 0 && (
+          <details style={{ marginTop: 6 }}>
+            <summary style={{ fontSize: 11, cursor: "pointer", color: theme.muted }}>
+              12 Signals ▾
+            </summary>
+            <table style={{ width: "100%", fontSize: 11, marginTop: 4, borderCollapse: "collapse" }}>
+              <tbody>
+                {Object.entries(r.individual_signals).map(([name, sig]) => (
+                  <tr key={name}>
+                    <td style={{ padding: "2px 4px", borderBottom: "1px solid rgba(255,255,255,.05)" }}>{name}</td>
+                    <td style={{
+                      padding: "2px 4px", borderBottom: "1px solid rgba(255,255,255,.05)",
+                      color: sig.score > 0.3 ? "#22c55e" : sig.score < -0.3 ? "#ef4444" : theme.muted
+                    }}>
+                      {Math.round(sig.score * 100)}
+                    </td>
+                    <td style={{ padding: "2px 4px", borderBottom: "1px solid rgba(255,255,255,.05)", color: theme.muted }}>
+                      {Math.round(sig.confidence * 100)}%
+                    </td>
+                    <td style={{
+                      padding: "2px 4px", borderBottom: "1px solid rgba(255,255,255,.05)",
+                      color: "#aaa", fontSize: 10, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis"
+                    }}>
+                      {sig.reason}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
+        )}
       </div>
 
       <div style={{ borderTop: `1px solid ${theme.border}`, display: "flex" }}>
