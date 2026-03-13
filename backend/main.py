@@ -9,22 +9,23 @@ import json
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
-import db
+from . import db
 from pydantic import BaseModel, Field
-import analytics as Analytics
-import signals as Signals
-import scheduler as Scheduler
-from analytics import compute_stock_score_v2 as compute_stock_score, score_option_v2 as score_option, black_scholes_greeks, days_to_expiry
-from signals import build_sector_heatmap, detect_uoa, screen_straddle, get_pcr_history
-from cache import cache
-from ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status
-from historical_loader import get_backfill_progress, run_backfill_with_progress, reset_backfill_progress
+from . import analytics as Analytics
+from . import signals_legacy as Signals
+from . import scheduler as Scheduler
+from .analytics import compute_stock_score_v2 as compute_stock_score, score_option_v2 as score_option, black_scholes_greeks, days_to_expiry
+from .signals_legacy import build_sector_heatmap, detect_uoa, screen_straddle, get_pcr_history
+from .cache import cache
+from .ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status
+from .historical_loader import get_backfill_progress, run_backfill_with_progress, reset_backfill_progress
 
 # ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
 # Bug 6 fix: tracks which trades have already been entered today
 # Bug 5 fix: separate sets for trades vs alerts so thresholds are independent
 _traded_today: set  = set()   # "SYMBOL-TYPE-STRIKE-DATE"
-notified_signals: set = set() # "SYMBOL-TYPE-STRIKE-DATE"
+_traded_today: set  = set()   # "SYMBOL-TYPE-STRIKE-DATE"
+# notified_signals moved to db.notifications for persistence
 _daily_trade_count: int = 0
 _sector_trade_count: dict = {}  # {sector: count}
 
@@ -33,9 +34,8 @@ MAX_SECTOR_TRADES     = 3
 
 def _reset_daily_sets():
     """Called at the start of each new trading day."""
-    global _traded_today, notified_signals, _daily_trade_count, _sector_trade_count
+    global _traded_today, _daily_trade_count, _sector_trade_count
     _traded_today.clear()
-    notified_signals.clear()
     _daily_trade_count = 0
     _sector_trade_count = {}
 
@@ -167,6 +167,7 @@ async def lifespan(app: FastAPI):
         send_telegram_fn  = send_telegram_alert,
         is_market_open_fn = is_market_open,
         scan_fn           = _internal_scan,
+        train_fn         = ml_train_model,
         all_symbols       = INDEX_SYMBOLS + FO_STOCKS,
     )
 
@@ -665,18 +666,47 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                 stock_score  = stats.get("score", 0)
                 signal       = stats.get("signal", "NEUTRAL")
                 top_picks    = stats.get("top_picks", [])
+                reasons      = stats.get("signal_reasons", [])
 
-                # ── Auto paper-trade entry  (v5: stricter multi-condition gate) ──
-                if (stock_score >= 85                      # Higher threshold
-                    and signal != "NEUTRAL"                 # Clear direction only
-                    and stats.get("vol_spike", 0) > 0.5    # Activity confirmation
-                    and abs(stats.get("pcr", 1) - 1) > 0.2 # Clear PCR bias
+                # ── ML Signal Refinement ──
+                ml_score = 0
+                if ml_prob is not None:
+                    # Directional ML score: probability in the direction of the bias
+                    if signal == "BULLISH":
+                        ml_score = int(ml_prob * 100)
+                    elif signal == "BEARISH":
+                        ml_score = int((1 - ml_prob) * 100)
+                    else:
+                        ml_score = int(max(ml_prob, 1 - ml_prob) * 100)
+
+                    # Rule 1: Confirmation
+                    if stock_score >= 80 and ((signal == "BULLISH" and ml_prob > 0.70) or (signal == "BEARISH" and ml_prob < 0.30)):
+                        reasons.append("🤖 AI Confirmation: High Probability Setup")
+                        stats["score"] = min(100, stock_score + 5)
+                    
+                    # Rule 2: Divergence Guard (Downgrade)
+                    elif (signal == "BULLISH" and ml_prob < 0.40) or (signal == "BEARISH" and ml_prob > 0.60):
+                        stats["signal"] = "NEUTRAL"
+                        reasons.append("⚠️ AI Divergence: Low Probability / Contrarian Bias")
+                        stats["score"] = max(0, stock_score - 15)
+
+                # Update shared stats
+                stats["ml_score"] = ml_score
+                stats["signal_reasons"] = reasons
+                signal = stats["signal"]
+                stock_score = stats["score"]
+
+                # ── Auto paper-trade entry  (v6: Stricter ML-refined gate) ──
+                if (stock_score >= 85
+                    and signal != "NEUTRAL"
+                    and (ml_prob is None or (signal == "BULLISH" and ml_prob > 0.65) or (signal == "BEARISH" and ml_prob < 0.35))
+                    and stats.get("vol_spike", 0) > 0.4
                     and is_market_open()
-                    and is_optimal_trade_time()             # Avoid bad times
+                    and is_optimal_trade_time()
                     and _daily_trade_count < MAX_DAILY_AUTO_TRADES):
 
                     # Sector concentration guard
-                    from signals import get_sector
+                    from signals_legacy import get_sector
                     sym_sector = get_sector(symbol)
                     sector_ct = _sector_trade_count.get(sym_sector, 0)
 
@@ -717,8 +747,8 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                             continue
                 
                         uid = f"{symbol}-{pick['type']}-{pick['strike']}-{datetime.now(IST).date()}"
-                        if uid not in notified_signals:
-                            notified_signals.add(uid)
+                        if not db.is_notified(uid):
+                            db.mark_notified(uid)
                             reasons_text = " | ".join(stats.get("signal_reasons", []))
                             # Add to batch for CSV
                             batch_alerts_csv_rows.append(
@@ -820,10 +850,24 @@ async def create_manual_snapshot(req: ManualSnapshotRequest):
     for r in suggested_trades:
         picks = r.get("top_picks") or []
         ls = LOT_SIZES.get(r.get("symbol", ""), 1)
+        ml_prob = r.get("ml_bullish_probability")
+        sig = r.get("signal", "NEUTRAL")
+
         for p in picks:
             tid = db.add_accuracy_trade(
                 sid, r.get("symbol", ""), p.get("type"), p.get("strike"), 
-                p.get("ltp"), r.get("score"), r.get("ltp"), lot_size=ls
+                p.get("ltp"), r.get("score"), r.get("ltp"), 
+                lot_size=ls,
+                ml_prob=ml_prob,
+                signal=sig,
+                iv_rank=r.get("iv_rank"),
+                regime=r.get("regime"),
+                max_pain=r.get("max_pain"),
+                days_to_expiry=r.get("days_to_expiry"),
+                pcr=r.get("pcr"),
+                iv=r.get("iv"),
+                vol_spike=r.get("vol_spike"),
+                ml_score=r.get("ml_score")
             )
             if tid:
                 db.update_accuracy_trade_price(tid, p.get("ltp"))
@@ -848,6 +892,55 @@ async def get_accuracy_report():
         return {"status": "success", "report": report}
     except Exception as e:
         from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── New Tracker History & CSV Management Endpoints ─────────────────────────────
+
+@app.get("/api/tracker/snapshot/{snapshot_id}/trades-with-history")
+async def get_snapshot_trades_history(snapshot_id: int):
+    """Returns detailed trade history for a snapshot, including 5-min price intervals."""
+    try:
+        trades = db.get_accuracy_trades_with_history(snapshot_id)
+        if not trades:
+            return {"status": "error", "message": "Snapshot not found or empty"}
+        return {"status": "success", "trades": trades}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/tracker/csv-exports")
+async def list_csv_exports():
+    """Lists all auto-saved CSV export sessions for the Accuracy Tracker UI."""
+    try:
+        exports = db.get_csv_exports()
+        return {"status": "success", "exports": exports}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/tracker/csv-exports/{export_id}/download")
+async def download_csv_export(export_id: int):
+    """Downloads a specific CSV export session file."""
+    try:
+        exp = db.get_csv_export_by_id(export_id)
+        if not exp or not os.path.exists(exp["filepath"]):
+            raise HTTPException(status_code=404, detail="File not found")
+        from fastapi.responses import FileResponse
+        return FileResponse(
+            exp["filepath"], 
+            filename=exp["filename"],
+            media_type="text/csv"
+        )
+    except Exception as e:
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/tracker/csv-exports/{export_id}")
+async def delete_csv_export(export_id: int):
+    """Deletes a CSV export session record and its associated physical file."""
+    try:
+        db.delete_csv_export(export_id)
+        return {"status": "success", "message": "CSV session deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/tracker/trade/{trade_id}/history")
@@ -1532,313 +1625,6 @@ async def _internal_scan() -> list:
     return [r for r in raw if r]
 
 
-# ── Greeks ────────────────────────────────────────────────────────────────────
-
-@app.get("/api/greeks/{symbol}")
-async def get_greeks(symbol: str, expiry: Optional[str] = None):
-    """Returns full Greeks for all strikes of a symbol."""
-    symbol = symbol.upper()
-    data   = await fetch_nse_chain(symbol)
-    recs   = data.get("records", {})
-    spot   = recs.get("underlyingValue", 0)
-    rows   = recs.get("data", [])
-    expiry_dates = recs.get("expiryDates", [])
-    selected_expiry = expiry or (expiry_dates[0] if expiry_dates else "")
-
-    if not rows:
-        raise HTTPException(404, f"No data for {symbol}")
-
-    dte = days_to_expiry(selected_expiry)
-    result = []
-
-    for row in rows:
-        strike = row.get("strikePrice", 0)
-        ce     = row.get("CE", {}) or {}
-        pe     = row.get("PE", {}) or {}
-        ce_iv  = ce.get("impliedVolatility", 0) or 0
-        pe_iv  = pe.get("impliedVolatility", 0) or 0
-
-        result.append({
-            "strike": strike,
-            "CE": {**ce, "greeks": black_scholes_greeks(spot, strike, ce_iv or pe_iv or 20, dte, "CE")},
-            "PE": {**pe, "greeks": black_scholes_greeks(spot, strike, pe_iv or ce_iv or 20, dte, "PE")},
-        })
-
-    return {"symbol": symbol, "spot": spot, "expiry": selected_expiry, "dte": dte, "strikes": result}
-
-
-# ── IV Rank ───────────────────────────────────────────────────────────────────
-
-@app.get("/api/ivrank/{symbol}")
-async def get_iv_rank(symbol: str):
-    """Returns current IV Rank and 52-week IV high/low for a symbol."""
-    symbol = symbol.upper()
-    ivr    = db.get_iv_rank(symbol)
-    if ivr["days_available"] < 5:
-        return {**ivr, "warning": "Less than 5 days of IV history. Keep the scanner running daily to build history."}
-    return ivr
-
-
-# ── OI Heatmap ────────────────────────────────────────────────────────────────
-
-@app.get("/api/oi-heatmap/{symbol}")
-async def get_oi_heatmap(symbol: str, snap_date: Optional[str] = None):
-    """Returns intraday OI snapshots for building a heatmap. snap_date format: YYYY-MM-DD"""
-    symbol = symbol.upper()
-    data   = db.get_oi_heatmap(symbol, snap_date)
-    return {"symbol": symbol, "date": snap_date or "today", "data": data, "count": len(data)}
-
-
-@app.get("/api/oi-timeline/{symbol}")
-async def get_oi_timeline(symbol: str, strike: Optional[float] = None, opt_type: str = "CE"):
-    """Returns OI over time for a specific strike. Used for OI buildup charts."""
-    symbol = symbol.upper()
-    if not strike:
-        chain  = await fetch_nse_chain(symbol)
-        spot   = chain.get("records", {}).get("underlyingValue", 0)
-        strike = Analytics.nearest_atm(spot, symbol) if spot else 0
-
-    data = db.get_oi_timeline(symbol, strike, opt_type.upper())
-    return {"symbol": symbol, "strike": strike, "type": opt_type.upper(), "timeline": data}
-
-
-# ── PCR History ───────────────────────────────────────────────────────────────
-
-@app.get("/api/pcr-history/{symbol}")
-async def pcr_history(symbol: str):
-    """Returns intraday PCR timeline built from OI snapshots."""
-    symbol   = symbol.upper()
-    timeline = get_pcr_history(symbol)
-    return {"symbol": symbol, "timeline": timeline}
-
-
-# ── Unusual Options Activity ─────────────────────────────────────────────────
-
-@app.get("/api/uoa")
-async def unusual_options_activity(threshold: float = 5.0, limit: int = 20):
-    """Scans all F&O symbols for unusual options activity (volume ≥ N× 5-day avg)."""
-    all_symbols = INDEX_SYMBOLS + FO_STOCKS
-    all_uoa     = []
-    sem         = asyncio.Semaphore(3)
-
-    async def check_symbol(symbol):
-        async with sem:
-            try:
-                chain = await fetch_nse_chain(symbol)
-                recs  = chain.get("records", {}).get("data", [])
-                spot  = chain.get("records", {}).get("underlyingValue", 0)
-                if recs and spot:
-                    return detect_uoa(recs, symbol, spot, threshold)
-            except Exception as e:
-                log.error(f"UOA check failed {symbol}: {e}")
-            return []
-
-    results = await asyncio.gather(*[check_symbol(s) for s in all_symbols])
-    for r in results:
-        all_uoa.extend(r)
-
-    all_uoa.sort(key=lambda x: (x.get("ratio") or 0), reverse=True)
-    return {"timestamp": datetime.now().isoformat(), "threshold": threshold, "count": len(all_uoa[:limit]), "data": all_uoa[:limit]}
-
-
-# ── Straddle / Strangle Screener ──────────────────────────────────────────────
-
-@app.get("/api/straddle-screen")
-async def straddle_screener(min_iv: float = 15.0, max_pcr_delta: float = 0.3):
-    """Finds symbols where PCR ≈ 1 and IV is in range — good straddle candidates."""
-    all_symbols = INDEX_SYMBOLS + FO_STOCKS
-    sem         = asyncio.Semaphore(3)
-
-    async def check(symbol):
-        async with sem:
-            try:
-                chain   = await fetch_nse_chain(symbol)
-                recs    = chain.get("records", {}).get("data", [])
-                spot    = chain.get("records", {}).get("underlyingValue", 0)
-                expiries= chain.get("records", {}).get("expiryDates", [])
-                if not recs or not spot: return None
-
-                ivr    = db.get_iv_rank(symbol)
-                exp    = expiries[0] if expiries else ""
-                stats  = compute_stock_score(chain, spot, symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
-                pcr    = stats.get("pcr", 1.0)
-                atm_iv = stats.get("iv", 0)
-
-                result = screen_straddle(recs, symbol, spot, exp, pcr, atm_iv)
-                if result:
-                    result["score"]   = stats.get("score", 0)
-                    result["iv_rank"] = ivr.get("iv_rank", 50)
-                return result
-            except Exception as e:
-                log.error(f"Straddle screen {symbol}: {e}")
-            return None
-
-    results    = await asyncio.gather(*[check(s) for s in all_symbols])
-    candidates = [r for r in results if r]
-    candidates.sort(key=lambda x: x.get("iv", 0), reverse=True)
-    return {"timestamp": datetime.now().isoformat(), "count": len(candidates), "candidates": candidates}
-
-
-# ── Sector Heatmap ────────────────────────────────────────────────────────────
-
-@app.get("/api/sector-heatmap")
-async def sector_heatmap():
-    """Runs a fast scan and returns sector-level signal aggregation."""
-    results   = await _internal_scan()
-    heatmap   = build_sector_heatmap(results)
-    deals_map = Signals.get_deals_for_scan(results)
-
-    for sector_data in heatmap.values():
-        for sym_entry in sector_data["symbols"]:
-            sym = sym_entry["symbol"]
-            if sym in deals_map:
-                sym_entry["bulk_deals"] = len(deals_map[sym])
-
-    return {"timestamp": datetime.now().isoformat(), "sectors": heatmap}
-
-
-# ── Portfolio P&L Dashboard ───────────────────────────────────────────────────
-
-@app.get("/api/portfolio")
-async def portfolio_dashboard():
-    """Full portfolio view: equity curve, win rate, max drawdown, best/worst trades."""
-    stats       = db.get_trade_stats()
-    open_trades = db.get_open_trades()
-
-    unrealised = sum(
-        ((t.get("current_price") or t["entry_price"]) - t["entry_price"]) * (t.get("lot_size") or 1)
-        for t in open_trades
-    )
-
-    return {
-        "closed_trades":  stats,
-        "auto_stats":     db.get_trade_stats("AUTO"),
-        "manual_stats":   db.get_trade_stats("MANUAL"),
-        "open_positions": len(open_trades),
-        "unrealised_pnl": round(unrealised, 2),
-        "capital":        db.get_capital(),
-    }
-
-
-# ── Position Sizing Calculator ────────────────────────────────────────────────
-
-@app.get("/api/position-size")
-async def position_size(symbol: str, entry_price: float, sl_pct: float = 25.0):
-    """Calculates how many lots to trade based on capital and 2% risk rule."""
-    symbol   = symbol.upper()
-    capital  = db.get_capital()
-    lot_size = LOT_SIZES.get(symbol, 1)
-    sizing   = Analytics.compute_lot_size_for_risk(capital, entry_price, lot_size, 2.0, sl_pct)
-    return {"symbol": symbol, "capital": capital, "lot_size": lot_size, **sizing}
-
-
-# ── Trade Journal ─────────────────────────────────────────────────────────────
-
-@app.post("/api/paper-trades/{trade_id}/note")
-async def add_note(trade_id: int, note: str):
-    """Add a journal note to a trade."""
-    db.add_trade_note(trade_id, note)
-    return {"status": "ok"}
-
-
-@app.get("/api/paper-trades/{trade_id}/notes")
-async def get_notes(trade_id: int):
-    """Get all journal notes for a trade."""
-    return {"notes": db.get_trade_notes(trade_id)}
-
-
-# ── Watchlist & Settings ──────────────────────────────────────────────────────
-
-@app.get("/api/settings/watchlist")
-async def get_watchlist():
-    return {"watchlist": db.get_watchlist()}
-
-
-@app.post("/api/settings/watchlist")
-async def set_watchlist(symbols: list):
-    symbols = [s.upper() for s in symbols]
-    db.set_watchlist(symbols)
-    return {"status": "ok", "watchlist": symbols}
-
-
-@app.get("/api/settings/capital")
-async def get_capital_setting():
-    return {"capital": db.get_capital()}
-
-
-@app.post("/api/settings/capital")
-async def set_capital_setting(amount: float):
-    db.set_capital(amount)
-    return {"status": "ok", "capital": amount}
-
-
-@app.get("/api/settings/threshold/{symbol}")
-async def get_threshold(symbol: str):
-    symbol = symbol.upper()
-    return {"symbol": symbol, "threshold": db.get_symbol_threshold(symbol)}
-
-
-@app.post("/api/settings/threshold/{symbol}")
-async def set_threshold(symbol: str, threshold: int):
-    symbol = symbol.upper()
-    db.set_symbol_threshold(symbol, threshold)
-    return {"status": "ok", "symbol": symbol, "threshold": threshold}
-
-
-# ── Bulk Deals ────────────────────────────────────────────────────────────────
-
-@app.get("/api/bulk-deals")
-async def bulk_deals(symbol: Optional[str] = None, days: int = 3):
-    """Returns recent NSE bulk/block deals, optionally filtered by symbol."""
-    deals = db.get_bulk_deals(symbol.upper() if symbol else None, days)
-    return {"count": len(deals), "data": deals}
-
-
-@app.post("/api/bulk-deals/refresh")
-async def refresh_bulk_deals():
-    """Manually trigger a bulk deals refresh."""
-    deals = await Signals.fetch_bulk_deals()
-    return {"status": "ok", "fetched": len(deals)}
-
-
-# ── CSV Export ────────────────────────────────────────────────────────────────
-
-# (export_trades is defined above near line 1422; duplicate removed)
-
-
-# ── FII/DII Data ──────────────────────────────────────────────────────────────
-
-@app.get("/api/fii-dii")
-async def fii_dii_data():
-    """Fetches latest FII/DII activity from NSE."""
-    import httpx as _httpx
-    url = "https://www.nseindia.com/api/fiidiiTradeReact"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-        "Referer": "https://www.nseindia.com/reports/fii-dii",
-    }
-    try:
-        async with _httpx.AsyncClient(timeout=10, headers=headers) as client:
-            await client.get("https://www.nseindia.com", timeout=5)
-            r = await client.get(url, timeout=8)
-            r.raise_for_status()
-            data = r.json()
-            result = []
-            for row in data:
-                category = row.get("category", "")
-                if category in ("FII/FPI", "DII"):
-                    result.append({
-                        "category":   category,
-                        "date":       row.get("date", ""),
-                        "buy_value":  row.get("buyValue", 0),
-                        "sell_value": row.get("sellValue", 0),
-                        "net":        row.get("netValue", 0),
-                    })
-            return {"data": result, "source": "NSE"}
-    except Exception as e:
-        log.error(f"FII/DII fetch error: {e}")
-        return {"data": [], "error": str(e)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1944,7 +1730,7 @@ if __name__ == "__main__":
 ║  Debug:  http://localhost:8000/api/debug/NIFTY        ║
 ╚══════════════════════════════════════════════════════╝
 """)
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False, log_level="info")
 
 # End of file
 

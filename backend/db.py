@@ -151,7 +151,28 @@ def init_db():
             current_price REAL,
             score        INTEGER DEFAULT 0,
             stock_price  REAL    DEFAULT 0,
-            lot_size     INTEGER DEFAULT 0
+            lot_size     INTEGER DEFAULT 0,
+            ml_prob      REAL,
+            signal       TEXT,
+            iv_rank      REAL,
+            regime       TEXT,
+            max_pain     REAL,
+            days_to_expiry INTEGER,
+            pcr          REAL,
+            iv           REAL,
+            vol_spike    REAL,
+            ml_score     INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS csv_exports (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id  INTEGER REFERENCES accuracy_snapshots(id) ON DELETE SET NULL,
+            filename     TEXT    NOT NULL,
+            filepath     TEXT    NOT NULL,
+            trade_count  INTEGER DEFAULT 0,
+            avg_score    REAL    DEFAULT 0,
+            avg_pnl_pct  REAL    DEFAULT 0,
+            created_at   TEXT    DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_accuracy_trades_snapshot ON accuracy_trades(snapshot_id);
 
@@ -228,6 +249,15 @@ def init_db():
         """)
 
     print("✅ DB initialised (v4)")
+    # Migration: Add columns to accuracy_trades if they don't exist
+    with _conn() as c:
+        for col, dtype in [
+            ("ml_prob", "REAL"), ("signal", "TEXT"), ("iv_rank", "REAL"),
+            ("regime", "TEXT"), ("max_pain", "REAL"), ("days_to_expiry", "INTEGER"),
+            ("pcr", "REAL"), ("iv", "REAL"), ("vol_spike", "REAL"), ("ml_score", "INTEGER")
+        ]:
+            try: c.execute(f"ALTER TABLE accuracy_trades ADD COLUMN {col} {dtype}")
+            except: pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -409,12 +439,29 @@ def create_accuracy_snapshot():
         cursor = c.execute("INSERT INTO accuracy_snapshots (timestamp) VALUES (datetime('now'))")
         return cursor.lastrowid
 
-def add_accuracy_trade(snapshot_id, symbol, opt_type, strike, entry_price, score, stock_price=0, lot_size=0):
+def add_accuracy_trade(snapshot_id, symbol, opt_type, strike, entry_price, score, stock_price=0, lot_size=0, **kwargs):
+    ml_prob = kwargs.get("ml_prob")
+    signal = kwargs.get("signal")
+    iv_rank = kwargs.get("iv_rank")
+    regime = kwargs.get("regime")
+    max_pain = kwargs.get("max_pain")
+    dte = kwargs.get("days_to_expiry")
+    pcr = kwargs.get("pcr")
+    iv = kwargs.get("iv")
+    vol_spike = kwargs.get("vol_spike")
+    ml_score = kwargs.get("ml_score")
+
     with _conn() as c:
         cursor = c.execute("""
-            INSERT INTO accuracy_trades (snapshot_id, symbol, type, strike, entry_price, current_price, score, stock_price, lot_size)
-            VALUES (?,?,?,?,?,?,?,?,?)
-        """, (snapshot_id, symbol, opt_type, float(strike), float(entry_price), float(entry_price), score, stock_price, lot_size))
+            INSERT INTO accuracy_trades (
+                snapshot_id, symbol, type, strike, entry_price, current_price, score, stock_price, lot_size, 
+                ml_prob, signal, iv_rank, regime, max_pain, days_to_expiry, pcr, iv, vol_spike, ml_score
+            )
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            snapshot_id, symbol, opt_type, float(strike), float(entry_price), float(entry_price), score, stock_price, lot_size,
+            ml_prob, signal, iv_rank, regime, max_pain, dte, pcr, iv, vol_spike, ml_score
+        ))
         return cursor.lastrowid
 
 def get_accuracy_snapshots(limit=50):
@@ -807,3 +854,59 @@ def get_partial_exits(trade_id: int) -> list:
             (trade_id,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+# ── Missing Accuracy Tracking Helpers ───────────────────────────────────────────
+
+def get_accuracy_trades_with_history(snapshot_id: int) -> list:
+    """Fetches trades for a snapshot, including calculated max/min PnL from history spikes."""
+    with _conn() as c:
+        trades_rows = c.execute("SELECT * FROM accuracy_trades WHERE snapshot_id=?", (snapshot_id,)).fetchall()
+        trades = [dict(r) for r in trades_rows]
+        
+        for t in trades:
+            hist_rows = c.execute("""
+                SELECT price, timestamp FROM accuracy_trade_history 
+                WHERE trade_id=? ORDER BY timestamp ASC
+            """, (t["id"],)).fetchall()
+            t["price_history"] = [dict(r) for r in hist_rows]
+            
+            entry = t["entry_price"] or 0.1
+            if t["price_history"]:
+                prices = [h["price"] for h in t["price_history"]]
+                t["max_price"] = max(prices)
+                t["min_price"] = min(prices)
+                t["pnl_pct"] = round(((t["current_price"] - entry) / entry * 100), 2)
+                t["max_pnl_pct"] = round(((t["max_price"] - entry) / entry * 100, 2))
+            else:
+                t["max_price"] = t["current_price"]
+                t["min_price"] = t["current_price"]
+                t["pnl_pct"] = 0
+                t["max_pnl_pct"] = 0
+                
+        return trades
+
+def record_csv_export(snapshot_id, filename, filepath, trade_count, avg_score, avg_pnl):
+    with _conn() as c:
+        c.execute("""
+            INSERT INTO csv_exports (snapshot_id, filename, filepath, trade_count, avg_score, avg_pnl_pct)
+            VALUES (?,?,?,?,?,?)
+        """, (snapshot_id, filename, filepath, trade_count, avg_score, avg_pnl))
+
+def get_csv_exports():
+    with _conn() as c:
+        rows = c.execute("SELECT * FROM csv_exports ORDER BY created_at DESC LIMIT 100").fetchall()
+    return [dict(r) for r in rows]
+
+def get_csv_export_by_id(export_id: int):
+    with _conn() as c:
+        row = c.execute("SELECT * FROM csv_exports WHERE id=?", (export_id,)).fetchone()
+    return dict(row) if row else None
+
+def delete_csv_export(export_id: int):
+    with _conn() as c:
+        exp = c.execute("SELECT filepath FROM csv_exports WHERE id=?", (export_id,)).fetchone()
+        if exp and os.path.exists(exp["filepath"]):
+            try: os.remove(exp["filepath"])
+            except: pass
+        c.execute("DELETE FROM csv_exports WHERE id=?", (export_id,))
+    return True

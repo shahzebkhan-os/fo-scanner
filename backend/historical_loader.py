@@ -76,9 +76,7 @@ CONFIG = {
     "pause_between_batches": 5,
 }
 
-# Add analytics for scoring
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from analytics import compute_stock_score_v2, black_scholes_greeks, nearest_atm
+from .analytics import compute_stock_score_v2, black_scholes_greeks, nearest_atm
 
 # Known NSE Holidays for 2023 & 2024
 NSE_HOLIDAYS = {

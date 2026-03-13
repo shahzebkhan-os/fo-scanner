@@ -141,27 +141,43 @@ export default function App() {
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => {
             if (!scanData.length) return;
-            const baseCols = ["symbol", "signal", "score", "ltp", "change_pct", "volume", "pcr", "iv", "oi_change", "vol_spike"];
-            const cols = [...baseCols, "suggested_trade", "trade_score", "lot_value"];
-            const csvRows = scanData.map(r => {
+            const cols = ["Symbol", "Signal", "Score", "ML Score", "Price", "Suggested Trade", "Trade LTP", "Trade Score", "Trade ML Score", "Lot Value"];
+            const rowsHtml = scanData.map(r => {
               const pick = r.top_picks?.[0];
+              const sig = r.signal || "NEUTRAL";
+              const bgColor = sig === "BULLISH" ? "#d4edda" : sig === "BEARISH" ? "#f8d7da" : "transparent";
               const suggested_trade = pick ? `${pick.strike} ${pick.type}` : "";
+              const trade_ltp = pick ? pick.ltp : "";
               const trade_score = pick ? pick.score : "";
+              const trade_ml_score = pick ? (r.ml_score || 0) : "";
               const ls = lotSizes[r.symbol] || 0;
               const lot_value = (pick && ls) ? (pick.ltp * ls).toFixed(2) : "";
-              const rowData = baseCols.map(c => r[c] ?? "");
-              return [...rowData, suggested_trade, trade_score, lot_value].join(",");
-            });
-            const csv = [cols.join(","), ...csvRows].join("\n");
+              
+              const vals = [r.symbol, sig, r.score, r.ml_score, r.ltp, suggested_trade, trade_ltp, trade_score, trade_ml_score, lot_value];
+              return `<tr style="background-color: ${bgColor};">${vals.map(v => `<td style="border: 1px solid #ccc; padding: 4px;">${v ?? ""}</td>`).join("")}</tr>`;
+            }).join("");
+
+            const tableHtml = `
+              <table style="border-collapse: collapse; font-family: sans-serif; font-size: 12px;">
+                <thead>
+                  <tr style="background: #eee;">${cols.map(c => `<th style="border: 1px solid #ccc; padding: 6px; text-align: left;">${c}</th>`).join("")}</tr>
+                </thead>
+                <tbody>${rowsHtml}</tbody>
+              </table>
+            `;
+            
+            const blob = new Blob([tableHtml], { type: "application/vnd.ms-excel" });
+            const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
-            a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
-            a.download = `fo_scanner_${new Date().toISOString().slice(0, 10)}.csv`;
+            a.href = url;
+            a.download = `fo_scanner_${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(/[/, :]/g, '-')}.xls`;
             a.click();
+            URL.revokeObjectURL(url);
           }} style={{
             color: theme.muted, background: "none", cursor: "pointer",
             padding: "4px 10px", border: `1px solid ${theme.border}`, borderRadius: 4, fontSize: 11
           }}>
-            ↓ CSV
+            ↓ EXCEL
           </button>
           <button onClick={() => setDark(d => !d)}
             style={{
@@ -574,7 +590,10 @@ function ScanCard({ r, theme, onChain, onGreeks, isWatched, onToggleWL }) {
               {r.iv_rank > 0 && <span style={{ marginLeft: 8 }}>IVR {fmt(r.iv_rank, 0)}</span>}
             </div>
           </div>
-          <ScoreDial score={r.score} theme={theme} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <ScoreDial score={r.score} theme={theme} subLabel="QUANT" />
+            <ScoreDial score={r.ml_score || 0} theme={theme} subLabel="ML SCORE" />
+          </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 12 }}>
@@ -608,30 +627,6 @@ function ScanCard({ r, theme, onChain, onGreeks, isWatched, onToggleWL }) {
           <div style={{ marginTop: 8, fontSize: 11, color: theme.muted }}>
             Max Pain: <span style={{ color: theme.text }}>₹{r.max_pain}</span>
             {r.days_to_expiry && <span style={{ marginLeft: 8 }}>DTE: {r.days_to_expiry}d</span>}
-          </div>
-        )}
-
-        {/* ML Bullish Probability */}
-        {r.ml_bullish_probability !== null && r.ml_bullish_probability !== undefined && (
-          <div style={{
-            marginTop: 8, padding: "6px 10px", background: theme.bg,
-            borderRadius: 6, display: "flex", alignItems: "center", gap: 8
-          }}>
-            <span style={{ fontSize: 10, color: theme.muted }}>🤖 ML Signal:</span>
-            <div style={{ flex: 1, height: 6, background: theme.border, borderRadius: 3, overflow: "hidden" }}>
-              <div style={{
-                width: `${r.ml_bullish_probability * 100}%`,
-                height: "100%",
-                background: r.ml_bullish_probability > 0.5 ? "#22c55e" : "#ef4444",
-                transition: "width 0.3s ease"
-              }} />
-            </div>
-            <span style={{
-              fontSize: 11, fontWeight: 600,
-              color: r.ml_bullish_probability > 0.5 ? "#22c55e" : "#ef4444"
-            }}>
-              {(r.ml_bullish_probability * 100).toFixed(0)}%
-            </span>
           </div>
         )}
 
@@ -684,26 +679,27 @@ function ScanCard({ r, theme, onChain, onGreeks, isWatched, onToggleWL }) {
   );
 }
 
-function ScoreDial({ score, theme }) {
+function ScoreDial({ score, theme, subLabel = null }) {
   // v5 thresholds: 85+ is high conviction (trade-worthy), 70+ is moderate
   const color = score >= 85 ? "#22c55e" : score >= 70 ? "#f59e0b" : score >= 50 ? "#fb923c" : "#ef4444";
   const label = score >= 85 ? "HIGH" : score >= 70 ? "MED" : "LOW";
-  const pct = Math.min(100, score);
+  const pctValue = Math.min(100, score);
   return (
     <div style={{ textAlign: "center", minWidth: 52 }}>
-      <div style={{ position: "relative", width: 48, height: 48, margin: "0 auto" }}>
-        <svg width="48" height="48" viewBox="0 0 48 48">
+      {subLabel && <div style={{ fontSize: 9, color: theme.muted, fontWeight: 700, marginBottom: 4, whiteSpace: "nowrap" }}>{subLabel}</div>}
+      <div style={{ position: "relative", width: 44, height: 44, margin: "0 auto" }}>
+        <svg width="44" height="44" viewBox="0 0 48 48">
           <circle cx="24" cy="24" r="20" fill="none" stroke={theme.border} strokeWidth="3" />
           <circle cx="24" cy="24" r="20" fill="none" stroke={color} strokeWidth="3"
-            strokeDasharray={`${pct * 1.26} 126`} strokeLinecap="round"
+            strokeDasharray={`${pctValue * 1.26} 126`} strokeLinecap="round"
             transform="rotate(-90 24 24)" style={{ transition: "stroke-dasharray 0.5s ease" }} />
         </svg>
         <div style={{
           position: "absolute", top: "50%", left: "50%",
-          transform: "translate(-50%, -50%)", fontSize: 14, fontWeight: 700, color
+          transform: "translate(-50%, -50%)", fontSize: 13, fontWeight: 700, color
         }}>{score}</div>
       </div>
-      <div style={{ fontSize: 9, color, fontWeight: 600, marginTop: 2 }}>{label}</div>
+      <div style={{ fontSize: 8, color, fontWeight: 700, marginTop: 2 }}>{label}</div>
     </div>
   );
 }

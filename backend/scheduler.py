@@ -17,7 +17,7 @@ from datetime import datetime, time as dtime, date
 from zoneinfo import ZoneInfo
 
 from . import db
-from . import signals as Signals
+from . import signals_legacy as Signals
 
 log = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -27,6 +27,7 @@ _fetch_nse_chain_fn   = None
 _send_telegram_fn     = None
 _is_market_open_fn    = None
 _scan_all_symbols_fn  = None   # should return list of scan result dicts
+_ml_train_fn          = None
 _all_symbols_list     = []
 
 def init_scheduler(
@@ -34,14 +35,16 @@ def init_scheduler(
     send_telegram_fn,
     is_market_open_fn,
     scan_fn,
+    train_fn,
     all_symbols: list,
 ):
     global _fetch_nse_chain_fn, _send_telegram_fn, _is_market_open_fn
-    global _scan_all_symbols_fn, _all_symbols_list
+    global _scan_all_symbols_fn, _ml_train_fn, _all_symbols_list
     _fetch_nse_chain_fn  = fetch_chain_fn
     _send_telegram_fn    = send_telegram_fn
     _is_market_open_fn   = is_market_open_fn
     _scan_all_symbols_fn = scan_fn
+    _ml_train_fn         = train_fn
     _all_symbols_list    = all_symbols
     log.info("Scheduler initialised.")
 
@@ -398,9 +401,10 @@ def _auto_export_snapshot_csv(snapshot_id: int, is_update: bool = False):
     max_history = max((len(t.get("price_history", [])) for t in trades), default=0)
 
     fieldnames = [
-        "symbol", "type", "strike", "signal", "score",
-        "entry_price", "current_price", "pnl_pct", "max_price", "min_price", "max_pnl_pct",
-        "stock_price", "lot_size", "snapshot_time",
+        "symbol", "signal", "score", "ml_score", "ltp",
+        "suggested_trade", "trade_ltp", "trade_score", "trade_ml_score", "lot_value",
+        "entry_price", "pnl_pct", "max_price", "min_price", "max_pnl_pct",
+        "vol_spike", "snapshot_time",
     ]
     # Add dynamic 5-min price columns
     for i in range(max_history):
@@ -424,18 +428,21 @@ def _auto_export_snapshot_csv(snapshot_id: int, is_update: bool = False):
 
             row = {
                 "symbol": t.get("symbol", ""),
-                "type": t.get("type", ""),
-                "strike": t.get("strike", 0),
                 "signal": t.get("signal", "NEUTRAL"),
                 "score": t.get("score", 0),
+                "ml_score": t.get("ml_score", 0),
+                "ltp": round(t.get("stock_price", 0) or 0, 2),
+                "suggested_trade": f"{t.get('strike')} {t.get('type')}",
+                "trade_ltp": round(current, 2),
+                "trade_score": t.get("score", 0),
+                "trade_ml_score": t.get("ml_score", 0),
+                "lot_value": round((t.get("entry_price", 0) * t.get("lot_size", 0)), 2) if t.get("lot_size") else "",
                 "entry_price": round(entry, 2),
-                "current_price": round(current, 2),
                 "pnl_pct": round(pnl_pct, 2),
                 "max_price": round(t.get("max_price", entry), 2),
                 "min_price": round(t.get("min_price", entry), 2),
                 "max_pnl_pct": round(t.get("max_pnl_pct", 0), 2),
-                "stock_price": round(t.get("stock_price", 0) or 0, 2),
-                "lot_size": t.get("lot_size", 0),
+                "vol_spike": round(t.get("vol_spike", 0) or 0, 2),
                 "snapshot_time": t.get("snapshot_time", ""),
             }
             # Fill price history columns
@@ -488,7 +495,18 @@ async def accuracy_sampler_loop():
                             for r, p, ls in pending:
                                 tid = db.add_accuracy_trade(
                                     sid, r["symbol"], p["type"], p["strike"],
-                                    p["ltp"], r["score"], r["ltp"], lot_size=ls, signal=r.get("signal", "NEUTRAL")
+                                    p["ltp"], r["score"], r["ltp"], 
+                                    lot_size=ls,
+                                    ml_prob=r.get("ml_bullish_probability"),
+                                    signal=r.get("signal", "NEUTRAL"),
+                                    iv_rank=r.get("iv_rank"),
+                                    regime=r.get("regime"),
+                                    max_pain=r.get("max_pain"),
+                                    days_to_expiry=r.get("days_to_expiry"),
+                                    pcr=r.get("pcr"),
+                                    iv=r.get("iv"),
+                                    vol_spike=r.get("vol_spike"),
+                                    ml_score=r.get("ml_score")
                                 )
                                 if tid:
                                     db.update_accuracy_trade_price(tid, p["ltp"])
@@ -503,7 +521,7 @@ async def accuracy_sampler_loop():
                         else:
                             log.info("Accuracy Tracking: No directional trades to save this cycle.")
 
-            await asyncio.sleep(600)  # 10 minutes
+            await asyncio.sleep(900)  # 15 minutes
         except Exception as e:
             log.error(f"Accuracy sampler loop error: {e}")
             await asyncio.sleep(600)
@@ -568,6 +586,38 @@ async def accuracy_price_updater_loop():
 # Start all tasks
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Task 9: ML Model Retraining (daily at 15:45)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def ml_retrain_loop():
+    """Retrains the LightGBM model once daily after market close."""
+    log.info("ML retrain loop started.")
+    _trained_today = None
+
+    while True:
+        try:
+            now   = datetime.now(IST)
+            today = now.date()
+
+            # Run at 15:45, once per day
+            if now.time() >= dtime(15, 45) and _trained_today != today:
+                log.info("Starting daily ML model retraining...")
+                if _ml_train_fn:
+                    res = await asyncio.to_thread(_ml_train_fn)
+                    if "error" in res:
+                        log.error(f"ML retraining failed: {res['error']}")
+                    else:
+                        log.info(f"ML retraining done: Loss {res.get('cv_log_loss_mean')}, Rows {res.get('training_rows')}")
+                        _trained_today = today
+
+            await asyncio.sleep(600)   # check every 10 min
+
+        except Exception as e:
+            log.error(f"ML retrain loop error: {e}")
+            await asyncio.sleep(600)
+
+
 async def start_all():
     """Launch all background tasks. Call from FastAPI lifespan."""
     asyncio.create_task(oi_snapshot_loop())
@@ -578,6 +628,7 @@ async def start_all():
     asyncio.create_task(auto_tpsl_loop())
     asyncio.create_task(accuracy_sampler_loop())
     asyncio.create_task(accuracy_price_updater_loop())
-    log.info("All scheduler tasks started (including Accuracy Tracker).")
+    asyncio.create_task(ml_retrain_loop())
+    log.info("All scheduler tasks started (including Accuracy Tracker & ML Retraining).")
 
 

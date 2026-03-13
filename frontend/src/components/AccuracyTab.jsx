@@ -104,6 +104,7 @@ function CsvSessionCard({ session, theme, onDelete }) {
                 <th style={{ padding: "8px 10px" }}>Symbol</th>
                 <th style={{ padding: "8px 10px" }}>Contract</th>
                 <th style={{ padding: "8px 10px", textAlign: "center" }}>Signal</th>
+                <th style={{ padding: "8px 10px", textAlign: "center" }}>AI Prob</th>
                 <th style={{ padding: "8px 10px", textAlign: "center" }}>Score</th>
                 <th style={{ padding: "8px 10px" }}>Entry</th>
                 <th style={{ padding: "8px 10px" }}>Current</th>
@@ -127,6 +128,13 @@ function CsvSessionCard({ session, theme, onDelete }) {
                       {t.signal && t.signal !== "NEUTRAL" && (
                         <Badge label={t.signal} color={t.signal === "BULLISH" ? theme.green : theme.red} bg={theme.bg} />
                       )}
+                    </td>
+                    <td style={{ padding: "8px 10px", textAlign: "center" }}>
+                      {t.ml_prob !== null && t.ml_prob !== undefined ? (
+                        <span style={{ color: t.ml_prob > 0.7 ? theme.green : t.ml_prob < 0.3 ? theme.red : theme.muted }}>
+                          {fmt(t.ml_prob * 100, 0)}%
+                        </span>
+                      ) : "—"}
                     </td>
                     <td style={{ padding: "8px 10px", textAlign: "center" }}>{t.score}</td>
                     <td style={{ padding: "8px 10px" }}>₹{fmt(t.entry_price)}</td>

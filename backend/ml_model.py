@@ -52,9 +52,9 @@ def _load_training_data(db_path: str = None) -> tuple:
     query = """
         SELECT
             score as weighted_score,
-            COALESCE(gex, 0) as gex,
+            COALESCE(net_gex, 0) as gex,
             COALESCE(iv_skew, 0) as iv_skew,
-            COALESCE(pcr, 1) as pcr,
+            COALESCE(pcr_oi, 1) as pcr,
             regime,
             spot_price,
             symbol,
@@ -186,11 +186,15 @@ def predict(features: dict) -> Optional[float]:
             calibrator = pickle.load(f)
         
         regime_map = {"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3}
+        
+        # Extract features with fallback to metrics sub-dict
+        metrics = features.get("metrics", {})
+        
         X = np.array([[
             float(features.get("weighted_score", features.get("score", 0))),
-            float(features.get("gex", 0)),
-            float(features.get("iv_skew", 0)),
-            float(features.get("pcr", 1)),
+            float(features.get("gex", metrics.get("gex", 0))),
+            float(features.get("iv_skew", metrics.get("iv_skew", 0))),
+            float(features.get("pcr", metrics.get("pcr", features.get("pcr_oi", 1)))),
             float(regime_map.get(features.get("regime", "TRENDING"), 1)),
         ]])
         

@@ -132,7 +132,7 @@ def screen_straddle(
     if atm_iv <= 0 or atm_iv > 60:
         return None
 
-    from .analytics import nearest_atm, get_strike_interval
+    from analytics import nearest_atm, get_strike_interval
     atm = nearest_atm(spot, symbol)
     interval = get_strike_interval(symbol)
 

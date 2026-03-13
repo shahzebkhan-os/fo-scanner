@@ -38,14 +38,16 @@ function Badge({ label, color, bg }) {
   );
 }
 
-function ScoreDial({ score, theme }) {
+function ScoreDial({ score, theme, label: topLabel = null, subLabel: bottomLabel = null }) {
   const color = score >= 85 ? "#22c55e" : score >= 70 ? "#f59e0b" : score >= 50 ? "#fb923c" : "#ef4444";
-  const label = score >= 85 ? "HIGH" : score >= 70 ? "MED" : "LOW";
+  const defLabel = score >= 85 ? "HIGH" : score >= 70 ? "MED" : "LOW";
+  const label = topLabel || defLabel;
   const pctValue = Math.min(100, score);
   return (
     <div style={{ textAlign: "center", minWidth: 52 }}>
-      <div style={{ position: "relative", width: 48, height: 48, margin: "0 auto" }}>
-        <svg width="48" height="48" viewBox="0 0 48 48">
+      {bottomLabel && <div style={{ fontSize: 9, color: theme.muted, fontWeight: 700, marginBottom: 4 }}>{bottomLabel}</div>}
+      <div style={{ position: "relative", width: 44, height: 44, margin: "0 auto" }}>
+        <svg width="44" height="44" viewBox="0 0 48 48">
           <circle cx="24" cy="24" r="20" fill="none" stroke={theme.border} strokeWidth="3" />
           <circle cx="24" cy="24" r="20" fill="none" stroke={color} strokeWidth="3"
             strokeDasharray={`${pctValue * 1.26} 126`} strokeLinecap="round"
@@ -53,10 +55,10 @@ function ScoreDial({ score, theme }) {
         </svg>
         <div style={{
           position: "absolute", top: "50%", left: "50%",
-          transform: "translate(-50%, -50%)", fontSize: 14, fontWeight: 700, color
+          transform: "translate(-50%, -50%)", fontSize: 13, fontWeight: 700, color
         }}>{score}</div>
       </div>
-      <div style={{ fontSize: 9, color, fontWeight: 600, marginTop: 2 }}>{label}</div>
+      <div style={{ fontSize: 8, color, fontWeight: 700, marginTop: 2 }}>{label}</div>
     </div>
   );
 }
@@ -88,7 +90,10 @@ function ScanCard({ r, theme, onChain, onGreeks, isWatched, onToggleWL }) {
               {r.iv_rank > 0 && <span style={{ marginLeft: 8 }}>IVR {fmt(r.iv_rank, 0)}</span>}
             </div>
           </div>
-          <ScoreDial score={r.score} theme={theme} />
+          <div style={{ display: "flex", gap: 10 }}>
+            <ScoreDial score={r.score} theme={theme} subLabel="QUANT SCORE" />
+            <ScoreDial score={r.ml_score || 0} theme={theme} subLabel="ML SCORE" />
+          </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 12 }}>
