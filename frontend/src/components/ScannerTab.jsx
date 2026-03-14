@@ -323,10 +323,7 @@ export default function ScannerTab({ theme, onChain, onGreeks, onData, marketSta
     const saved = localStorage.getItem("scanInterval");
     return saved ? parseInt(saved, 10) : 120;
   });
-  const [autoRefresh, setAutoRefresh] = useState(() => {
-    // Default based on market status — will be updated once marketStatus is available
-    return localStorage.getItem("autoRefresh") !== "false";
-  });
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const [scanProgress, setScanProgress] = useState(0);
   const eventSourceRef = useRef(null);
@@ -335,11 +332,7 @@ export default function ScannerTab({ theme, onChain, onGreeks, onData, marketSta
   // Market-aware auto-scan: auto-enable when market opens, auto-disable when closed
   useEffect(() => {
     if (!marketStatus) return;
-    if (marketStatus.open) {
-      setAutoRefresh(true);
-    } else {
-      setAutoRefresh(false);
-    }
+    setAutoRefresh(marketStatus.open);
   }, [marketStatus?.open]);
 
   const load = useCallback(() => {

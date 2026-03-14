@@ -311,9 +311,7 @@ function ScannerTab({ theme, onChain, onGreeks, onData, marketStatus }) {
     const saved = localStorage.getItem("scanInterval");
     return saved ? parseInt(saved, 10) : 120;
   });
-  const [autoRefresh, setAutoRefresh] = useState(() => {
-    return localStorage.getItem("autoRefresh") !== "false";
-  });
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const [scanMeta, setScanMeta] = useState({ stale: false, stale_count: 0 });
   const [mlStatus, setMlStatus] = useState({ trained: false });
@@ -324,11 +322,7 @@ function ScannerTab({ theme, onChain, onGreeks, onData, marketStatus }) {
   // Market-aware auto-scan: ON when market open, OFF when closed
   useEffect(() => {
     if (!marketStatus) return;
-    if (marketStatus.open) {
-      setAutoRefresh(true);
-    } else {
-      setAutoRefresh(false);
-    }
+    setAutoRefresh(marketStatus.open);
   }, [marketStatus?.open]);
 
   const load = useCallback(() => {

@@ -9,10 +9,12 @@ New tables vs v3:
   - settings          : per-symbol config (alert threshold, watchlist, capital)
 """
 
-import sqlite3, os, json
+import sqlite3, os, json, logging
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "scanner.db")
 IST = ZoneInfo("Asia/Kolkata")
@@ -291,6 +293,7 @@ def has_open_trade(symbol, opt_type, strike):
 def add_trade(symbol, opt_type, strike, entry_price, reason="", lot_size=0):
     # Prevent duplicate open trades for the same symbol/type/strike
     if has_open_trade(symbol, opt_type, strike):
+        logger.info("Skipped duplicate trade: %s %s %s (already open)", symbol, opt_type, strike)
         return False
     with _conn() as c:
         c.execute("""
