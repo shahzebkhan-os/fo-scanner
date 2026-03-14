@@ -179,6 +179,135 @@ function ScanCard({ r, theme, onChain, onGreeks, isWatched, onToggleWL }) {
   );
 }
 
+function GlobalSentimentPanel({ theme }) {
+  const [sentiment, setSentiment] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await apiFetch("/api/market-sentiment");
+      setSentiment(d);
+    } catch (e) {
+      console.error("GlobalSentiment fetch error:", e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 5 * 60 * 1000); // refresh every 5 min
+    return () => clearInterval(timer);
+  }, [load]);
+
+  if (!sentiment && !loading) return null;
+  if (loading && !sentiment) return null;
+
+  const gc = sentiment?.global_cues || {};
+  const md = sentiment?.market_data || {};
+  const score = gc.score || 0;
+  const sentLabel = gc.sentiment || "NEUTRAL";
+
+  const sentColor =
+    sentLabel.includes("BULLISH") ? "#22c55e" :
+    sentLabel.includes("BEARISH") ? "#ef4444" : "#94a3b8";
+  const sentBg =
+    sentLabel.includes("BULLISH") ? "rgba(34,197,94,.08)" :
+    sentLabel.includes("BEARISH") ? "rgba(239,68,68,.08)" : "rgba(148,163,184,.06)";
+
+  const scoreBar = Math.round((score + 1) / 2 * 100); // map -1..+1 → 0..100
+
+  const factors = [
+    { label: "S&P 500", value: md.spx_change_pct != null ? `${md.spx_change_pct >= 0 ? "+" : ""}${Number(md.spx_change_pct).toFixed(2)}%` : "—", positive: md.spx_change_pct >= 0 },
+    { label: "NASDAQ", value: md.nasdaq_change_pct != null ? `${md.nasdaq_change_pct >= 0 ? "+" : ""}${Number(md.nasdaq_change_pct).toFixed(2)}%` : "—", positive: md.nasdaq_change_pct >= 0 },
+    { label: "DXY", value: md.dxy ? Number(md.dxy).toFixed(2) : "—", positive: null },
+    { label: "Crude (WTI)", value: md.crude_oil ? `$${Number(md.crude_oil).toFixed(1)}` : "—", positive: null },
+    { label: "USD/INR", value: md.usdinr ? Number(md.usdinr).toFixed(2) : "—", positive: null },
+    { label: "VIX", value: md.india_vix ? Number(md.india_vix).toFixed(1) : "—", positive: md.india_vix > 0 && md.india_vix < 20 },
+  ];
+
+  return (
+    <div style={{
+      background: theme.card,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "12px 16px",
+      marginBottom: 14,
+      borderLeft: `3px solid ${sentColor}`,
+      background: sentBg,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 14 }}>🌐</span>
+          <span style={{ fontWeight: 700, fontSize: 13 }}>Global Market Sentiment</span>
+          <span style={{
+            padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 600,
+            color: sentColor, background: `${sentColor}20`,
+          }}>{sentLabel}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 10, color: theme.muted }}>GLOBAL SCORE</div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: sentColor }}>{score >= 0 ? "+" : ""}{score.toFixed(2)}</div>
+          </div>
+          <button onClick={load} disabled={loading}
+            style={{
+              background: "none", border: `1px solid ${theme.border}`,
+              borderRadius: 4, color: theme.muted, cursor: "pointer",
+              fontSize: 12, padding: "2px 7px",
+            }}>
+            {loading ? "⟳" : "↻"}
+          </button>
+        </div>
+      </div>
+
+      <div style={{
+        height: 4, background: theme.border, borderRadius: 2, marginBottom: 10, overflow: "hidden",
+      }}>
+        <div style={{
+          height: "100%", borderRadius: 2,
+          width: `${scoreBar}%`,
+          background: `linear-gradient(to right, #ef4444, #f59e0b, #22c55e)`,
+          transition: "width 0.5s ease",
+        }} />
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {factors.map(({ label, value, positive }) => (
+          <div key={label} style={{
+            background: theme.bg, borderRadius: 6,
+            padding: "5px 10px", minWidth: 80, textAlign: "center",
+            border: `1px solid ${theme.border}`,
+          }}>
+            <div style={{ fontSize: 9, color: theme.muted, marginBottom: 2 }}>{label}</div>
+            <div style={{
+              fontWeight: 600, fontSize: 12,
+              color: positive === null ? theme.text : positive ? "#22c55e" : "#ef4444",
+            }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {gc.reason && gc.reason !== "No significant global cues" && (
+        <div style={{
+          marginTop: 8, fontSize: 10, color: theme.muted,
+          fontStyle: "italic", lineHeight: 1.4,
+        }}>
+          {gc.reason}
+        </div>
+      )}
+      {md.last_updated && (
+        <div style={{ marginTop: 6, fontSize: 9, color: theme.muted }}>
+          Data: {new Date(md.last_updated).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })} IST
+          {sentiment?.source_stale && <span style={{ color: "#f59e0b", marginLeft: 6 }}>⚠ stale</span>}
+          {gc.time_multiplier != null && <span style={{ marginLeft: 6 }}>Weight: {Math.round(gc.time_multiplier * 100)}%</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ScannerTab({ theme, onChain, onGreeks, onData }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -419,6 +548,8 @@ export default function ScannerTab({ theme, onChain, onGreeks, onData }) {
           </div>
         </div>
       )}
+
+      <GlobalSentimentPanel theme={theme} />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
         {filtered.map((r, idx) => (

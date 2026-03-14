@@ -20,6 +20,11 @@ from .cache import cache
 from .ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status, get_model_details as ml_get_details, get_symbol_predictions as ml_get_predictions
 from .historical_loader import get_backfill_progress, run_backfill_with_progress, reset_backfill_progress
 from .suggestions import generate_suggestions
+from . import market_external
+from .signals.global_cues import GlobalCuesSignal
+
+# Module-level GlobalCuesSignal singleton (stateless, safe to share)
+_global_cues_signal = GlobalCuesSignal()
 
 # ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
 # Bug 6 fix: tracks which trades have already been entered today
@@ -648,6 +653,28 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
 
     _maybe_reset_daily()                        # Bug 6 fix: reset dedup sets on new day
 
+    # ── Fetch external market data once per scan cycle (cached 30 min) ────────
+    ext_data = await market_external.fetch_external_market_data()
+    _now_ist = datetime.now(IST)
+    global_cues_result = _global_cues_signal.compute(
+        gift_nifty=ext_data.get("nifty_prev_close", 0),
+        nifty_prev_close=ext_data.get("nifty_prev_close", 0),
+        spx_change_pct=ext_data.get("spx_change_pct", 0),
+        nasdaq_change_pct=ext_data.get("nasdaq_change_pct", 0),
+        dxy=ext_data.get("dxy", 0),
+        dxy_prev=ext_data.get("dxy_prev", 0),
+        crude_oil=ext_data.get("crude_oil", 0),
+        crude_prev=ext_data.get("crude_prev", 0),
+        usdinr=ext_data.get("usdinr", 0),
+        usdinr_prev=ext_data.get("usdinr_prev", 0),
+        current_time=_now_ist,
+    )
+    log.info(
+        f"  GlobalCues score={global_cues_result.score:+.3f} "
+        f"confidence={global_cues_result.confidence:.2f} "
+        f"({global_cues_result.reason})"
+    )
+
     ltp_map = await fetch_indstocks_ltp(all_symbols)
     sem = asyncio.Semaphore(3)
     
@@ -711,6 +738,29 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
                 stats["signal_reasons"] = reasons
                 signal = stats["signal"]
                 stock_score = stats["score"]
+
+                # ── Global Cues Adjustment ─────────────────────────────────
+                # Boost or dampen score based on external market sentiment.
+                # Maximum adjustment: ±10 points (decays via time_multiplier).
+                # Alignment → boost; divergence → slight penalty.
+                gc_score = global_cues_result.score  # -1.0 to +1.0
+                gc_adjustment = 0
+                if abs(gc_score) >= 0.1:
+                    MAX_ADJ = 10
+                    if (signal == "BULLISH" and gc_score > 0) or (signal == "BEARISH" and gc_score < 0):
+                        gc_adjustment = int(abs(gc_score) * MAX_ADJ)
+                    elif (signal == "BULLISH" and gc_score < -0.3) or (signal == "BEARISH" and gc_score > 0.3):
+                        gc_adjustment = -int(abs(gc_score) * MAX_ADJ // 2)
+                    stats["score"] = max(0, min(100, stats["score"] + gc_adjustment))
+                    stock_score = stats["score"]
+                    if gc_adjustment >= 4:
+                        reasons.append(f"🌐 Global Cues Positive ({gc_score:+.2f})")
+                    elif gc_adjustment <= -4:
+                        reasons.append(f"🌐 Global Cues Negative ({gc_score:+.2f})")
+                    stats["signal_reasons"] = reasons
+
+                stats["global_cues_score"] = round(gc_score, 3)
+                stats["global_cues_adjustment"] = gc_adjustment
 
                 # ── Auto paper-trade entry  (v6: Stricter ML-refined gate) ──
                 if (stock_score >= 85
@@ -812,6 +862,21 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
         "data":          result,
         "stale":         len(stale_results) > 0,
         "stale_count":   len(stale_results),
+        "global_cues": {
+            "score":          round(global_cues_result.score, 4),
+            "confidence":     round(global_cues_result.confidence, 4),
+            "reason":         global_cues_result.reason,
+            "time_multiplier": global_cues_result.metadata.get("time_multiplier", 0.7),
+        },
+        "market_data": {
+            "spx_change_pct":   ext_data.get("spx_change_pct", 0),
+            "nasdaq_change_pct": ext_data.get("nasdaq_change_pct", 0),
+            "dxy":              ext_data.get("dxy", 0),
+            "crude_oil":        ext_data.get("crude_oil", 0),
+            "usdinr":           ext_data.get("usdinr", 0),
+            "india_vix":        ext_data.get("india_vix", 0),
+            "last_updated":     ext_data.get("last_updated"),
+        },
     }
     
     # Cache the result for 60 seconds
@@ -835,6 +900,24 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
 
     async def event_generator():
         _maybe_reset_daily()
+
+        # ── Fetch external market data once per scan cycle (cached 30 min) ──
+        ext_data = await market_external.fetch_external_market_data()
+        _now_ist = datetime.now(IST)
+        gc_result = _global_cues_signal.compute(
+            gift_nifty=ext_data.get("nifty_prev_close", 0),
+            nifty_prev_close=ext_data.get("nifty_prev_close", 0),
+            spx_change_pct=ext_data.get("spx_change_pct", 0),
+            nasdaq_change_pct=ext_data.get("nasdaq_change_pct", 0),
+            dxy=ext_data.get("dxy", 0),
+            dxy_prev=ext_data.get("dxy_prev", 0),
+            crude_oil=ext_data.get("crude_oil", 0),
+            crude_prev=ext_data.get("crude_prev", 0),
+            usdinr=ext_data.get("usdinr", 0),
+            usdinr_prev=ext_data.get("usdinr_prev", 0),
+            current_time=_now_ist,
+        )
+
         ltp_map = await fetch_indstocks_ltp(all_symbols)
         sem = asyncio.Semaphore(3)
         completed = 0
@@ -863,6 +946,7 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
 
                     stock_score = stats.get("score", 0)
                     signal = stats.get("signal", "NEUTRAL")
+                    reasons = stats.get("signal_reasons", [])
 
                     if ml_prob is not None:
                         if signal == "BULLISH":
@@ -878,6 +962,28 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
                         elif (signal == "BULLISH" and ml_prob < 0.40) or (signal == "BEARISH" and ml_prob > 0.60):
                             stats["signal"] = "NEUTRAL"
                             stats["score"] = max(0, stock_score - 15)
+
+                    signal = stats.get("signal", "NEUTRAL")
+                    stock_score = stats.get("score", 0)
+
+                    # ── Global Cues Adjustment ─────────────────────────────
+                    gc_score = gc_result.score  # -1.0 to +1.0
+                    gc_adjustment = 0
+                    if abs(gc_score) >= 0.1:
+                        MAX_ADJ = 10
+                        if (signal == "BULLISH" and gc_score > 0) or (signal == "BEARISH" and gc_score < 0):
+                            gc_adjustment = int(abs(gc_score) * MAX_ADJ)
+                        elif (signal == "BULLISH" and gc_score < -0.3) or (signal == "BEARISH" and gc_score > 0.3):
+                            gc_adjustment = -int(abs(gc_score) * MAX_ADJ // 2)
+                        stats["score"] = max(0, min(100, stats["score"] + gc_adjustment))
+                        if gc_adjustment >= 4:
+                            reasons.append(f"🌐 Global Cues Positive ({gc_score:+.2f})")
+                        elif gc_adjustment <= -4:
+                            reasons.append(f"🌐 Global Cues Negative ({gc_score:+.2f})")
+                        stats["signal_reasons"] = reasons
+
+                    stats["global_cues_score"] = round(gc_score, 3)
+                    stats["global_cues_adjustment"] = gc_adjustment
 
                     return {
                         "symbol": symbol,
@@ -1483,6 +1589,69 @@ async def start_backfill_endpoint(days: int = 252):
     return {"status": "started", "days": days}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# External Market Sentiment — Global cues for scoring context
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/market-sentiment")
+async def market_sentiment(refresh: bool = False):
+    """
+    Return current global market sentiment indicators.
+
+    Data sources (via Yahoo Finance, cached 30 min):
+      - S&P 500 and NASDAQ overnight % change
+      - Dollar Index (DXY) level and direction
+      - WTI Crude Oil level and direction
+      - USD/INR exchange rate
+      - CBOE VIX (global volatility proxy)
+      - NIFTY 50 previous close
+
+    Also returns the computed GlobalCuesSignal score (-1 to +1) and
+    a human-readable sentiment label.
+    """
+    ext = await market_external.fetch_external_market_data(force_refresh=refresh)
+
+    now = datetime.now(IST)
+    gc_result = _global_cues_signal.compute(
+        gift_nifty=ext.get("nifty_prev_close", 0),  # proxy: prev close used for baseline
+        nifty_prev_close=ext.get("nifty_prev_close", 0),
+        spx_change_pct=ext.get("spx_change_pct", 0),
+        nasdaq_change_pct=ext.get("nasdaq_change_pct", 0),
+        dxy=ext.get("dxy", 0),
+        dxy_prev=ext.get("dxy_prev", 0),
+        crude_oil=ext.get("crude_oil", 0),
+        crude_prev=ext.get("crude_prev", 0),
+        usdinr=ext.get("usdinr", 0),
+        usdinr_prev=ext.get("usdinr_prev", 0),
+        current_time=now,
+    )
+
+    score = gc_result.score  # -1 to +1
+    if score >= 0.4:
+        sentiment_label = "BULLISH"
+    elif score >= 0.1:
+        sentiment_label = "MILDLY BULLISH"
+    elif score <= -0.4:
+        sentiment_label = "BEARISH"
+    elif score <= -0.1:
+        sentiment_label = "MILDLY BEARISH"
+    else:
+        sentiment_label = "NEUTRAL"
+
+    return {
+        "timestamp": now.isoformat(),
+        "market_data": ext,
+        "global_cues": {
+            "score": round(score, 4),
+            "confidence": round(gc_result.confidence, 4),
+            "sentiment": sentiment_label,
+            "reason": gc_result.reason,
+            "time_multiplier": gc_result.metadata.get("time_multiplier", 0.7),
+            "metadata": gc_result.metadata,
+        },
+        "source_cached": ext.get("cached", False),
+        "source_stale": ext.get("stale", False),
+    }
 
 
 # ── Frontend Catch-all ────────────────────────────────────────────────────────
