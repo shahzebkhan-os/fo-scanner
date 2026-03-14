@@ -413,7 +413,7 @@ export default function ScannerTab({ theme, onChain, onGreeks, onData }) {
           <div style={{ flex: 1, height: 4, background: theme.border, borderRadius: 2, overflow: "hidden" }}>
             <div style={{
               height: "100%", background: theme.accent || "#6366f1", borderRadius: 2,
-              width: `${Math.min(100, (scanProgress / 88) * 100)}%`,
+              width: `${Math.min(100, (scanProgress / 90) * 100)}%`,
               transition: "width 0.3s ease",
             }} />
           </div>
