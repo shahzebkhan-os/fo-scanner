@@ -224,12 +224,11 @@ function GlobalSentimentPanel({ theme }) {
     { label: "DXY", value: md.dxy ? Number(md.dxy).toFixed(2) : "—", positive: null },
     { label: "Crude (WTI)", value: md.crude_oil ? `$${Number(md.crude_oil).toFixed(1)}` : "—", positive: null },
     { label: "USD/INR", value: md.usdinr ? Number(md.usdinr).toFixed(2) : "—", positive: null },
-    { label: "VIX", value: md.india_vix ? Number(md.india_vix).toFixed(1) : "—", positive: md.india_vix > 0 && md.india_vix < 20 },
+    { label: "CBOE VIX", value: md.cboe_vix ? Number(md.cboe_vix).toFixed(1) : "—", positive: md.cboe_vix > 0 && md.cboe_vix < 20 },
   ];
 
   return (
     <div style={{
-      background: theme.card,
       border: `1px solid ${theme.border}`,
       borderRadius: 8,
       padding: "12px 16px",

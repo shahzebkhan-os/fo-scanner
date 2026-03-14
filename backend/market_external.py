@@ -46,7 +46,7 @@ async def fetch_external_market_data(force_refresh: bool = False) -> dict:
       crude_prev         — WTI crude price (previous day)
       usdinr             — USD/INR rate (current)
       usdinr_prev        — USD/INR rate (previous day)
-      india_vix          — CBOE VIX (US volatility, proxy for global risk)
+      cboe_vix           — CBOE VIX (US equity volatility, global risk proxy)
       nifty_prev_close   — NIFTY 50 previous close (for gap estimate)
       last_updated       — ISO timestamp of the last successful fetch
       source             — data source label
@@ -147,7 +147,7 @@ def _fetch_yfinance_sync() -> dict:
         "crude_prev": round(crude_prev, 2),
         "usdinr": round(inr_curr, 2),
         "usdinr_prev": round(inr_prev, 2),
-        "india_vix": round(vix_curr, 2),
+        "cboe_vix": round(vix_curr, 2),
         "nifty_prev_close": round(nifty_prev, 2),
         "last_updated": datetime.now(IST).isoformat(),
         "source": "Yahoo Finance",
@@ -167,7 +167,7 @@ def _default_data() -> dict:
         "crude_prev": 0.0,
         "usdinr": 0.0,
         "usdinr_prev": 0.0,
-        "india_vix": 0.0,
+        "cboe_vix": 0.0,
         "nifty_prev_close": 0.0,
         "last_updated": None,
         "source": "unavailable",

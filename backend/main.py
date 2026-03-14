@@ -26,6 +26,58 @@ from .signals.global_cues import GlobalCuesSignal
 # Module-level GlobalCuesSignal singleton (stateless, safe to share)
 _global_cues_signal = GlobalCuesSignal()
 
+
+def _apply_global_cues_adjustment(stats: dict, gc_result, signal: str) -> dict:
+    """
+    Apply global cues score adjustment to a stock's scan stats in-place.
+
+    Boosts score when signal direction aligns with global sentiment,
+    penalises when they strongly diverge. Maximum adjustment ±10 pts
+    (already modulated by time_multiplier inside gc_result.score).
+    """
+    gc_score = gc_result.score  # -1.0 to +1.0 (time-decayed)
+    gc_adjustment = 0
+    if abs(gc_score) >= 0.1:
+        MAX_ADJ = 10
+        if (signal == "BULLISH" and gc_score > 0) or (signal == "BEARISH" and gc_score < 0):
+            gc_adjustment = int(abs(gc_score) * MAX_ADJ)
+        elif (signal == "BULLISH" and gc_score < -0.3) or (signal == "BEARISH" and gc_score > 0.3):
+            gc_adjustment = -int(abs(gc_score) * MAX_ADJ // 2)
+        stats["score"] = max(0, min(100, stats.get("score", 0) + gc_adjustment))
+        reasons = stats.get("signal_reasons", [])
+        if gc_adjustment >= 4:
+            reasons.append(f"🌐 Global Cues Positive ({gc_score:+.2f})")
+        elif gc_adjustment <= -4:
+            reasons.append(f"🌐 Global Cues Negative ({gc_score:+.2f})")
+        stats["signal_reasons"] = reasons
+    stats["global_cues_score"] = round(gc_score, 3)
+    stats["global_cues_adjustment"] = gc_adjustment
+    return stats
+
+
+def _compute_global_cues(ext_data: dict):
+    """
+    Compute GlobalCuesSignal from fetched external market data.
+
+    Note: gift_nifty is passed as 0 because GIFT Nifty real-time data is
+    unavailable via Yahoo Finance during Indian market hours.  The other
+    four factors (US markets, DXY, Crude, USD/INR) still drive the signal.
+    """
+    return _global_cues_signal.compute(
+        gift_nifty=0,
+        nifty_prev_close=ext_data.get("nifty_prev_close", 0),
+        spx_change_pct=ext_data.get("spx_change_pct", 0),
+        nasdaq_change_pct=ext_data.get("nasdaq_change_pct", 0),
+        dxy=ext_data.get("dxy", 0),
+        dxy_prev=ext_data.get("dxy_prev", 0),
+        crude_oil=ext_data.get("crude_oil", 0),
+        crude_prev=ext_data.get("crude_prev", 0),
+        usdinr=ext_data.get("usdinr", 0),
+        usdinr_prev=ext_data.get("usdinr_prev", 0),
+        current_time=datetime.now(IST),
+    )
+
+
 # ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
 # Bug 6 fix: tracks which trades have already been entered today
 # Bug 5 fix: separate sets for trades vs alerts so thresholds are independent
@@ -655,20 +707,7 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
 
     # ── Fetch external market data once per scan cycle (cached 30 min) ────────
     ext_data = await market_external.fetch_external_market_data()
-    _now_ist = datetime.now(IST)
-    global_cues_result = _global_cues_signal.compute(
-        gift_nifty=ext_data.get("nifty_prev_close", 0),
-        nifty_prev_close=ext_data.get("nifty_prev_close", 0),
-        spx_change_pct=ext_data.get("spx_change_pct", 0),
-        nasdaq_change_pct=ext_data.get("nasdaq_change_pct", 0),
-        dxy=ext_data.get("dxy", 0),
-        dxy_prev=ext_data.get("dxy_prev", 0),
-        crude_oil=ext_data.get("crude_oil", 0),
-        crude_prev=ext_data.get("crude_prev", 0),
-        usdinr=ext_data.get("usdinr", 0),
-        usdinr_prev=ext_data.get("usdinr_prev", 0),
-        current_time=_now_ist,
-    )
+    global_cues_result = _compute_global_cues(ext_data)
     log.info(
         f"  GlobalCues score={global_cues_result.score:+.3f} "
         f"confidence={global_cues_result.confidence:.2f} "
@@ -740,27 +779,8 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
                 stock_score = stats["score"]
 
                 # ── Global Cues Adjustment ─────────────────────────────────
-                # Boost or dampen score based on external market sentiment.
-                # Maximum adjustment: ±10 points (decays via time_multiplier).
-                # Alignment → boost; divergence → slight penalty.
-                gc_score = global_cues_result.score  # -1.0 to +1.0
-                gc_adjustment = 0
-                if abs(gc_score) >= 0.1:
-                    MAX_ADJ = 10
-                    if (signal == "BULLISH" and gc_score > 0) or (signal == "BEARISH" and gc_score < 0):
-                        gc_adjustment = int(abs(gc_score) * MAX_ADJ)
-                    elif (signal == "BULLISH" and gc_score < -0.3) or (signal == "BEARISH" and gc_score > 0.3):
-                        gc_adjustment = -int(abs(gc_score) * MAX_ADJ // 2)
-                    stats["score"] = max(0, min(100, stats["score"] + gc_adjustment))
-                    stock_score = stats["score"]
-                    if gc_adjustment >= 4:
-                        reasons.append(f"🌐 Global Cues Positive ({gc_score:+.2f})")
-                    elif gc_adjustment <= -4:
-                        reasons.append(f"🌐 Global Cues Negative ({gc_score:+.2f})")
-                    stats["signal_reasons"] = reasons
-
-                stats["global_cues_score"] = round(gc_score, 3)
-                stats["global_cues_adjustment"] = gc_adjustment
+                _apply_global_cues_adjustment(stats, global_cues_result, signal)
+                stock_score = stats["score"]
 
                 # ── Auto paper-trade entry  (v6: Stricter ML-refined gate) ──
                 if (stock_score >= 85
@@ -874,7 +894,7 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
             "dxy":              ext_data.get("dxy", 0),
             "crude_oil":        ext_data.get("crude_oil", 0),
             "usdinr":           ext_data.get("usdinr", 0),
-            "india_vix":        ext_data.get("india_vix", 0),
+            "cboe_vix":         ext_data.get("cboe_vix", 0),
             "last_updated":     ext_data.get("last_updated"),
         },
     }
@@ -903,20 +923,7 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
 
         # ── Fetch external market data once per scan cycle (cached 30 min) ──
         ext_data = await market_external.fetch_external_market_data()
-        _now_ist = datetime.now(IST)
-        gc_result = _global_cues_signal.compute(
-            gift_nifty=ext_data.get("nifty_prev_close", 0),
-            nifty_prev_close=ext_data.get("nifty_prev_close", 0),
-            spx_change_pct=ext_data.get("spx_change_pct", 0),
-            nasdaq_change_pct=ext_data.get("nasdaq_change_pct", 0),
-            dxy=ext_data.get("dxy", 0),
-            dxy_prev=ext_data.get("dxy_prev", 0),
-            crude_oil=ext_data.get("crude_oil", 0),
-            crude_prev=ext_data.get("crude_prev", 0),
-            usdinr=ext_data.get("usdinr", 0),
-            usdinr_prev=ext_data.get("usdinr_prev", 0),
-            current_time=_now_ist,
-        )
+        gc_result = _compute_global_cues(ext_data)
 
         ltp_map = await fetch_indstocks_ltp(all_symbols)
         sem = asyncio.Semaphore(3)
@@ -967,23 +974,7 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
                     stock_score = stats.get("score", 0)
 
                     # ── Global Cues Adjustment ─────────────────────────────
-                    gc_score = gc_result.score  # -1.0 to +1.0
-                    gc_adjustment = 0
-                    if abs(gc_score) >= 0.1:
-                        MAX_ADJ = 10
-                        if (signal == "BULLISH" and gc_score > 0) or (signal == "BEARISH" and gc_score < 0):
-                            gc_adjustment = int(abs(gc_score) * MAX_ADJ)
-                        elif (signal == "BULLISH" and gc_score < -0.3) or (signal == "BEARISH" and gc_score > 0.3):
-                            gc_adjustment = -int(abs(gc_score) * MAX_ADJ // 2)
-                        stats["score"] = max(0, min(100, stats["score"] + gc_adjustment))
-                        if gc_adjustment >= 4:
-                            reasons.append(f"🌐 Global Cues Positive ({gc_score:+.2f})")
-                        elif gc_adjustment <= -4:
-                            reasons.append(f"🌐 Global Cues Negative ({gc_score:+.2f})")
-                        stats["signal_reasons"] = reasons
-
-                    stats["global_cues_score"] = round(gc_score, 3)
-                    stats["global_cues_adjustment"] = gc_adjustment
+                    _apply_global_cues_adjustment(stats, gc_result, signal)
 
                     return {
                         "symbol": symbol,
@@ -1611,20 +1602,7 @@ async def market_sentiment(refresh: bool = False):
     """
     ext = await market_external.fetch_external_market_data(force_refresh=refresh)
 
-    now = datetime.now(IST)
-    gc_result = _global_cues_signal.compute(
-        gift_nifty=ext.get("nifty_prev_close", 0),  # proxy: prev close used for baseline
-        nifty_prev_close=ext.get("nifty_prev_close", 0),
-        spx_change_pct=ext.get("spx_change_pct", 0),
-        nasdaq_change_pct=ext.get("nasdaq_change_pct", 0),
-        dxy=ext.get("dxy", 0),
-        dxy_prev=ext.get("dxy_prev", 0),
-        crude_oil=ext.get("crude_oil", 0),
-        crude_prev=ext.get("crude_prev", 0),
-        usdinr=ext.get("usdinr", 0),
-        usdinr_prev=ext.get("usdinr_prev", 0),
-        current_time=now,
-    )
+    gc_result = _compute_global_cues(ext)
 
     score = gc_result.score  # -1 to +1
     if score >= 0.4:
@@ -1639,7 +1617,7 @@ async def market_sentiment(refresh: bool = False):
         sentiment_label = "NEUTRAL"
 
     return {
-        "timestamp": now.isoformat(),
+        "timestamp": datetime.now(IST).isoformat(),
         "market_data": ext,
         "global_cues": {
             "score": round(score, 4),
