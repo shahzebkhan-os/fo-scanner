@@ -340,16 +340,13 @@ function ScannerTab({ theme, onChain, onGreeks, onData, marketStatus }) {
     setData([]);
     setScanProgress(0);
 
-    let sseTimedOut = false;
-
     const es = new EventSource(`${API}/api/scan-stream?limit=90`);
     eventSourceRef.current = es;
     const incoming = [];
 
     // Timeout: if no result event arrives within 30s, fall back to regular scan
     const sseTimeout = setTimeout(() => {
-      if (incoming.length === 0 && es.readyState !== 2) {
-        sseTimedOut = true;
+      if (incoming.length === 0 && eventSourceRef.current === es) {
         es.close();
         eventSourceRef.current = null;
         console.warn("SSE timeout — falling back to /api/scan");
@@ -379,7 +376,7 @@ function ScannerTab({ theme, onChain, onGreeks, onData, marketStatus }) {
 
     es.addEventListener("done", (e) => {
       clearTimeout(sseTimeout);
-      if (sseTimedOut) return; // Already handled by timeout fallback
+      if (eventSourceRef.current !== es) return; // Already handled by timeout fallback
       try {
         const meta = JSON.parse(e.data);
         setScanMeta({ stale: false, stale_count: 0, _fetched_at: meta.timestamp });
@@ -398,7 +395,7 @@ function ScannerTab({ theme, onChain, onGreeks, onData, marketStatus }) {
 
     es.onerror = () => {
       clearTimeout(sseTimeout);
-      if (sseTimedOut) return; // Already handled by timeout fallback
+      if (eventSourceRef.current !== es) return; // Already handled by timeout fallback
       // On error, fall back to regular scan endpoint
       es.close();
       eventSourceRef.current = null;

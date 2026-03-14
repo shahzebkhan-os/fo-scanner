@@ -421,7 +421,7 @@ async def fetch_nse_chain(symbol: str) -> dict:
     
     for attempt in range(3):
         try:
-            # Randomised delay to reduce rate-limiting risk
+            # Randomized delay to reduce rate-limiting risk
             await asyncio.sleep(attempt * 0.5 + random.uniform(0.05, 0.3))
 
             # Recycle session after too many consecutive failures
@@ -486,7 +486,7 @@ async def fetch_nse_chain(symbol: str) -> dict:
                 })
 
             log.info(f"  ✅ {symbol}: {len(formatted_data)} strikes, spot={spot}")
-            _ind_fail_count = max(0, _ind_fail_count - 1)  # Decay on success
+            _ind_fail_count = 0  # Reset on success
             return {
                 "records": {
                     "underlyingValue": spot,
