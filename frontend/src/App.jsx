@@ -340,9 +340,32 @@ function ScannerTab({ theme, onChain, onGreeks, onData, marketStatus }) {
     setData([]);
     setScanProgress(0);
 
+    let sseTimedOut = false;
+
     const es = new EventSource(`${API}/api/scan-stream?limit=90`);
     eventSourceRef.current = es;
     const incoming = [];
+
+    // Timeout: if no result event arrives within 30s, fall back to regular scan
+    const sseTimeout = setTimeout(() => {
+      if (incoming.length === 0 && es.readyState !== 2) {
+        sseTimedOut = true;
+        es.close();
+        eventSourceRef.current = null;
+        console.warn("SSE timeout — falling back to /api/scan");
+        apiFetch("/api/scan?limit=90")
+          .then((r) => {
+            const rows = r.data || [];
+            setData(rows);
+            setScanMeta({ stale: r.stale, stale_count: r.stale_count || 0, _fetched_at: r._fetched_at });
+            if (onData) onData(rows);
+            setLastUpdated(new Date());
+            setCountdown(scanInterval);
+          })
+          .catch(console.error)
+          .finally(() => { setLoading(false); setScanProgress(0); scanningRef.current = false; });
+      }
+    }, 30000);
 
     es.addEventListener("result", (e) => {
       try {
@@ -355,6 +378,8 @@ function ScannerTab({ theme, onChain, onGreeks, onData, marketStatus }) {
     });
 
     es.addEventListener("done", (e) => {
+      clearTimeout(sseTimeout);
+      if (sseTimedOut) return; // Already handled by timeout fallback
       try {
         const meta = JSON.parse(e.data);
         setScanMeta({ stale: false, stale_count: 0, _fetched_at: meta.timestamp });
@@ -372,6 +397,8 @@ function ScannerTab({ theme, onChain, onGreeks, onData, marketStatus }) {
     });
 
     es.onerror = () => {
+      clearTimeout(sseTimeout);
+      if (sseTimedOut) return; // Already handled by timeout fallback
       // On error, fall back to regular scan endpoint
       es.close();
       eventSourceRef.current = null;
@@ -676,6 +703,28 @@ function ScannerTab({ theme, onChain, onGreeks, onData, marketStatus }) {
       </div>
 
       {loading && data.length === 0 && <Loader theme={theme} />}
+      {!loading && data.length === 0 && lastUpdated && (
+        <div style={{
+          textAlign: "center", padding: "40px 20px",
+          color: theme.muted
+        }}>
+          <div style={{ fontSize: 36, marginBottom: 12 }}>📡</div>
+          <div style={{ fontWeight: 600, fontSize: 14, color: theme.text, marginBottom: 6 }}>
+            No scan results available
+          </div>
+          <div style={{ fontSize: 12, marginBottom: 16 }}>
+            The data source may be temporarily unavailable. This can happen when the
+            market is closed or the upstream provider is slow to respond.
+          </div>
+          <button onClick={() => { load(); setCountdown(scanInterval); }}
+            style={{
+              padding: "8px 20px", borderRadius: 6, background: theme.accent,
+              color: "#fff", border: "none", cursor: "pointer", fontWeight: 600
+            }}>
+            🔄 Retry Scan
+          </button>
+        </div>
+      )}
       {loading && data.length > 0 && (
         <div style={{
           background: "rgba(99, 102, 241, 0.1)",
