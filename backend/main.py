@@ -2,7 +2,7 @@
 NSE F&O Option Chain Scanner — Backend v3 (Akamai fix)
 """
 
-import os, time, asyncio, logging
+import os, time, asyncio, logging, random
 from typing import Optional, List
 from datetime import datetime, time as dtime
 import json
@@ -267,7 +267,7 @@ async def paper_trade_manager():
                 log.info(f"Checking {len(open_trades)} trades + {len(tracked_picks)} tracked picks...")
                 symbols = list(set([t["symbol"] for t in all_to_check]))
 
-                sem = asyncio.Semaphore(3)
+                sem = asyncio.Semaphore(6)
                 async def fetch_and_update(sym):
                     async with sem:
                         try:
@@ -355,15 +355,25 @@ async def paper_trade_manager():
 
 _ind_client: Optional[AsyncSession] = None
 _ind_lock = asyncio.Lock()
+_ind_fail_count = 0
+_IND_FAIL_THRESHOLD = 5  # Recreate session after this many consecutive failures
 
-async def get_ind_client() -> AsyncSession:
+async def get_ind_client(force_new: bool = False) -> AsyncSession:
     """
     Returns a shared, thread-safe asynchronous curl_cffi session configured
     with browser impersonation to bypass basic CDN/WAF blocks. Using a global
     session drastically reduces TLS handshake overhead for subsequent requests.
+    If force_new=True, the existing session is closed and a fresh one is created
+    (used when the session is stale or rate-limited).
     """
     global _ind_client
     async with _ind_lock:
+        if force_new and _ind_client is not None:
+            try:
+                _ind_client.close()
+            except Exception:
+                pass
+            _ind_client = None
         if _ind_client is None:
             _ind_client = AsyncSession(
                 impersonate="chrome120",
@@ -400,6 +410,8 @@ async def fetch_nse_chain(symbol: str) -> dict:
     Returns the parsed option chain transformed back to the legacy NSE data schema
     so the frontend remains perfectly compatible.
     """
+    global _ind_fail_count
+
     slug = SLUG_MAP.get(symbol)
     if not slug:
         log.error(f"  ❌ No INDmoney slug for symbol={repr(symbol)}, in dict={symbol in SLUG_MAP}")
@@ -409,18 +421,28 @@ async def fetch_nse_chain(symbol: str) -> dict:
     
     for attempt in range(3):
         try:
-            await asyncio.sleep(attempt * 0.5)
-            client = await get_ind_client()
-            r = await client.get(url, timeout=10)
+            # Randomized delay to reduce rate-limiting risk
+            await asyncio.sleep(attempt * 0.5 + random.uniform(0.05, 0.3))
+
+            # Recycle session after too many consecutive failures
+            force_new = _ind_fail_count >= _IND_FAIL_THRESHOLD
+            client = await get_ind_client(force_new=force_new)
+            if force_new:
+                _ind_fail_count = 0
+                log.info("  ♻️ Recycled INDmoney session after consecutive failures")
+
+            r = await client.get(url, timeout=12)
             log.info(f"  {symbol} → {r.status_code} len={len(r.content)} (attempt {attempt+1})")
             
             if r.status_code != 200:
+                _ind_fail_count += 1
                 continue
 
             soup = BeautifulSoup(r.text, "html.parser")
             script = soup.find("script", id="__NEXT_DATA__")
             if not script:
                 log.warning(f"  {symbol}: __NEXT_DATA__ not found inside HTML")
+                _ind_fail_count += 1
                 continue
                 
             data = json.loads(script.string)
@@ -428,6 +450,7 @@ async def fetch_nse_chain(symbol: str) -> dict:
             
             if not oc_data:
                 log.warning(f"  {symbol}: optionChainsData not found in Next.js state")
+                _ind_fail_count += 1
                 continue
                 
             chains = oc_data.get("option_chain_data", [])
@@ -463,6 +486,7 @@ async def fetch_nse_chain(symbol: str) -> dict:
                 })
 
             log.info(f"  ✅ {symbol}: {len(formatted_data)} strikes, spot={spot}")
+            _ind_fail_count = 0  # Reset on success
             return {
                 "records": {
                     "underlyingValue": spot,
@@ -472,6 +496,7 @@ async def fetch_nse_chain(symbol: str) -> dict:
             }
 
         except Exception as e:
+            _ind_fail_count += 1
             log.warning(f"  Error {symbol} attempt {attempt+1}: {type(e).__name__}: {e}")
 
     log.error(f"  ❌ FAILED all attempts for {symbol}")
@@ -666,7 +691,7 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
     )
 
     ltp_map = await fetch_indstocks_ltp(all_symbols)
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(8)
     
     batch_alerts_csv_rows = []
 
@@ -942,7 +967,7 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
                     return None
 
         # Process symbols in batches to allow streaming
-        batch_size = 5  # Higher batch size
+        batch_size = 10
         symbols_to_process = all_symbols[:total]
         for i in range(0, len(symbols_to_process), batch_size):
             batch = symbols_to_process[i:i + batch_size]
@@ -952,7 +977,7 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
                     completed += 1
                     yield f"event: result\ndata: {json.dumps(r)}\n\n"
 
-        yield f"event: done\ndata: {json.dumps({'count': completed, 'timestamp': datetime.now().isoformat(), 'market_status': market_status()})}\n\n"
+        yield f"event: done\ndata: {json.dumps({'count': completed, 'total': total, 'timestamp': datetime.now().isoformat(), 'market_status': market_status()})}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -1312,7 +1337,7 @@ async def unusual_options_activity(
     """
     all_symbols = INDEX_SYMBOLS + FO_STOCKS
     all_uoa     = []
-    sem         = asyncio.Semaphore(3)
+    sem         = asyncio.Semaphore(6)
 
     async def check_symbol(symbol):
         async with sem:
@@ -1349,7 +1374,7 @@ async def straddle_screener(min_iv: float = 15.0, max_pcr_delta: float = 0.3):
     """
     all_symbols = INDEX_SYMBOLS + FO_STOCKS
     candidates  = []
-    sem         = asyncio.Semaphore(3)
+    sem         = asyncio.Semaphore(6)
 
     async def check(symbol):
         async with sem:
@@ -1516,7 +1541,7 @@ if os.path.isdir(dist_path):
 async def _internal_scan() -> list:
     all_symbols = INDEX_SYMBOLS + FO_STOCKS
     ltp_map = await fetch_indstocks_ltp(all_symbols)
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(8)
 
     async def process(symbol):
         async with sem:
