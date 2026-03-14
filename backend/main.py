@@ -119,6 +119,13 @@ FO_STOCKS = [
     "DIVISLAB","CIPLA","TECHM","TATASTEEL","BAJAJFINSV","NESTLEIND",
     "HINDALCO","COALINDIA","VEDL","JSWSTEEL","SAIL","APOLLOHOSP",
     "PIDILITIND","SIEMENS","HAVELLS","VOLTAS",
+    # ── Additional F&O stocks ──
+    "BHARTIARTL","BANKBARODA","BEL","DLF","HAL","IRCTC","TATAPOWER",
+    "TATACONSUM","TRENT","PNB","CANBK","SBILIFE","SBICARD","PFC","RECLTD",
+    "BIOCON","LUPIN","JUBLFOOD","LICHSGFIN","MOTHERSON","CHOLAFIN",
+    "MUTHOOTFIN","FEDERALBNK","UPL","POLYCAB","SRF","DABUR","GODREJCP",
+    "BANDHANBNK","IDFCFIRSTB","INDUSTOWER","NAUKRI","BHARATFORG","COFORGE",
+    "GODREJPROP","PETRONET","RBLBANK","TATACOMM","INDHOTEL","PAGEIND",
 ]
 INDEX_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
 
@@ -132,7 +139,16 @@ LOT_SIZES = {
     "HEROMOTOCO": 150, "ASIANPAINT": 250, "MM": 350, "DRREDDY": 625,
     "BAJAJFINSV": 250, "HINDALCO": 700, "TATASTEEL": 5500, "DIVISLAB": 100, "CIPLA": 375,
     "TECHM": 600, "NESTLEIND": 500, "COALINDIA": 1350, "VEDL": 1150, "JSWSTEEL": 675, "SAIL": 4700,
-    "APOLLOHOSP": 125, "PIDILITIND": 500, "SIEMENS": 175, "HAVELLS": 500, "VOLTAS": 375
+    "APOLLOHOSP": 125, "PIDILITIND": 500, "SIEMENS": 175, "HAVELLS": 500, "VOLTAS": 375,
+    # ── Additional F&O stocks ──
+    "BHARTIARTL": 950, "BANKBARODA": 2925, "BEL": 1950, "DLF": 625, "HAL": 150,
+    "IRCTC": 575, "TATAPOWER": 1350, "TATACONSUM": 500, "TRENT": 75, "PNB": 4000,
+    "CANBK": 4500, "SBILIFE": 375, "SBICARD": 400, "PFC": 1400, "RECLTD": 1500,
+    "BIOCON": 1800, "LUPIN": 425, "JUBLFOOD": 1250, "LICHSGFIN": 775, "MOTHERSON": 3200,
+    "CHOLAFIN": 375, "MUTHOOTFIN": 250, "FEDERALBNK": 5000, "UPL": 1300, "POLYCAB": 100,
+    "SRF": 125, "DABUR": 1250, "GODREJCP": 500, "BANDHANBNK": 2400, "IDFCFIRSTB": 5000,
+    "INDUSTOWER": 1600, "NAUKRI": 75, "BHARATFORG": 500, "COFORGE": 75, "GODREJPROP": 225,
+    "PETRONET": 3000, "RBLBANK": 2800, "TATACOMM": 250, "INDHOTEL": 700, "PAGEIND": 15,
 }
 
 try:
@@ -619,7 +635,7 @@ async def debug_indstocks(token: str = Query(...)):
 #   #9  Stock score and option score conflated at same threshold
 
 @app.get("/api/scan")
-async def scan_all(limit: int = Query(48, ge=1, le=100)):
+async def scan_all(limit: int = Query(90, ge=1, le=200)):
     # Check cache first for the full scan result
     cache_key = cache.cache_key("scan_result", "all", limit)
     cached = await cache.get(cache_key)

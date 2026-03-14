@@ -32,6 +32,15 @@ STRIKE_INTERVALS = {
     "CIPLA": 10, "TECHM": 20, "TATASTEEL": 5, "BAJAJFINSV": 20, "NESTLEIND": 100,
     "HINDALCO": 5, "COALINDIA": 5, "VEDL": 5, "JSWSTEEL": 10, "SAIL": 2,
     "APOLLOHOSP": 50, "PIDILITIND": 50, "SIEMENS": 50, "HAVELLS": 20, "VOLTAS": 20,
+    # ── Additional F&O stocks ──
+    "BHARTIARTL": 20, "BANKBARODA": 5, "BEL": 5, "DLF": 10, "HAL": 50,
+    "IRCTC": 20, "TATAPOWER": 5, "TATACONSUM": 10, "TRENT": 50, "PNB": 2,
+    "CANBK": 2, "SBILIFE": 20, "SBICARD": 10, "PFC": 5, "RECLTD": 5,
+    "BIOCON": 5, "LUPIN": 20, "JUBLFOOD": 10, "LICHSGFIN": 5, "MOTHERSON": 5,
+    "CHOLAFIN": 20, "MUTHOOTFIN": 20, "FEDERALBNK": 2, "UPL": 10, "POLYCAB": 50,
+    "SRF": 50, "DABUR": 10, "GODREJCP": 20, "BANDHANBNK": 5, "IDFCFIRSTB": 2,
+    "INDUSTOWER": 5, "NAUKRI": 100, "BHARATFORG": 20, "COFORGE": 50, "GODREJPROP": 50,
+    "PETRONET": 5, "RBLBANK": 5, "TATACOMM": 20, "INDHOTEL": 10, "PAGEIND": 200,
 }
 
 def get_strike_interval(symbol: str) -> int:
@@ -363,23 +372,38 @@ def detect_regime(records: list, spot: float, symbol: str, dte: int, ivr: float)
 
 def score_option_v2(side: dict, spot: float, symbol: str, dte: int, iv_rank: float, regime: str, greeks: dict) -> dict:
     delta = greeks.get("delta", 0.5)
-    
+    abs_delta = abs(delta)
+
     oi = side.get("openInterest", 0) or 0
     vol = side.get("totalTradedVolume", 0) or 0
     iv = side.get("impliedVolatility", 0) or 0
-    
-    d_score = abs(delta) * 25
-    
+
+    d_score = abs_delta * 25
+
     liq_ratio = (vol / max(1, oi)) if oi > 0 else 0
     l_score = min(50, liq_ratio * 10)
-    
+
     iv_score = 0
     if 15 < iv < 40: iv_score = 25
     elif iv <= 15: iv_score = 15
-    else: iv_score = max(0, 25 - (iv-40))
-    
-    total = min(100, d_score + l_score + iv_score)
-    
+    else: iv_score = max(0, 25 - (iv - 40))
+
+    # Moneyness proximity bonus — prefer ATM / slightly OTM over deep OTM
+    if 0.40 <= abs_delta <= 0.60:
+        moneyness_score = 20       # ATM sweet spot
+    elif 0.25 <= abs_delta < 0.40:
+        moneyness_score = 15       # slightly OTM — still good
+    elif 0.60 < abs_delta <= 0.75:
+        moneyness_score = 12       # slightly ITM
+    elif 0.15 <= abs_delta < 0.25:
+        moneyness_score = 5        # further OTM
+    elif abs_delta > 0.75:
+        moneyness_score = 8        # deep ITM — high premium, less bang-for-buck
+    else:
+        moneyness_score = -10      # deep OTM (delta < 0.15) — penalize
+
+    total = min(100, max(0, d_score + l_score + iv_score + moneyness_score))
+
     return {
         "score": int(total),
         "confidence": round(min(1.0, l_score / 50.0), 2),
@@ -544,15 +568,29 @@ def compute_stock_score_v2(
         weighted_score = max(0, min(100, weighted_score + uoa_boost))
         
     def _directional_picks(options, signal):
+        # Filter to strikes within ±5 intervals of ATM to avoid deep OTM picks
+        atm = nearest_atm(spot, symbol)
+        interval = get_strike_interval(symbol)
+        max_dist = interval * 5  # stay within 5 strike intervals of ATM
+
+        def _near_atm(o):
+            return abs(o["strike"] - atm) <= max_dist
+
         if signal == "BULLISH":
-            candidates = [o for o in options if o["type"] == "CE"]
+            candidates = [o for o in options if o["type"] == "CE" and _near_atm(o)]
+            if not candidates:  # fallback if too restrictive
+                candidates = [o for o in options if o["type"] == "CE"]
         elif signal == "BEARISH":
-            candidates = [o for o in options if o["type"] == "PE"]
+            candidates = [o for o in options if o["type"] == "PE" and _near_atm(o)]
+            if not candidates:
+                candidates = [o for o in options if o["type"] == "PE"]
         else:
-            ce_best = sorted([o for o in options if o["type"] == "CE"],
-                             key=lambda x: x["score"], reverse=True)[:1]
-            pe_best = sorted([o for o in options if o["type"] == "PE"],
-                             key=lambda x: x["score"], reverse=True)[:1]
+            ce_near = [o for o in options if o["type"] == "CE" and _near_atm(o)]
+            pe_near = [o for o in options if o["type"] == "PE" and _near_atm(o)]
+            if not ce_near: ce_near = [o for o in options if o["type"] == "CE"]
+            if not pe_near: pe_near = [o for o in options if o["type"] == "PE"]
+            ce_best = sorted(ce_near, key=lambda x: x["score"], reverse=True)[:1]
+            pe_best = sorted(pe_near, key=lambda x: x["score"], reverse=True)[:1]
             return ce_best + pe_best
         return sorted(candidates, key=lambda x: x["score"], reverse=True)[:2]
     
