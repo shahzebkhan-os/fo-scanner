@@ -55,7 +55,7 @@ import httpx, uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -821,6 +821,103 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 4b.  /api/scan-stream  — SSE streaming scan for real-time UI updates
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/scan-stream")
+async def scan_stream(limit: int = Query(90, ge=1, le=200)):
+    """
+    Server-Sent Events endpoint that streams scan results one stock at a time.
+    Each result is sent as an SSE 'result' event as soon as the symbol is processed.
+    A final 'done' event signals completion with summary metadata.
+    """
+    all_symbols = INDEX_SYMBOLS + FO_STOCKS
+
+    async def event_generator():
+        _maybe_reset_daily()
+        ltp_map = await fetch_indstocks_ltp(all_symbols)
+        sem = asyncio.Semaphore(3)
+        completed = 0
+        total = min(limit, len(all_symbols))
+
+        async def process_one(symbol: str):
+            async with sem:
+                live = ltp_map.get(symbol, {})
+                try:
+                    cj = await fetch_nse_chain(symbol)
+                    if not cj or "records" not in cj:
+                        return None
+
+                    records = cj.get("records", {})
+                    spot = records.get("underlyingValue") or live.get("ltp") or 0
+                    expiries = records.get("expiryDates", [])
+
+                    ivr = db.get_iv_rank(symbol)
+                    exp = expiries[0] if expiries else ""
+                    stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
+                    if not spot:
+                        return None
+
+                    ml_prob = ml_predict(stats, symbol=symbol)
+                    stats["ml_bullish_probability"] = ml_prob
+
+                    stock_score = stats.get("score", 0)
+                    signal = stats.get("signal", "NEUTRAL")
+
+                    if ml_prob is not None:
+                        if signal == "BULLISH":
+                            ml_score = int(ml_prob * 100)
+                        elif signal == "BEARISH":
+                            ml_score = int((1 - ml_prob) * 100)
+                        else:
+                            ml_score = int(max(ml_prob, 1 - ml_prob) * 100)
+                        stats["ml_score"] = ml_score
+
+                        if stock_score >= 80 and ((signal == "BULLISH" and ml_prob > 0.70) or (signal == "BEARISH" and ml_prob < 0.30)):
+                            stats["score"] = min(100, stock_score + 5)
+                        elif (signal == "BULLISH" and ml_prob < 0.40) or (signal == "BEARISH" and ml_prob > 0.60):
+                            stats["signal"] = "NEUTRAL"
+                            stats["score"] = max(0, stock_score - 15)
+
+                    return {
+                        "symbol": symbol,
+                        "ltp": round(spot, 2),
+                        "volume": live.get("volume", 0),
+                        "change_pct": round(live.get("change", 0), 2),
+                        "expiries": expiries[:4],
+                        "signal_reasons": stats.get("signal_reasons", []),
+                        "ml_bullish_probability": ml_prob,
+                        **{k: v for k, v in stats.items() if k not in ["signal_reasons", "ml_bullish_probability"]},
+                    }
+                except Exception as e:
+                    log.error(f"  Stream {symbol}: {e}")
+                    return None
+
+        # Process symbols in small batches to allow streaming
+        batch_size = 3
+        symbols_to_process = all_symbols[:total]
+        for i in range(0, len(symbols_to_process), batch_size):
+            batch = symbols_to_process[i:i + batch_size]
+            results = await asyncio.gather(*[process_one(s) for s in batch])
+            for r in results:
+                if r and not r.get("stale"):
+                    completed += 1
+                    yield f"event: result\ndata: {json.dumps(r)}\n\n"
+
+        yield f"event: done\ndata: {json.dumps({'count': completed, 'timestamp': datetime.now().isoformat(), 'market_status': market_status()})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # F&O Trade Suggestions — Best trade ideas ranked by conviction
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -833,7 +930,7 @@ async def fo_suggestions():
     from .analytics import STRIKE_INTERVALS
 
     # Use the scan endpoint internally (with cache)
-    scan_result = await scan_all(limit=48)
+    scan_result = await scan_all(limit=90)
     scan_data = scan_result.get("data", [])
 
     if not scan_data:

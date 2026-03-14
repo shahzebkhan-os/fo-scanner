@@ -305,19 +305,75 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const [scanMeta, setScanMeta] = useState({ stale: false, stale_count: 0 });
   const [mlStatus, setMlStatus] = useState({ trained: false });
+  const [scanProgress, setScanProgress] = useState(0);
+  const eventSourceRef = useRef(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(() => {
+    // Close any existing SSE connection
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
     setLoading(true);
-    try {
-      const r = await apiFetch("/api/scan?limit=51");
-      const rows = r.data || [];
-      setData(rows);
-      setScanMeta({ stale: r.stale, stale_count: r.stale_count || 0, _fetched_at: r._fetched_at });
-      if (onData) onData(rows);
+    setData([]);
+    setScanProgress(0);
+
+    const es = new EventSource(`${API}/api/scan-stream?limit=90`);
+    eventSourceRef.current = es;
+    const incoming = [];
+
+    es.addEventListener("result", (e) => {
+      try {
+        const row = JSON.parse(e.data);
+        incoming.push(row);
+        setScanProgress(incoming.length);
+        // Update data progressively — sorted by score
+        setData([...incoming].sort((a, b) => (b.score || 0) - (a.score || 0)));
+      } catch (err) { console.error("SSE parse error:", err); }
+    });
+
+    es.addEventListener("done", (e) => {
+      try {
+        const meta = JSON.parse(e.data);
+        setScanMeta({ stale: false, stale_count: 0, _fetched_at: meta.timestamp });
+        const sorted = [...incoming].sort((a, b) => (b.score || 0) - (a.score || 0));
+        setData(sorted);
+        if (onData) onData(sorted);
+      } catch (err) { console.error("SSE done parse error:", err); }
       setLastUpdated(new Date());
       setCountdown(60);
-    } catch (e) { console.error(e); }
-    setLoading(false);
+      setLoading(false);
+      setScanProgress(0);
+      es.close();
+      eventSourceRef.current = null;
+    });
+
+    es.onerror = () => {
+      // On error, fall back to regular scan endpoint
+      es.close();
+      eventSourceRef.current = null;
+      apiFetch("/api/scan?limit=90")
+        .then((r) => {
+          const rows = r.data || [];
+          setData(rows);
+          setScanMeta({ stale: r.stale, stale_count: r.stale_count || 0, _fetched_at: r._fetched_at });
+          if (onData) onData(rows);
+          setLastUpdated(new Date());
+          setCountdown(60);
+        })
+        .catch(console.error)
+        .finally(() => { setLoading(false); setScanProgress(0); });
+    };
+  }, []);
+
+  // Cleanup SSE on unmount
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
   }, []);
 
   // Check ML model status
@@ -488,7 +544,7 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
           style={{
             padding: "6px 14px", borderRadius: 6, background: theme.accent,
           }}>
-          {loading ? "⟳ Scanning..." : "⟳ Refresh"}
+          {loading ? `⟳ Scanning${scanProgress ? ` (${scanProgress})` : ""}...` : "⟳ Refresh"}
         </button>
         <button 
           onClick={async () => {
@@ -580,7 +636,33 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
         </div>
       </div>
 
-      {loading && <Loader theme={theme} />}
+      {loading && data.length === 0 && <Loader theme={theme} />}
+      {loading && data.length > 0 && (
+        <div style={{
+          background: "rgba(99, 102, 241, 0.1)",
+          borderRadius: 6,
+          padding: "6px 14px",
+          marginBottom: 12,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          fontSize: 11,
+          color: theme.muted,
+        }}>
+          <div style={{
+            fontSize: 14, animation: "spin 1s linear infinite",
+            display: "inline-block"
+          }}>⟳</div>
+          <span>Scanning... {scanProgress} symbols loaded</span>
+          <div style={{ flex: 1, height: 4, background: theme.border, borderRadius: 2, overflow: "hidden" }}>
+            <div style={{
+              height: "100%", background: theme.accent, borderRadius: 2,
+              width: `${Math.min(100, (scanProgress / 88) * 100)}%`,
+              transition: "width 0.3s ease",
+            }} />
+          </div>
+        </div>
+      )}
 
       {/* Grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>

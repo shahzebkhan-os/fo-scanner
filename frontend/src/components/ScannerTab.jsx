@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 const signalColor = (s) =>
   s === "BULLISH" ? "#22c55e" : s === "BEARISH" ? "#ef4444" : "#94a3b8";
@@ -190,19 +190,68 @@ export default function ScannerTab({ theme, onChain, onGreeks, onData }) {
   const [countdown, setCountdown] = useState(60);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [savingSnapshot, setSavingSnapshot] = useState(false);
+  const [scanProgress, setScanProgress] = useState(0);
+  const eventSourceRef = useRef(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
     setLoading(true);
-    try {
-      const r = await apiFetch("/api/scan?limit=51");
-      const rows = r.data || [];
-      setData(rows);
-      if (onData) onData(rows);
+    setData([]);
+    setScanProgress(0);
+
+    const API = "";
+    const es = new EventSource(`${API}/api/scan-stream?limit=90`);
+    eventSourceRef.current = es;
+    const incoming = [];
+
+    es.addEventListener("result", (e) => {
+      try {
+        const row = JSON.parse(e.data);
+        incoming.push(row);
+        setScanProgress(incoming.length);
+        setData([...incoming].sort((a, b) => (b.score || 0) - (a.score || 0)));
+      } catch (err) { console.error("SSE parse error:", err); }
+    });
+
+    es.addEventListener("done", (e) => {
+      const sorted = [...incoming].sort((a, b) => (b.score || 0) - (a.score || 0));
+      setData(sorted);
+      if (onData) onData(sorted);
       setLastUpdated(new Date());
       setCountdown(60);
-    } catch (e) { console.error(e); }
-    setLoading(false);
+      setLoading(false);
+      setScanProgress(0);
+      es.close();
+      eventSourceRef.current = null;
+    });
+
+    es.onerror = () => {
+      es.close();
+      eventSourceRef.current = null;
+      apiFetch("/api/scan?limit=90")
+        .then((r) => {
+          const rows = r.data || [];
+          setData(rows);
+          if (onData) onData(rows);
+          setLastUpdated(new Date());
+          setCountdown(60);
+        })
+        .catch(console.error)
+        .finally(() => { setLoading(false); setScanProgress(0); });
+    };
   }, [onData]);
+
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!autoRefresh) return;
@@ -252,7 +301,7 @@ export default function ScannerTab({ theme, onChain, onGreeks, onData }) {
             padding: "6px 14px", borderRadius: 6, background: theme.accent,
             color: "#fff", border: "none", cursor: "pointer"
           }}>
-          {loading ? "⟳ Scanning..." : "⟳ Refresh"}
+          {loading ? `⟳ Scanning${scanProgress ? ` (${scanProgress})` : ""}...` : "⟳ Refresh"}
         </button>
         <button 
           onClick={async () => {
@@ -343,7 +392,33 @@ export default function ScannerTab({ theme, onChain, onGreeks, onData }) {
         </div>
       </div>
 
-      {loading && <Loader theme={theme} />}
+      {loading && data.length === 0 && <Loader theme={theme} />}
+      {loading && data.length > 0 && (
+        <div style={{
+          background: "rgba(99, 102, 241, 0.1)",
+          borderRadius: 6,
+          padding: "6px 14px",
+          marginBottom: 12,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          fontSize: 11,
+          color: theme.muted,
+        }}>
+          <div style={{
+            fontSize: 14, animation: "spin 1s linear infinite",
+            display: "inline-block"
+          }}>⟳</div>
+          <span>Scanning... {scanProgress} symbols loaded</span>
+          <div style={{ flex: 1, height: 4, background: theme.border, borderRadius: 2, overflow: "hidden" }}>
+            <div style={{
+              height: "100%", background: theme.accent || "#6366f1", borderRadius: 2,
+              width: `${Math.min(100, (scanProgress / 88) * 100)}%`,
+              transition: "width 0.3s ease",
+            }} />
+          </div>
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
         {filtered.map((r, idx) => (
