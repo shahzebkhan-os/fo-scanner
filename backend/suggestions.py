@@ -84,13 +84,27 @@ def _strategy_for_signal(signal: str, regime: str, iv_rank: float, pcr: float) -
 
 
 def _compute_risk_reward(strategy_code: str, entry_premium: float, spot: float, strike_interval: float) -> dict:
-    """Compute risk/reward parameters for a given strategy."""
+    """Compute risk/reward parameters for a given strategy.
+
+    For single-leg strategies (long_call, long_put, short_straddle):
+      - entry_price  = premium paid/received
+      - target_price = premium level at which to take profit (exit price)
+      - stop_loss_price = premium level at which to cut loss (exit price)
+
+    For multi-leg spread strategies the premiums are net debit/credit amounts;
+    target and stop_loss represent the P&L per share to capture/accept.
+    """
 
     if strategy_code in ("long_call", "long_put"):
+        target_price = round(entry_premium * 1.5, 2)
+        sl_price = round(entry_premium * 0.6, 2)
         return {
+            "entry_price": round(entry_premium, 2),
+            "target_price": target_price,
+            "stop_loss_price": sl_price,
             "max_loss": round(entry_premium, 2),
-            "target": round(entry_premium * 1.5, 2),
-            "stop_loss": round(entry_premium * 0.6, 2),
+            "target": round(target_price - entry_premium, 2),      # profit per share
+            "stop_loss": round(entry_premium - sl_price, 2),       # loss per share
             "risk_reward_ratio": "1:1.5",
             "breakeven_distance": round(entry_premium / spot * 100, 2) if spot else 0,
         }
@@ -102,6 +116,9 @@ def _compute_risk_reward(strategy_code: str, entry_premium: float, spot: float, 
         max_profit = round(spread_width - net_debit, 2)
         rr = round(max_profit / net_debit, 1) if net_debit > 0 else 1.0
         return {
+            "entry_price": round(net_debit, 2),
+            "target_price": round(net_debit + max_profit * 0.7, 2),
+            "stop_loss_price": 0,
             "max_loss": net_debit,
             "target": round(max_profit * 0.7, 2),
             "stop_loss": net_debit,
@@ -116,6 +133,9 @@ def _compute_risk_reward(strategy_code: str, entry_premium: float, spot: float, 
         max_loss = round(spread_width - net_credit, 2)
         rr = round(net_credit / max_loss, 1) if max_loss > 0 else 0.5
         return {
+            "entry_price": round(net_credit, 2),
+            "target_price": round(net_credit * 0.3, 2),            # exit when remaining premium ≈ 30%
+            "stop_loss_price": round(net_credit + max_loss, 2),
             "max_loss": max_loss,
             "target": round(net_credit * 0.7, 2),
             "stop_loss": round(max_loss * 1.0, 2),
@@ -130,6 +150,9 @@ def _compute_risk_reward(strategy_code: str, entry_premium: float, spot: float, 
         max_loss = round(wing_width - net_credit, 2)
         rr = round(net_credit / max_loss, 1) if max_loss > 0 else 0.4
         return {
+            "entry_price": round(net_credit, 2),
+            "target_price": round(net_credit * 0.5, 2),            # exit when 50% profit
+            "stop_loss_price": round(net_credit + max_loss, 2),
             "max_loss": max_loss,
             "target": round(net_credit * 0.5, 2),
             "stop_loss": max_loss,
@@ -138,18 +161,26 @@ def _compute_risk_reward(strategy_code: str, entry_premium: float, spot: float, 
         }
 
     if strategy_code == "short_straddle":
+        target_price = round(entry_premium * 0.5, 2)
+        sl_price = round(entry_premium * 1.5, 2)
         return {
+            "entry_price": round(entry_premium, 2),
+            "target_price": target_price,
+            "stop_loss_price": sl_price,
             "max_loss": round(entry_premium * 2, 2),
             "target": round(entry_premium * 0.5, 2),
-            "stop_loss": round(entry_premium * 1.5, 2),
+            "stop_loss": round(entry_premium * 0.5, 2),
             "risk_reward_ratio": "1:0.5",
             "breakeven_distance": round(entry_premium / spot * 100, 2) if spot else 0,
         }
 
     return {
+        "entry_price": round(entry_premium, 2),
+        "target_price": round(entry_premium * 2.0, 2),
+        "stop_loss_price": round(entry_premium * 0.7, 2),
         "max_loss": round(entry_premium, 2),
         "target": round(entry_premium * 1.0, 2),
-        "stop_loss": round(entry_premium * 0.7, 2),
+        "stop_loss": round(entry_premium * 0.3, 2),
         "risk_reward_ratio": "1:1",
         "breakeven_distance": 0,
     }
@@ -233,6 +264,10 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
             # Approximate margin: actual broker margin varies (typically 12-20% of underlying)
             capital_per_lot = spot * lot_size * 0.15
 
+        # Per-lot P&L values for clear display
+        target_pnl_per_lot = round(risk_reward["target"] * lot_size, 2)
+        sl_pnl_per_lot = round(risk_reward["max_loss"] * lot_size, 2)
+
         # Conviction score: blend of stock score, ML confidence, and option quality
         conviction = score
         if ml_prob is not None:
@@ -288,6 +323,8 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
                 "lot_size": lot_size,
                 "capital_per_lot": round(capital_per_lot, 2),
                 "suggested_lots": 1,
+                "target_pnl_per_lot": target_pnl_per_lot,
+                "sl_pnl_per_lot": sl_pnl_per_lot,
             },
             "context": {
                 "regime": regime,

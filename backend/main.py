@@ -187,7 +187,7 @@ FO_STOCKS = [
 INDEX_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
 
 LOT_SIZES = {
-    "NIFTY": 75, "BANKNIFTY": 30, "FINNIFTY": 65, "MIDCPNIFTY": 120,
+    "NIFTY": 75, "BANKNIFTY": 35, "FINNIFTY": 65, "MIDCPNIFTY": 120,
     "RELIANCE": 500, "TCS": 175, "INFY": 400, "HDFCBANK": 550, "ICICIBANK": 700,
     "SBIN": 750, "ADANIENT": 300, "WIPRO": 3000, "AXISBANK": 625, "BAJFINANCE": 750,
     "HCLTECH": 350, "LT": 175, "KOTAKBANK": 2000, "TATAMOTORS": 1425, "MARUTI": 50,
@@ -1049,6 +1049,37 @@ async def fo_suggestions():
     }
 
 
+class PaperTradeRequest(BaseModel):
+    symbol: str
+    opt_type: str          # CE or PE
+    strike: float
+    entry_price: float
+    lot_size: int = 1
+    reason: str = ""
+
+
+@app.post("/api/fo-suggestions/paper-trade")
+async def suggestion_paper_trade(req: PaperTradeRequest):
+    """
+    Create a paper trade from a suggestion.
+    Can be called regardless of market hours (for manual/testing use),
+    but the response includes the current market status for the frontend
+    to decide whether to prompt the user.
+    """
+    symbol = req.symbol.upper()
+    opt_type = req.opt_type.upper()
+    if opt_type not in ("CE", "PE"):
+        raise HTTPException(status_code=400, detail="opt_type must be CE or PE")
+
+    reason = req.reason or f"Suggestion trade: {symbol} {opt_type} {req.strike}"
+    lot = max(1, req.lot_size)
+    db.add_trade(symbol, opt_type, req.strike, req.entry_price, reason, lot_size=lot)
+
+    return {
+        "success": True,
+        "message": f"Paper trade created: {symbol} {opt_type} {req.strike} @ ₹{req.entry_price}",
+        "market_status": market_status(),
+    }
 
 
 @app.get("/api/chain/{symbol}")
