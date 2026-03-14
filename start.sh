@@ -16,7 +16,7 @@ cleanup() {
 trap cleanup INT TERM
 
 # Check Python dependencies
-echo "[1/4] Checking Python dependencies..."
+echo "[1/5] Checking Python dependencies..."
 PYTHON_CMD="python3"
 if [ -f "venv/bin/python" ]; then
     PYTHON_CMD="venv/bin/python"
@@ -38,12 +38,19 @@ if ! $PYTHON_CMD -c "import fastapi" 2>/dev/null; then
 fi
 
 # Kill any existing dangling processes on our ports
-echo "[2/4] Cleaning up old processes..."
+echo "[2/5] Cleaning up old processes..."
 lsof -ti:8000 | xargs kill -9 2>/dev/null
 lsof -ti:5173,5174,5175 | xargs kill -9 2>/dev/null
 
+# Install frontend dependencies if needed
+echo "[3/5] Checking frontend dependencies..."
+if [ ! -d "frontend/node_modules" ]; then
+    echo "Installing frontend dependencies..."
+    cd frontend && npm install && cd ..
+fi
+
 # Start Backend
-echo "[3/4] Starting Python Backend Server..."
+echo "[4/5] Starting Python Backend Server..."
 if [ -f "venv/bin/python" ]; then
     venv/bin/python -m backend.main &
 else
@@ -55,7 +62,7 @@ BACKEND_PID=$!
 sleep 2
 
 # Start Frontend
-echo "[4/4] Starting Vite React Frontend..."
+echo "[5/5] Starting Vite React Frontend..."
 cd frontend
 npm run dev -- --port 5175 &
 FRONTEND_PID=$!

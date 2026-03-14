@@ -9,10 +9,12 @@ New tables vs v3:
   - settings          : per-symbol config (alert threshold, watchlist, capital)
 """
 
-import sqlite3, os, json
+import sqlite3, os, json, logging
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "scanner.db")
 IST = ZoneInfo("Asia/Kolkata")
@@ -278,7 +280,21 @@ def init_db():
 # Paper Trades
 # ══════════════════════════════════════════════════════════════════════════════
 
+def has_open_trade(symbol, opt_type, strike):
+    """Check if an open trade already exists for this symbol/type/strike."""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT id FROM paper_trades WHERE symbol=? AND type=? AND strike=? AND status='OPEN'",
+            (symbol, opt_type, float(strike)),
+        ).fetchone()
+    return row is not None
+
+
 def add_trade(symbol, opt_type, strike, entry_price, reason="", lot_size=0):
+    # Prevent duplicate open trades for the same symbol/type/strike
+    if has_open_trade(symbol, opt_type, strike):
+        logger.info("Skipped duplicate trade: %s %s %s (already open)", symbol, opt_type, strike)
+        return False
     with _conn() as c:
         c.execute("""
             INSERT INTO paper_trades (symbol, type, strike, entry_price, reason, lot_size)

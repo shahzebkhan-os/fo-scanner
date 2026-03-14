@@ -645,7 +645,7 @@ async def debug_slugs():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "4.0", "time": datetime.now().isoformat()}
+    return {**market_status(), "status": "ok", "version": "4.0", "time": datetime.now().isoformat()}
 
 
 
@@ -1071,6 +1071,14 @@ async def suggestion_paper_trade(req: PaperTradeRequest):
     if opt_type not in ("CE", "PE"):
         raise HTTPException(status_code=400, detail="opt_type must be CE or PE")
 
+    # Check for duplicate open trade
+    if db.has_open_trade(symbol, opt_type, req.strike):
+        return {
+            "success": False,
+            "message": f"Duplicate: {symbol} {opt_type} {req.strike} already has an open trade",
+            "market_status": market_status(),
+        }
+
     reason = req.reason or f"Suggestion trade: {symbol} {opt_type} {req.strike}"
     lot = max(1, req.lot_size)
     db.add_trade(symbol, opt_type, req.strike, req.entry_price, reason, lot_size=lot)
@@ -1079,6 +1087,26 @@ async def suggestion_paper_trade(req: PaperTradeRequest):
         "success": True,
         "message": f"Paper trade created: {symbol} {opt_type} {req.strike} @ ₹{req.entry_price}",
         "market_status": market_status(),
+    }
+
+
+@app.get("/api/paper-trades")
+async def get_paper_trades(status: str = "all"):
+    """Get paper trades with optional status filter and trade statistics."""
+    if status == "open":
+        trades = db.get_open_trades()
+    elif status == "closed":
+        trades = db.get_closed_trades()
+    else:
+        trades = db.get_all_trades()
+
+    stats = db.get_trade_stats()
+
+    return {
+        "trades": trades,
+        "stats": stats,
+        "market_status": market_status(),
+        "count": len(trades),
     }
 
 
