@@ -230,7 +230,8 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
         # Capital required (based on max loss for the strategy)
         capital_per_lot = risk_reward["max_loss"] * lot_size
         if strategy_info["risk_type"] == "undefined":
-            capital_per_lot = spot * lot_size * 0.15  # ~15% margin for undefined risk
+            # Approximate margin: actual broker margin varies (typically 12-20% of underlying)
+            capital_per_lot = spot * lot_size * 0.15
 
         # Conviction score: blend of stock score, ML confidence, and option quality
         conviction = score

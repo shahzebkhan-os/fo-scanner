@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
+const REFRESH_INTERVAL_MS = 120000; // 2 minutes
+
 async function apiFetch(path, options = {}) {
   const API = "";
   const r = await fetch(API + path, options);
@@ -217,7 +219,7 @@ export default function SuggestionsTab({ theme, goChain }) {
 
   useEffect(() => {
     fetchSuggestions();
-    const id = setInterval(fetchSuggestions, 120000);
+    const id = setInterval(fetchSuggestions, REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
   }, [fetchSuggestions]);
 
