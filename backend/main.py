@@ -19,11 +19,11 @@ from .signals_legacy import build_sector_heatmap, detect_uoa, screen_straddle, g
 from .cache import cache
 from .ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status, get_model_details as ml_get_details, get_symbol_predictions as ml_get_predictions
 from .historical_loader import get_backfill_progress, run_backfill_with_progress, reset_backfill_progress
+from .suggestions import generate_suggestions
 
 # ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
 # Bug 6 fix: tracks which trades have already been entered today
 # Bug 5 fix: separate sets for trades vs alerts so thresholds are independent
-_traded_today: set  = set()   # "SYMBOL-TYPE-STRIKE-DATE"
 _traded_today: set  = set()   # "SYMBOL-TYPE-STRIKE-DATE"
 # notified_signals moved to db.notifications for persistence
 _daily_trade_count: int = 0
@@ -706,7 +706,7 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                     and _daily_trade_count < MAX_DAILY_AUTO_TRADES):
 
                     # Sector concentration guard
-                    from signals_legacy import get_sector
+                    from .signals_legacy import get_sector
                     sym_sector = get_sector(symbol)
                     sector_ct = _sector_trade_count.get(sym_sector, 0)
 
@@ -804,82 +804,41 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
     return response
 
 
-# ── Trade Tracker (Today's Live Trades) ───────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# F&O Trade Suggestions — Best trade ideas ranked by conviction
+# ══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/api/trade-tracker/latest")
-async def get_latest_tracked_trades():
-    """Returns the latest snapshot from today with all trades and their current prices."""
-    latest_snapshot = db.get_latest_accuracy_snapshot()
-    if not latest_snapshot:
+@app.get("/api/fo-suggestions")
+async def fo_suggestions():
+    """
+    Generate best F&O trade suggestions from latest scan data.
+    Returns ranked strategies with specific strikes, risk/reward, and conviction scores.
+    """
+    from .analytics import STRIKE_INTERVALS
+
+    # Use the scan endpoint internally (with cache)
+    scan_result = await scan_all(limit=48)
+    scan_data = scan_result.get("data", [])
+
+    if not scan_data:
         return {
-            "status": "empty",
-            "message": "No trades tracked today yet. Snapshots are taken every 15 minutes during market hours.",
-            "snapshot": None,
-            "trades": []
+            "timestamp": datetime.now().isoformat(),
+            "market_status": market_status(),
+            "count": 0,
+            "suggestions": [],
+            "message": "No scan data available. Run a scan first.",
         }
-    
-    # Get the full details for this snapshot
-    details = db.get_accuracy_snapshot_details(latest_snapshot["id"])
-    if not details:
-        return {
-            "status": "empty",
-            "message": "No trades found",
-            "snapshot": latest_snapshot,
-            "trades": []
-        }
-    
-    # Add performance calculations
-    for t in details["trades"]:
-        entry = t.get("entry_price") or 0
-        current = t.get("current_price") or entry
-        # Only calculate P&L if we have valid entry price
-        if entry > 0:
-            t["pnl_pct"] = round(((current - entry) / entry) * 100, 2)
-        else:
-            t["pnl_pct"] = 0
-        t["lot_value"] = round(current * (t.get("lot_size", 1) or 1), 2)
-        
-        # Get recent price history for 5m change
-        history = db.get_accuracy_trade_history(t["id"])
-        if len(history) >= 2:
-            prev_entry = history[-2]
-            curr_entry = history[-1]
-            prev = prev_entry.get("price", 0) if isinstance(prev_entry, dict) else 0
-            curr = curr_entry.get("price", 0) if isinstance(curr_entry, dict) else 0
-            t["diff_5m"] = round(curr - prev, 2) if prev and curr else 0
-            t["diff_5m_pct"] = round((t["diff_5m"] / prev * 100), 2) if prev > 0 else 0
-        else:
-            t["diff_5m"] = 0
-            t["diff_5m_pct"] = 0
-    
+
+    suggestions = generate_suggestions(scan_data, LOT_SIZES, STRIKE_INTERVALS)
+
     return {
-        "status": "ok",
-        "snapshot": details["snapshot"],
-        "trades": details["trades"],
-        "trade_count": len(details["trades"])
+        "timestamp": datetime.now().isoformat(),
+        "market_status": market_status(),
+        "count": len(suggestions),
+        "suggestions": suggestions,
     }
 
-@app.get("/api/trade-tracker/today")
-async def get_all_today_trades():
-    """Returns all trades from all snapshots taken today."""
-    trades = db.get_all_today_accuracy_trades()
-    
-    # Add performance calculations
-    for t in trades:
-        entry = t.get("entry_price") or 0
-        current = t.get("current_price") or entry
-        # Only calculate P&L if we have valid entry price
-        if entry > 0:
-            t["pnl_pct"] = round(((current - entry) / entry) * 100, 2)
-        else:
-            t["pnl_pct"] = 0
-        t["lot_value"] = round(current * (t.get("lot_size", 1) or 1), 2)
-    
-    return {
-        "status": "ok",
-        "trades": trades,
-        "trade_count": len(trades)
-    }
+
 
 
 @app.get("/api/chain/{symbol}")
@@ -945,85 +904,18 @@ async def get_chain(symbol: str, expiry: str = None):
     }
 
 
-# ── Paper Trading API ────────────────────────────────────────────────────────
 
-@app.get("/api/paper-trades/active")
-async def get_active_trades():
-    return db.get_open_trades()
-
-@app.get("/api/paper-trades/history")
-async def get_trade_history():
-    return db.get_closed_trades()
-
-@app.get("/api/paper-trades/stats")
-async def get_trade_statistics():
-    return db.get_trade_stats()
-
-# ── Lot sizes (used by manual trade form) ────────────────────────────────────
+# ── Lot sizes ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/lot-sizes")
 async def get_lot_sizes():
     """Returns the lot size for every F&O symbol."""
     return LOT_SIZES
 
-# ── Manual Paper Trade Entry ──────────────────────────────────────────────────
-
-from pydantic import BaseModel
-
-class ManualTradeRequest(BaseModel):
-    symbol:      str
-    type:        str          # "CE" or "PE"
-    strike:      float
-    entry_price: float
-    lots:        int   = 1
-    reason:      str   = "Manual"
-
-@app.post("/api/paper-trades")
-async def add_manual_trade(req: ManualTradeRequest):
-    """Manually enter a paper trade with lot count."""
-    if req.type not in ("CE", "PE"):
-        raise HTTPException(400, "type must be CE or PE")
-    if req.entry_price <= 0:
-        raise HTTPException(400, "entry_price must be > 0")
-    if req.lots < 1:
-        raise HTTPException(400, "lots must be >= 1")
-
-    lot_size = LOT_SIZES.get(req.symbol, 1)
-    qty      = req.lots * lot_size
-    reason   = f"{req.reason} | {req.lots} lot(s) × {lot_size} = {qty} qty"
-    trade_id = db.add_trade(req.symbol, req.type, req.strike, req.entry_price, reason, lot_size=qty)
-    return {
-        "status":    "created",
-        "trade_id":  trade_id,
-        "symbol":    req.symbol,
-        "type":      req.type,
-        "strike":    req.strike,
-        "entry":     req.entry_price,
-        "lots":      req.lots,
-        "lot_size":  lot_size,
-        "qty":       req.lots * lot_size,
-        "capital":   round(req.entry_price * req.lots * lot_size, 2),
-    }
-
-
-@app.post("/api/paper-trades/{trade_id}/exit")
-async def exit_manual_trade(trade_id: int, exit_price: Optional[float] = None):
-    """Exit (close) an open manual trade at a given price (defaults to current_price)."""
-    with db._conn() as c:
-        row = c.execute("SELECT * FROM paper_trades WHERE id=? AND status='OPEN'", (trade_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "Trade not found or already closed")
-
-    trade = dict(row)
-    price = exit_price if exit_price is not None else (trade.get("current_price") or trade["entry_price"])
-    db.update_trade(trade_id, price, exit_flag=True, reason="Manual exit")
-    return {"status": "closed", "trade_id": trade_id, "exit_price": price}
 
 
 # ── Backtester API ────────────────────────────────────────────────────────────
 
-from pydantic import BaseModel
-from typing import List
 
 class BacktestRequest(BaseModel):
     mode: str = "live"
@@ -1032,43 +924,6 @@ class BacktestRequest(BaseModel):
     sl: float = 20.0
     score: float = 75.0
 
-class TrackPickRequest(BaseModel):
-    symbol: str
-    type: str
-    strike: float
-    entry_price: float
-    score: int
-    stock_price: float = 0.0
-
-@app.post("/api/track-pick")
-async def track_pick(req: TrackPickRequest):
-    lot_size = LOT_SIZES.get(req.symbol, 0)
-    success = db.add_tracked_pick(req.symbol, req.type, req.strike, req.entry_price, req.score, req.stock_price, lot_size)
-    if success:
-        return {"status": "success", "message": "Option tracked."}
-    else:
-        return {"status": "error", "message": "Already tracking this option today."}
-
-@app.get("/api/tracked-picks")
-async def get_tracked_picks():
-    picks = db.get_tracked_picks()
-    return {"status": "ok", "data": picks}
-
-@app.delete("/api/track-pick/{trade_id}")
-async def untrack_pick(trade_id: int):
-    success = db.delete_tracked_pick(trade_id)
-    if success:
-        return {"status": "success", "message": "Option untracked."}
-    else:
-        return {"status": "error", "message": "Failed to untrack option or it does not exist."}
-
-@app.delete("/api/tracked-picks")
-async def untrack_all_picks():
-    success = db.delete_all_tracked_picks()
-    if success:
-        return {"status": "success", "message": "All tracked options removed."}
-    else:
-        return {"status": "error", "message": "Failed to untrack all options."}
 
 @app.post("/api/backtest")
 async def run_backtest(req: BacktestRequest):
@@ -1339,72 +1194,9 @@ async def sector_heatmap():
     }
 
 
-# ── Portfolio P&L Dashboard ───────────────────────────────────────────────────
-
-@app.get("/api/portfolio")
-async def portfolio_dashboard():
-    """
-    Full portfolio view: equity curve, sector breakdown,
-    win rate by signal type, max drawdown, best/worst trades.
-    """
-    stats      = db.get_trade_stats()
-    open_trades= db.get_open_trades()
-
-    # Unrealised PnL on open positions
-    unrealised = sum(
-        ((t.get("current_price") or t["entry_price"]) - t["entry_price"])
-        * (t.get("lot_size") or 1)
-        for t in open_trades
-    )
-
-    return {
-        "closed_trades":     stats,
-        "auto_stats":        db.get_trade_stats("AUTO"),
-        "manual_stats":      db.get_trade_stats("MANUAL"),
-        "open_positions":    len(open_trades),
-        "unrealised_pnl":    round(unrealised, 2),
-        "capital":           db.get_capital(),
-    }
 
 
-# ── Position Sizing Calculator ────────────────────────────────────────────────
 
-@app.get("/api/position-size")
-async def position_size(
-    symbol:      str,
-    entry_price: float,
-    sl_pct:      float = 25.0,
-):
-    """
-    Calculates how many lots to trade based on capital and risk settings.
-    Uses 2% per-trade risk rule by default.
-    """
-    symbol   = symbol.upper()
-    capital  = db.get_capital()
-    lot_size = LOT_SIZES.get(symbol, 1)
-
-    from analytics import compute_lot_size_for_risk
-    sizing = compute_lot_size_for_risk(capital, entry_price, lot_size, 2.0, sl_pct)
-    return {
-        "symbol":    symbol,
-        "capital":   capital,
-        "lot_size":  lot_size,
-        **sizing,
-    }
-
-
-# ── Trade Journal ─────────────────────────────────────────────────────────────
-
-@app.post("/api/paper-trades/{trade_id}/note")
-async def add_note(trade_id: int, note: str):
-    """Add a journal note to a trade."""
-    db.add_trade_note(trade_id, note)
-    return {"status": "ok"}
-
-@app.get("/api/paper-trades/{trade_id}/notes")
-async def get_notes(trade_id: int):
-    """Get all journal notes for a trade."""
-    return {"notes": db.get_trade_notes(trade_id)}
 
 
 # ── Watchlist & Settings ──────────────────────────────────────────────────────
@@ -1454,39 +1246,6 @@ async def refresh_bulk_deals():
     deals = await Signals.fetch_bulk_deals()
     return {"status": "ok", "fetched": len(deals)}
 
-
-# ── CSV Export ────────────────────────────────────────────────────────────────
-
-from fastapi.responses import StreamingResponse
-import csv, io
-
-CSV_HEADERS = [
-    "id", "symbol", "type", "strike", "entry_price", "current_price",
-    "exit_price", "status", "pnl", "pnl_pct", "reason", "created_at", "updated_at"
-]
-
-@app.get("/api/paper-trades/export")
-async def export_trades():
-    """Exports all paper trades as a CSV file. Returns empty CSV with headers if no trades."""
-    trades = db.get_all_trades()
-    output = io.StringIO()
-
-    if trades:
-        writer = csv.DictWriter(output, fieldnames=trades[0].keys(), extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(trades)
-    else:
-        # Return empty CSV with standard headers so the download still works
-        writer = csv.DictWriter(output, fieldnames=CSV_HEADERS)
-        writer.writeheader()
-
-    output.seek(0)
-    filename = f"fo_scanner_trades_{datetime.now(IST).strftime('%Y-%m-%d')}.csv"
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
 
 
 # ── FII/DII Data ──────────────────────────────────────────────────────────────
@@ -1611,44 +1370,6 @@ async def start_backfill_endpoint(days: int = 252):
     return {"status": "started", "days": days}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Strategy Builder / Backtest Endpoint
-# ══════════════════════════════════════════════════════════════════════════════
-
-class BacktestParams(BaseModel):
-    symbol: str = "NIFTY"
-    regime_filter: List[str] = ["TRENDING", "SQUEEZE"]
-    min_score: float = 0.6
-    strategy_type: str = "SHORT_STRADDLE"
-    entry_time: str = "10:00"
-    exit_time: str = "15:00"
-    stop_loss_pct: float = 50.0
-    target_pct: float = 75.0
-    lookback_days: int = 90
-    lot_size: int = 1
-
-
-@app.post("/api/backtest/run")
-async def run_backtest_endpoint(params: BacktestParams):
-    """
-    Run backtest with user-provided parameters from Strategy Builder UI.
-    Returns equity curve + trade log as JSON.
-    """
-    from backtest_runner import run_strategy_backtest
-    results = await asyncio.to_thread(
-        run_strategy_backtest,
-        symbol=params.symbol,
-        regime_filter=params.regime_filter,
-        min_score=params.min_score,
-        strategy_type=params.strategy_type,
-        entry_time=params.entry_time,
-        exit_time=params.exit_time,
-        stop_loss_pct=params.stop_loss_pct,
-        target_pct=params.target_pct,
-        lookback_days=params.lookback_days,
-        lot_size=params.lot_size,
-    )
-    return results
 
 
 # ── Frontend Catch-all ────────────────────────────────────────────────────────
