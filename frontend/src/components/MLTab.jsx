@@ -579,10 +579,17 @@ curl -X POST http://localhost:8000/api/backfill/start`}
           </code>
 
           <h4 style={{ color: theme.fg, fontSize: 13 }}>Step 3: Train the Models</h4>
-          <p>There are three ways to trigger training:</p>
+          <p>There are four ways to trigger training:</p>
           <ol style={{ paddingLeft: 20 }}>
             <li><strong>This UI:</strong> Click the <em>"Train LightGBM + Neural Network"</em> button in the Overview or Training section above.</li>
             <li><strong>Scanner tab:</strong> The Scanner tab shows an ML status banner with a Train button.</li>
+            <li><strong>Command Line:</strong> Run the background ML trainer script directly (shows live progress logs):
+              <code style={{ display: "block", background: theme.bg, padding: 8, borderRadius: 6, margin: "8px 0", whiteSpace: "pre-wrap" }}>
+{`# If using virtual environment
+source venv/bin/activate
+python -m backend.ml_model`}
+              </code>
+            </li>
             <li><strong>API call:</strong>
               <code style={{ display: "block", background: theme.bg, padding: 8, borderRadius: 6, margin: "8px 0", whiteSpace: "pre-wrap" }}>
 {`curl -X POST http://localhost:8000/api/ml/train`}

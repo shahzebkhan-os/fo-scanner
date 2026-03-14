@@ -134,17 +134,19 @@ def black_scholes_greeks(
         return empty
 
 
-def days_to_expiry(expiry_str: str) -> int:
+def days_to_expiry(expiry_str: str, as_of: date = None) -> int:
     """
     Parse INDmoney expiry string and return days remaining.
-    Handles formats: '2025-01-30', '30-Jan-2025', '30Jan2025'
+    If as_of is provided, calculate relative to that date (for historical data).
     """
     from datetime import datetime, date
-    today = date.today()
+    if as_of is None:
+        as_of = date.today()
+    
     for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d %b %Y", "%d%b%Y"):
         try:
             exp_date = datetime.strptime(expiry_str.strip(), fmt).date()
-            return max(0, (exp_date - today).days)
+            return max(0, (exp_date - as_of).days)
         except ValueError:
             continue
     return 30  # fallback assumption
@@ -391,7 +393,8 @@ def compute_stock_score_v2(
     expiry_str:  str   = "",
     iv_rank_data: dict = None,
     prev_chain_data: dict = None,
-    fii_net: float = 0.0
+    fii_net: float = 0.0,
+    as_of: date = None
 ) -> dict:
     
     records = chain_data.get("records", {}).get("data", [])
@@ -415,7 +418,7 @@ def compute_stock_score_v2(
     velocity_signal = _oi_velocity.compute(symbol=symbol, records=records, spot=spot)
     velocity_meta = velocity_signal.metadata
 
-    dte = days_to_expiry(expiry_str) if expiry_str else 5
+    dte = days_to_expiry(expiry_str, as_of) if expiry_str else 5
     iv_rank = (iv_rank_data or {}).get("iv_rank", 50.0)
     
     regime = detect_regime(records, spot, symbol, dte, iv_rank)
@@ -603,10 +606,13 @@ def compute_stock_score_v2(
         regime         = regime,
         metrics        = {
             "gex": gex_data["net_gex"],
+            "zgl": gex_data["zero_gamma_level"],
             "vol_pcr": round(vol_pcr, 2),
             "dwoi_pcr": round(dwoi_pcr, 2),
             "iv_skew": round(skew_data["skew_value"], 2)
         },
+        net_gex            = gex_data["net_gex"],
+        zero_gamma_level   = gex_data["zero_gamma_level"],
         oi_velocity_score  = velocity_signal.score,
         oi_velocity_conf   = velocity_signal.confidence,
         oi_velocity_reason = velocity_signal.reason,

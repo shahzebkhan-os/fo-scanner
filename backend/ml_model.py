@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 import asyncio
 import logging
+import warnings
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +32,10 @@ try:
 except ImportError:
     LGB_AVAILABLE = False
 
-from .nn_model import train_nn, predict_nn, get_nn_status, TORCH_AVAILABLE
+try:
+    from .nn_model import train_nn, predict_nn, get_nn_status, TORCH_AVAILABLE
+except ImportError:
+    from nn_model import train_nn, predict_nn, get_nn_status, TORCH_AVAILABLE
 
 MODEL_PATH = Path(os.path.dirname(__file__)) / "models" / "lgbm_signal.txt"
 CALIBRATOR_PATH = Path(os.path.dirname(__file__)) / "models" / "isotonic_calibrator.pkl"
@@ -127,6 +131,8 @@ def train_model(db_path: str = None) -> dict:
     if len(X) < MIN_ROWS_TO_TRAIN:
         return {"error": f"Need {MIN_ROWS_TO_TRAIN} snapshots, have {len(X)}. Run more historical backfill first."}
     
+    print(f"Training LightGBM on {len(X)} snapshots with {X.shape[1]} features...")
+    
     # Time-series cross validation (no future leakage)
     n_splits = min(5, len(X) // 100)  # Ensure enough data per fold
     if n_splits < 2:
@@ -146,7 +152,8 @@ def train_model(db_path: str = None) -> dict:
         "verbose": -1,
     }
     
-    for train_idx, val_idx in tscv.split(X):
+    for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+        print(f"  LightGBM Fold {fold + 1}/{n_splits}: train={len(train_idx)}, val={len(val_idx)}")
         model = lgb.LGBMClassifier(**params)
         model.fit(
             X[train_idx], y[train_idx],
@@ -154,13 +161,19 @@ def train_model(db_path: str = None) -> dict:
             callbacks=[lgb.early_stopping(20, verbose=False)]
         )
         preds = model.predict_proba(X[val_idx])[:, 1]
-        val_losses.append(log_loss(y[val_idx], preds))
+        loss = log_loss(y[val_idx], preds)
+        print(f"    Fold {fold + 1} LogLoss: {loss:.4f}")
+        val_losses.append(loss)
     
     # Final model on all data
+    log.info("Training final LightGBM model on all data...")
+    print("Training final LightGBM model on all data...")
     final_model = lgb.LGBMClassifier(**params)
     final_model.fit(X, y)
     
     # Isotonic calibration
+    log.info("Calibrating probabilities...")
+    print("Calibrating probabilities...")
     raw_probs = final_model.predict_proba(X)[:, 1]
     calibrator = IsotonicRegression(out_of_bounds="clip")
     calibrator.fit(raw_probs, y)
@@ -202,10 +215,12 @@ def _predict_lgb(features: dict) -> Optional[float]:
         import lightgbm as lgb
         import pickle
 
-        model = lgb.Booster(model_file=str(MODEL_PATH))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            with open(CALIBRATOR_PATH, "rb") as f:
+                calibrator = pickle.load(f)
 
-        with open(CALIBRATOR_PATH, "rb") as f:
-            calibrator = pickle.load(f)
+        model = lgb.Booster(model_file=str(MODEL_PATH))
 
         regime_map = {"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3}
         metrics = features.get("metrics", {})
@@ -323,7 +338,10 @@ def get_model_details(db_path: str = None) -> dict:
     details["lgb"] = lgb_details
 
     # Neural Network model details
-    from .nn_model import NN_MODEL_PATH, NN_META_PATH, SEQ_LEN, FEATURES as NN_FEATURES, TORCH_AVAILABLE as NN_AVAILABLE
+    try:
+        from .nn_model import NN_MODEL_PATH, NN_META_PATH, SEQ_LEN, FEATURES as NN_FEATURES, TORCH_AVAILABLE as NN_AVAILABLE
+    except ImportError:
+        from nn_model import NN_MODEL_PATH, NN_META_PATH, SEQ_LEN, FEATURES as NN_FEATURES, TORCH_AVAILABLE as NN_AVAILABLE
 
     nn_details = {
         "available": NN_AVAILABLE,
@@ -475,3 +493,19 @@ def get_symbol_predictions(db_path: str = None) -> list:
         log.warning(f"Could not generate symbol predictions: {e}")
 
     return results
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+    print("==================================================")
+    print("    Training ML Models (LightGBM + LSTM)          ")
+    print("==================================================")
+    print("Starting ML pipeline...")
+    res = train_model()
+    if "error" in res:
+        print(f"❌ Error: {res['error']}")
+    else:
+        print("\n✅ Training Complete!")
+        print(f"🌲 LightGBM CV Loss: {res.get('cv_log_loss_mean')} (±{res.get('cv_log_loss_std')})")
+        if "nn" in res and not res["nn"].get("error"):
+            print(f"🧬 LSTM NN CV Loss: {res['nn'].get('nn_cv_log_loss_mean')} (±{res['nn'].get('nn_cv_log_loss_std')})")
+        print("Models saved successfully.")

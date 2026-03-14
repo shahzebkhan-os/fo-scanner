@@ -10,6 +10,7 @@ import argparse
 import logging
 import sqlite3
 import pandas as pd
+import numpy as np
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
@@ -60,12 +61,13 @@ except ImportError:
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 
+try:
+    from .constants import FO_STOCKS, INDEX_SYMBOLS
+except ImportError:
+    from constants import FO_STOCKS, INDEX_SYMBOLS
+
 CONFIG = {
-    "symbols": [
-        "NIFTY", "BANKNIFTY", "FINNIFTY",
-        "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK",
-        "SBIN", "TATAMOTORS", "WIPRO", "AXISBANK", "BAJFINANCE"
-    ],
+    "symbols": FO_STOCKS + INDEX_SYMBOLS,
     "start_date": "2023-01-01",
     "end_date":   "2024-12-31",
     "data_dir":   os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "historical_data"),
@@ -76,7 +78,10 @@ CONFIG = {
     "pause_between_batches": 5,
 }
 
-from .analytics import compute_stock_score_v2, black_scholes_greeks, nearest_atm
+try:
+    from .analytics import compute_stock_score_v2, black_scholes_greeks, nearest_atm
+except ImportError:
+    from analytics import compute_stock_score_v2, black_scholes_greeks, nearest_atm
 
 # Known NSE Holidays for 2023 & 2024
 NSE_HOLIDAYS = {
@@ -203,6 +208,44 @@ def download_spot_prices(symbols: list, start_date_str: str, end_date_str: str, 
 
 # ── STEP 1C: BHAVCOPY DOWNLOADER ─────────────────────────────────────────────
 
+def _download_single_bhavcopy(d: date, data_dir: str):
+    # jugaad_data format: fo01Aug2023bhav.csv
+    fname = f"fo{d.strftime('%d%b%Y')}bhav.csv"
+    fpath = os.path.join(data_dir, "bhavcopies", fname)
+    if os.path.exists(fpath):
+        return fpath
+
+    retries = 0
+    while retries < CONFIG["max_retries"]:
+        try:
+            if d >= date(2024, 7, 8):
+                # NSE changed its entire API/URL structure for Bhavcopies on July 8, 2024
+                s = requests.Session()
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                s.get("https://www.nseindia.com/all-reports", headers=headers, timeout=10)
+
+                dt_str = d.strftime("%Y%m%d")
+                url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{dt_str}_F_0000.csv.zip"
+                r = s.get(url, headers=headers, timeout=10)
+                r.raise_for_status()
+
+                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                    with z.open(z.namelist()[0]) as f:
+                        df = pd.read_csv(f)
+                        df.to_csv(fpath, index=False)
+            else:
+                bhavcopy_fo_save(d, os.path.join(data_dir, "bhavcopies"))
+
+            time.sleep(float(CONFIG["rate_limit_seconds"]) / 3)
+            return fpath
+        except Exception as e:
+            retries += 1
+            time.sleep(2 ** retries)
+            if retries == CONFIG["max_retries"]:
+                logger.warning(f"\nFailed to download {d} after {retries} retries: {e}")
+                return None
+    return None
+
 def download_bhavcopy_range(start_date_str: str, end_date_str: str, data_dir: str) -> list:
     start = datetime.strptime(start_date_str, "%Y-%m-%d").date()
     end = datetime.strptime(end_date_str, "%Y-%m-%d").date()
@@ -218,54 +261,27 @@ def download_bhavcopy_range(start_date_str: str, end_date_str: str, data_dir: st
     total = len(dates_to_fetch)
     os.makedirs(os.path.join(data_dir, "bhavcopies"), exist_ok=True)
 
-    logger.info(f"Downloading {total} bhavcopy days...")
+    logger.info(f"Downloading {total} bhavcopy days concurrently...")
 
-    for i, d in enumerate(dates_to_fetch):
-        # jugaad_data format: fo01Aug2023bhav.csv
-        fname = f"fo{d.strftime('%d%b%Y')}bhav.csv"
-        fpath = os.path.join(data_dir, "bhavcopies", fname)
-
-        progress = int((i / total) * 20)
-        bar = "=" * progress + ">" + " " * (20 - progress)
-        sys.stdout.write(f"\r[{bar}] {i}/{total} | Current: {d.strftime('%d-%b-%Y')}")
-        sys.stdout.flush()
-
-        if os.path.exists(fpath):
-            successful.append(fpath)
-            continue
-
-        retries = 0
-        while retries < CONFIG["max_retries"]:
+    import concurrent.futures
+    max_workers = 5
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_download_single_bhavcopy, d, data_dir): d for d in dates_to_fetch}
+        
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            d = futures[future]
             try:
-                if d >= date(2024, 7, 8):
-                    # NSE changed its entire API/URL structure for Bhavcopies on July 8, 2024
-                    s = requests.Session()
-                    headers = {'User-Agent': 'Mozilla/5.0'}
-                    s.get("https://www.nseindia.com/all-reports", headers=headers, timeout=10)
-
-                    dt_str = d.strftime("%Y%m%d")
-                    url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{dt_str}_F_0000.csv.zip"
-                    r = s.get(url, headers=headers, timeout=10)
-                    r.raise_for_status()
-
-                    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                        with z.open(z.namelist()[0]) as f:
-                            df = pd.read_csv(f)
-                            df.to_csv(fpath, index=False)
-                else:
-                    bhavcopy_fo_save(d, os.path.join(data_dir, "bhavcopies"))
-
-                time.sleep(CONFIG["rate_limit_seconds"])
-                successful.append(fpath)
-                break
+                res = future.result()
+                if res:
+                    successful.append(res)
             except Exception as e:
-                retries += 1
-                time.sleep(2 ** retries)
-                if retries == CONFIG["max_retries"]:
-                    logger.warning(f"\nFailed to download {d} after {retries} retries: {e}")
-
-        if (i + 1) % CONFIG["batch_size"] == 0:
-            time.sleep(CONFIG["pause_between_batches"])
+                logger.warning(f"\nError downloading {d}: {e}")
+            
+            progress = int(((i + 1) / total) * 20)
+            bar = "=" * progress + ">" + " " * (20 - progress)
+            sys.stdout.write(f"\r[{bar}] {i + 1}/{total}")
+            sys.stdout.flush()
 
     sys.stdout.write(f"\n✅ Downloaded {len(successful)}/{total} dates.\n")
     return successful
@@ -436,6 +452,13 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
     # Needs to be sorted chronologically for DTE tracking
     raw_df = raw_df.sort_values(by="trade_date")
 
+    # PRE-CALCULATE LOOKUP TABLE (Massive performance boost for next-day labeling)
+    # This prevents filtering raw_df in every loop iteration (O(N^2) -> O(N))
+    logger.info("Building price lookup table...")
+    price_lookup = {}
+    for row in raw_df[["trade_date", "symbol", "strike", "opt_type", "ltp"]].itertuples(index=False):
+        price_lookup[(row.trade_date, row.symbol, row.strike, row.opt_type)] = row.ltp
+
     grouped_days = raw_df.groupby(["trade_date", "symbol"])
     total_len = len(grouped_days)
 
@@ -444,7 +467,7 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
     # Use tqdm for better progress visualization
     with tqdm(total=total_len, desc="Processing snapshots", unit="snapshot") as pbar:
         for i, ((tdate, sym), day_df) in enumerate(grouped_days):
-            pbar.set_postfix({"symbol": sym, "date": tdate})
+            pbar.set_postfix(symbol=sym, date=tdate)
 
             spot_history = spot_prices.get(sym, {})
             spot = spot_history.get(tdate, 0)
@@ -500,38 +523,126 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
 
             max_pain = min(pain_vals)[1] if pain_vals else atm_strike
 
-            # 2. IV Reconstruct
+            # 2. IV Reconstruct - ATM only (not per-strike, for speed)
             atm_ce_iv = compute_implied_volatility(atm_ce_ltp, spot, atm_strike, dte, "CE") or 0.0
             atm_pe_iv = compute_implied_volatility(atm_pe_ltp, spot, atm_strike, dte, "PE") or 0.0
             iv_skew = atm_pe_iv - atm_ce_iv
+            avg_iv = (atm_ce_iv + atm_pe_iv) / 2.0
 
-            # 3. Greeks + GEX (Approximations for scoring)
-            # Assuming v2 compute_stock_score handles the internal loggeric, we build a pseudo chain payload
-            pseudo_records = {"underlyingValue": spot, "expiryDates": expiries, "data": []}
-            for st in strikes:
-                rce = chain[(chain["strike"] == st) & (chain["opt_type"] == "CE")]
-                rpe = chain[(chain["strike"] == st) & (chain["opt_type"] == "PE")]
+            # 2.5 OI Velocity & UOA (EOD Heuristic)
+            atm_band_strikes = chain[(chain["strike"] >= spot * 0.985) & (chain["strike"] <= spot * 1.015)]
+            
+            top_ce_chg, top_pe_chg = 0, 0
+            top_ce_strike, top_pe_strike = atm_strike, atm_strike
+            avg_vol = 1
+            
+            if not atm_band_strikes.empty:
+                ce_band = atm_band_strikes[atm_band_strikes["opt_type"] == "CE"]
+                pe_band = atm_band_strikes[atm_band_strikes["opt_type"] == "PE"]
+                
+                if not ce_band.empty:
+                    max_idx = ce_band["chg_in_oi"].abs().idxmax()
+                    top_ce_chg = ce_band.loc[max_idx, "chg_in_oi"]
+                    top_ce_strike = ce_band.loc[max_idx, "strike"]
+                    
+                if not pe_band.empty:
+                    max_idx = pe_band["chg_in_oi"].abs().idxmax()
+                    top_pe_chg = pe_band.loc[max_idx, "chg_in_oi"]
+                    top_pe_strike = pe_band.loc[max_idx, "strike"]
+                
+                avg_vol = max(1, atm_band_strikes["volume"].mean())
 
-                row = {"strikePrice": st, "expiryDate": near_exp}
-                if not rce.empty:
-                    rce = rce.iloc[0]
-                    row["CE"] = {"lastPrice": rce["ltp"], "openInterest": rce["open_interest"], "changeinOpenInterest": rce["chg_in_oi"], "impliedVolatility": compute_implied_volatility(rce["ltp"], spot, st, dte, "CE") or 0.0, "totalTradedVolume": rce["volume"]}
-                if not rpe.empty:
-                    rpe = rpe.iloc[0]
-                    row["PE"] = {"lastPrice": rpe["ltp"], "openInterest": rpe["open_interest"], "changeinOpenInterest": rpe["chg_in_oi"], "impliedVolatility": compute_implied_volatility(rpe["ltp"], spot, st, dte, "PE") or 0.0, "totalTradedVolume": rpe["volume"]}
-                pseudo_records["data"].append(row)
+            net_chg = top_ce_chg - top_pe_chg
+            scale = max(abs(top_ce_chg), abs(top_pe_chg), 1)
+            raw_vel_score = float(np.tanh(net_chg / scale)) if scale else 0.0
+            
+            ce_spike = abs(top_ce_chg) / avg_vol
+            pe_spike = abs(top_pe_chg) / avg_vol
+            
+            is_uoa = max(ce_spike, pe_spike) >= 2.0
+            
+            uoa_side = None
+            uoa_strike = None
+            if is_uoa:
+                uoa_side = "CE" if ce_spike > pe_spike else "PE"
+                uoa_strike = top_ce_strike if uoa_side == "CE" else top_pe_strike
 
-            score_res = compute_stock_score_v2({"records": pseudo_records}, spot, sym, near_exp, {"iv_rank": 50}) # defaulting IVR for historical
+            vel_conf = min(0.95, (max(ce_spike, pe_spike) - 1.0) / 4.0) if max(ce_spike, pe_spike) > 1.0 else 0.1
 
-            top_picks = score_res.get("top_picks", [])
-            top_type = None
-            top_str = 0
-            top_pr = 0
-            if top_picks:
-                tp = top_picks[0]
-                top_type = tp["type"]
-                top_str = tp["strike"]
-                top_pr = tp["ltp"]
+            # 3. FAST GEX + Regime - vectorized, no IV per-strike needed
+            # GEX = gamma * OI * spot^2 * 0.01
+            # Use approximate gamma = N(d1)/spot/sigma/sqrt(T) with avg_iv for ATM band
+            T = max(dte, 0.5) / 365.0
+            sigma = max(avg_iv / 100.0, 0.05)  # convert % to decimal
+            import math as _math
+            
+            net_gex = 0.0
+            zero_gamma_level = atm_strike
+            try:
+                cum_gex = []
+                for _, grp in chain.groupby("opt_type"):
+                    is_ce = grp["opt_type"].iloc[0] == "CE"
+                    for _, srow in grp.iterrows():
+                        K = srow["strike"]
+                        oi = srow["open_interest"]
+                        if K <= 0 or oi <= 0: continue
+                        d1 = (_math.log(spot / K) + (0.065 + 0.5 * sigma**2) * T) / (sigma * _math.sqrt(T))
+                        gamma = _math.exp(-0.5 * d1**2) / (_math.sqrt(2 * _math.pi) * spot * sigma * _math.sqrt(T))
+                        g = gamma * oi * spot**2 * 0.01
+                        net_gex += g if is_ce else -g
+                        cum_gex.append((K, g if is_ce else -g))
+                # Approximate zero-gamma as weighted avg strike where gex sign flips
+                if cum_gex:
+                    cum_gex.sort(key=lambda x: x[0])
+                    running = 0.0
+                    zgl = atm_strike
+                    for k, g in cum_gex:
+                        prev = running
+                        running += g
+                        if prev * running < 0:  # sign flip
+                            zgl = k
+                    zero_gamma_level = zgl
+            except Exception:
+                pass
+
+            # Fast regime: derive from dte + OI concentration
+            ce_oi_series = chain[chain["opt_type"] == "CE"]["open_interest"]
+            pe_oi_series = chain[chain["opt_type"] == "PE"]["open_interest"]
+            top_ce_conc = ce_oi_series.nlargest(3).sum() / max(ce_oi_series.sum(), 1)
+            top_pe_conc = pe_oi_series.nlargest(3).sum() / max(pe_oi_series.sum(), 1)
+            oi_conc = (top_ce_conc + top_pe_conc) / 2.0
+            oi_concentration_ratio = oi_conc
+
+            if dte <= 2:
+                regime = "EXPIRY"
+            else:
+                straddle_iv = avg_iv / 100.0
+                
+            if oi_conc > 0.70:
+                regime = "PINNED"
+            elif straddle_iv < 0.12:
+                regime = "SQUEEZE"
+            elif abs(pcr_oi - 1.0) > 0.4:
+                regime = "TRENDING"
+            else:
+                regime = "NEUTRAL"
+
+            # Simple signal from PCR + skew
+            if pcr_oi > 1.3 and iv_skew > 2:
+                signal = "BULLISH"
+            elif pcr_oi < 0.7 and iv_skew < -2:
+                signal = "BEARISH"
+            else:
+                signal = "NEUTRAL"
+            
+            score = min(100, int(50 + (pcr_oi - 1.0) * 30))
+            confidence = min(0.95, oi_conc if dte > 2 else 0.5)
+
+            # Top pick: simple ATM pick
+            top_type = "CE" if signal == "BULLISH" else ("PE" if signal == "BEARISH" else None)
+            top_str = atm_strike
+            top_pr = atm_ce_ltp if top_type == "CE" else (atm_pe_ltp if top_type == "PE" else 0)
+            oi_concentration_ratio = (top_ce_conc + top_pe_conc) / 2.0
 
             # NEXT DAY OUTCOME LABELLING
             nday = next_trading_day(datetime.strptime(tdate, "%Y-%m-%d").date())
@@ -542,11 +653,9 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
             trade_res = None
 
             if top_type and out_next:
-                nday_df = raw_df[(raw_df["trade_date"] == nday_str) & (raw_df["symbol"] == sym)]
-                tgt_row = nday_df[(nday_df["strike"] == top_str) & (nday_df["opt_type"] == top_type)]
-
-                if not tgt_row.empty:
-                    pick_ltp_next = float(tgt_row.iloc[0]["ltp"])
+                pick_ltp_next = price_lookup.get((nday_str, sym, top_str, top_type))
+                
+                if pick_ltp_next is not None:
                     if top_pr > 0:
                         pick_pnl_next = ((pick_ltp_next - top_pr) / top_pr) * 100
 
@@ -576,19 +685,24 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
                 "atm_strike": atm_strike,
                 "dte": dte,
                 "expiry_date": near_exp,
-                "signal": score_res.get("signal", "NEUTRAL"),
-                "score": score_res.get("score", 0),
-                "confidence": score_res.get("confidence", 0.0),
-                "regime": score_res.get("regime", "EXPIRY"),
+                "signal": signal,
+                "score": score,
+                "confidence": confidence,
+                "regime": regime,
                 "top_pick_type": top_type,
                 "top_pick_strike": top_str,
                 "top_pick_ltp": top_pr,
-                "net_gex": score_res.get("gex", {}).get("net_gamma_exposure", 0),
-                "zero_gamma_level": score_res.get("gex", {}).get("zero_gamma_level", atm_strike),
+                "net_gex": round(net_gex, 2),
+                "zero_gamma_level": round(zero_gamma_level, 2),
                 "iv_rank": 50, # Computed fully next pass
                 "max_pain_strike": max_pain,
-                "oi_concentration_ratio": score_res.get("oi_concentration_ratio", 0),
+                "oi_concentration_ratio": round(oi_concentration_ratio, 4),
                 "net_delta_flow": 0,
+                "oi_velocity_score": round(raw_vel_score, 4),
+                "oi_velocity_conf": round(vel_conf, 4),
+                "uoa_detected": int(is_uoa),
+                "uoa_strike": uoa_strike,
+                "uoa_side": uoa_side,
                 "outcome_1h": None, "outcome_eod": spot, "outcome_next": out_next,
                 "pick_ltp_1h": None, "pick_ltp_eod": top_pr,
                 "pick_pnl_pct_1h": None, "pick_pnl_pct_eod": 0,

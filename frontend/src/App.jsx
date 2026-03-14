@@ -133,7 +133,7 @@ export default function App() {
 
       {/* Header */}
       <header style={{
-        background: theme.card, borderBottom: `1px solid ${theme.border}`,
+        borderBottom: `1px solid ${theme.border}`,
         padding: "0 16px", display: "flex", alignItems: "center",
         justifyContent: "space-between", height: 52, position: "sticky",
         top: 0, zIndex: 100,

@@ -10,8 +10,10 @@ a more robust bullish-probability estimate.
 import numpy as np
 import sqlite3
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
 import pickle
 import logging
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -175,8 +177,11 @@ def train_nn(db_path: str = None) -> dict:
     if not TORCH_AVAILABLE:
         return {"error": "torch not installed. Run: pip install torch"}
 
+    print("Starting LSTM Neural Network training pipeline...")
     try:
+        print("Loading sequence data for NN...")
         X_seq, y, feature_names, scaler = _load_sequence_data(db_path)
+        print(f"Loaded {len(X_seq)} sequences successfully.")
     except (FileNotFoundError, ValueError) as e:
         return {"error": str(e)}
 
@@ -198,8 +203,12 @@ def train_nn(db_path: str = None) -> dict:
     lr = 1e-3
     input_size = X_seq.shape[2]
 
-    for train_idx, val_idx in tscv.split(X_seq):
+    print(f"Starting time-series cross-validation ({n_splits} splits)...")
+    for fold, (train_idx, val_idx) in enumerate(tscv.split(X_seq)):
+        print(f"  Fold {fold + 1}/{n_splits}: train={len(train_idx)}, val={len(val_idx)}")
+        print("    Initializing LSTMPredictor...")
         model = LSTMPredictor(input_size=input_size).to(device)
+        print("    LSTMPredictor initialized. Creating optimizer...")
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
         criterion = nn.BCELoss()
 
@@ -208,16 +217,23 @@ def train_nn(db_path: str = None) -> dict:
         X_val_t = torch.tensor(X_seq[val_idx], dtype=torch.float32)
         y_val_t = torch.tensor(y[val_idx], dtype=torch.float32)
 
-        train_ds = TensorDataset(X_train_t, y_train_t)
-        train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=False)  # time-series integrity
-
+        # Simple memory batching (no DataLoader)
+        indices = np.arange(len(X_train_t))
+        
         best_val_loss = float("inf")
         patience, wait = 5, 0
 
         for _epoch in range(epochs):
+            print(f"    Epoch {_epoch + 1}/{epochs}...")
             model.train()
-            for xb, yb in train_dl:
-                xb, yb = xb.to(device), yb.to(device)
+            # Shuffle manually
+            np.random.shuffle(indices)
+            
+            for start_idx in range(0, len(indices), batch_size):
+                batch_idx = indices[start_idx:start_idx + batch_size]
+                xb = X_train_t[batch_idx].to(device)
+                yb = y_train_t[batch_idx].to(device)
+                
                 optimizer.zero_grad()
                 pred = model(xb)
                 loss = criterion(pred, yb)
@@ -251,18 +267,24 @@ def train_nn(db_path: str = None) -> dict:
         }
 
     # Train final model on all data
+    print(f"Training final LSTM model on all {len(X_seq)} sequences...")
+    print("  Initializing final LSTMPredictor...")
     final_model = LSTMPredictor(input_size=input_size).to(device)
+    print("  Final LSTMPredictor initialized.")
     optimizer = torch.optim.Adam(final_model.parameters(), lr=lr, weight_decay=1e-5)
     criterion = nn.BCELoss()
     X_all_t = torch.tensor(X_seq, dtype=torch.float32)
     y_all_t = torch.tensor(y, dtype=torch.float32)
-    all_ds = TensorDataset(X_all_t, y_all_t)
-    all_dl = DataLoader(all_ds, batch_size=batch_size, shuffle=False)
+    all_indices = np.arange(len(X_all_t))
 
     for _epoch in range(epochs):
         final_model.train()
-        for xb, yb in all_dl:
-            xb, yb = xb.to(device), yb.to(device)
+        np.random.shuffle(all_indices)
+        for start_idx in range(0, len(all_indices), batch_size):
+            batch_idx = all_indices[start_idx:start_idx + batch_size]
+            xb = X_all_t[batch_idx].to(device)
+            yb = y_all_t[batch_idx].to(device)
+            
             optimizer.zero_grad()
             pred = final_model(xb)
             loss = criterion(pred, yb)
@@ -282,6 +304,7 @@ def train_nn(db_path: str = None) -> dict:
         pickle.dump(meta, f)
 
     log.info(f"NN model saved: loss={mean_loss:.4f}, sequences={len(X_seq)}")
+    print(f"LSTM NN saved successfully! Loss: {mean_loss:.4f}")
 
     return {
         "nn_cv_log_loss_mean": round(mean_loss, 4),
@@ -307,10 +330,12 @@ def predict_nn(symbol: str, current_features: dict, db_path: str = None) -> Opti
         return None
 
     try:
-        with open(NN_META_PATH, "rb") as f:
-            meta = pickle.load(f)
-        with open(NN_SCALER_PATH, "rb") as f:
-            scaler = pickle.load(f)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            with open(NN_META_PATH, "rb") as f:
+                meta = pickle.load(f)
+            with open(NN_SCALER_PATH, "rb") as f:
+                scaler = pickle.load(f)
 
         if db_path is None:
             db_path = os.path.join(os.path.dirname(__file__), "scanner.db")
