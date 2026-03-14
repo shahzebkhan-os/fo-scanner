@@ -19,11 +19,11 @@ from .signals_legacy import build_sector_heatmap, detect_uoa, screen_straddle, g
 from .cache import cache
 from .ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status, get_model_details as ml_get_details, get_symbol_predictions as ml_get_predictions
 from .historical_loader import get_backfill_progress, run_backfill_with_progress, reset_backfill_progress
+from .suggestions import generate_suggestions
 
 # ── Deduplication sets (in-memory, keyed by date so they reset daily) ────────
 # Bug 6 fix: tracks which trades have already been entered today
 # Bug 5 fix: separate sets for trades vs alerts so thresholds are independent
-_traded_today: set  = set()   # "SYMBOL-TYPE-STRIKE-DATE"
 _traded_today: set  = set()   # "SYMBOL-TYPE-STRIKE-DATE"
 # notified_signals moved to db.notifications for persistence
 _daily_trade_count: int = 0
@@ -706,7 +706,7 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
                     and _daily_trade_count < MAX_DAILY_AUTO_TRADES):
 
                     # Sector concentration guard
-                    from signals_legacy import get_sector
+                    from .signals_legacy import get_sector
                     sym_sector = get_sector(symbol)
                     sector_ct = _sector_trade_count.get(sym_sector, 0)
 
@@ -802,6 +802,41 @@ async def scan_all(limit: int = Query(48, ge=1, le=100)):
     await cache.set(cache_key, response, ttl=cache.DEFAULT_TTLS["scan_result"])
     
     return response
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# F&O Trade Suggestions — Best trade ideas ranked by conviction
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/fo-suggestions")
+async def fo_suggestions():
+    """
+    Generate best F&O trade suggestions from latest scan data.
+    Returns ranked strategies with specific strikes, risk/reward, and conviction scores.
+    """
+    from .analytics import STRIKE_INTERVALS
+
+    # Use the scan endpoint internally (with cache)
+    scan_result = await scan_all(limit=48)
+    scan_data = scan_result.get("data", [])
+
+    if not scan_data:
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "market_status": market_status(),
+            "count": 0,
+            "suggestions": [],
+            "message": "No scan data available. Run a scan first.",
+        }
+
+    suggestions = generate_suggestions(scan_data, LOT_SIZES, STRIKE_INTERVALS)
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "market_status": market_status(),
+        "count": len(suggestions),
+        "suggestions": suggestions,
+    }
 
 
 # ── Trade Tracker (Today's Live Trades) ───────────────────────────────────────

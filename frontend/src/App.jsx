@@ -10,12 +10,14 @@ import {
 } from "recharts";
 import StrategyBuilder from "./components/StrategyBuilder";
 import MLTab from "./components/MLTab";
+import SuggestionsTab from "./components/SuggestionsTab";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const API = "http://localhost:8000";   // same-origin; set to http://localhost:8000 for dev
 
 const TABS = [
   { id: "scanner", label: "Scanner", icon: "⚡" },
+  { id: "suggestions", label: "Suggestions", icon: "💡" },
   { id: "chain", label: "Chain", icon: "🔗" },
   { id: "greeks", label: "Greeks", icon: "Δ" },
   { id: "heatmap", label: "OI Map", icon: "🌡" },
@@ -231,6 +233,7 @@ export default function App() {
       {/* Content */}
       <main style={{ padding: 16, maxWidth: 1400, margin: "0 auto" }}>
         <div style={{ display: tab === "scanner"   ? "block" : "none" }}><ScannerTab theme={theme} onChain={goChain} onGreeks={goGreeks} onData={setScanData} /></div>
+        <div style={{ display: tab === "suggestions" ? "block" : "none" }}><SuggestionsTab theme={theme} goChain={goChain} /></div>
         <div style={{ display: tab === "chain"     ? "block" : "none" }}><ChainTab theme={theme} symbol={chainSymbol} setSymbol={setChainSymbol} /></div>
         <div style={{ display: tab === "greeks"    ? "block" : "none" }}><GreeksTab theme={theme} symbol={greeksSymbol} /></div>
         <div style={{ display: tab === "heatmap"   ? "block" : "none" }}><HeatmapTab theme={theme} /></div>
