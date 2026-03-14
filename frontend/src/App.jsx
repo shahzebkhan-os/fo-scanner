@@ -10,6 +10,7 @@ import {
 } from "recharts";
 import MLTab from "./components/MLTab";
 import SuggestionsTab from "./components/SuggestionsTab";
+import PaperTradingTab from "./components/PaperTradingTab";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const API = "http://localhost:8000";   // same-origin; set to http://localhost:8000 for dev
@@ -17,6 +18,7 @@ const API = "http://localhost:8000";   // same-origin; set to http://localhost:8
 const TABS = [
   { id: "scanner", label: "Scanner", icon: "⚡" },
   { id: "suggestions", label: "Suggestions", icon: "💡" },
+  { id: "paper", label: "Paper Trade", icon: "📝" },
   { id: "chain", label: "Chain", icon: "🔗" },
   { id: "greeks", label: "Greeks", icon: "Δ" },
   { id: "heatmap", label: "OI Map", icon: "🌡" },
@@ -214,8 +216,9 @@ export default function App() {
 
       {/* Content */}
       <main style={{ padding: 16, maxWidth: 1400, margin: "0 auto" }}>
-        <div style={{ display: tab === "scanner"   ? "block" : "none" }}><ScannerTab theme={theme} onChain={goChain} onGreeks={goGreeks} onData={setScanData} /></div>
+        <div style={{ display: tab === "scanner"   ? "block" : "none" }}><ScannerTab theme={theme} onChain={goChain} onGreeks={goGreeks} onData={setScanData} marketStatus={marketStatus} /></div>
         <div style={{ display: tab === "suggestions" ? "block" : "none" }}><SuggestionsTab theme={theme} goChain={goChain} /></div>
+        <div style={{ display: tab === "paper"   ? "block" : "none" }}><PaperTradingTab theme={theme} /></div>
         <div style={{ display: tab === "chain"     ? "block" : "none" }}><ChainTab theme={theme} symbol={chainSymbol} setSymbol={setChainSymbol} /></div>
         <div style={{ display: tab === "greeks"    ? "block" : "none" }}><GreeksTab theme={theme} symbol={greeksSymbol} /></div>
         <div style={{ display: tab === "heatmap"   ? "block" : "none" }}><HeatmapTab theme={theme} /></div>
@@ -292,7 +295,7 @@ function SymbolInput({ value, onChange, onSubmit, theme }) {
 // Scanner Tab
 // ══════════════════════════════════════════════════════════════════════════════
 
-function ScannerTab({ theme, onChain, onGreeks, onData }) {
+function ScannerTab({ theme, onChain, onGreeks, onData, marketStatus }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("ALL");
@@ -300,15 +303,39 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
   const [watchlist, setWatchlist] = useState([]);
   const [showWL, setShowWL] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [countdown, setCountdown] = useState(60);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [scanInterval, setScanInterval] = useState(() => {
+    const saved = localStorage.getItem("scanInterval");
+    return saved ? parseInt(saved, 10) : 120;
+  });
+  const [countdown, setCountdown] = useState(() => {
+    const saved = localStorage.getItem("scanInterval");
+    return saved ? parseInt(saved, 10) : 120;
+  });
+  const [autoRefresh, setAutoRefresh] = useState(() => {
+    return localStorage.getItem("autoRefresh") !== "false";
+  });
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const [scanMeta, setScanMeta] = useState({ stale: false, stale_count: 0 });
   const [mlStatus, setMlStatus] = useState({ trained: false });
   const [scanProgress, setScanProgress] = useState(0);
   const eventSourceRef = useRef(null);
+  const scanningRef = useRef(false);
+
+  // Market-aware auto-scan: ON when market open, OFF when closed
+  useEffect(() => {
+    if (!marketStatus) return;
+    if (marketStatus.open) {
+      setAutoRefresh(true);
+    } else {
+      setAutoRefresh(false);
+    }
+  }, [marketStatus?.open]);
 
   const load = useCallback(() => {
+    // Prevent duplicate scans — if already scanning, skip
+    if (scanningRef.current) return;
+    scanningRef.current = true;
+
     // Close any existing SSE connection
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
@@ -342,9 +369,10 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
         if (onData) onData(sorted);
       } catch (err) { console.error("SSE done parse error:", err); }
       setLastUpdated(new Date());
-      setCountdown(60);
+      setCountdown(scanInterval);
       setLoading(false);
       setScanProgress(0);
+      scanningRef.current = false;
       es.close();
       eventSourceRef.current = null;
     });
@@ -360,12 +388,19 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
           setScanMeta({ stale: r.stale, stale_count: r.stale_count || 0, _fetched_at: r._fetched_at });
           if (onData) onData(rows);
           setLastUpdated(new Date());
-          setCountdown(60);
+          setCountdown(scanInterval);
         })
         .catch(console.error)
-        .finally(() => { setLoading(false); setScanProgress(0); });
+        .finally(() => { setLoading(false); setScanProgress(0); scanningRef.current = false; });
     };
-  }, []);
+  }, [scanInterval]);
+
+  // Save scan interval to localStorage
+  const changeScanInterval = (secs) => {
+    setScanInterval(secs);
+    setCountdown(secs);
+    localStorage.setItem("scanInterval", String(secs));
+  };
 
   // Cleanup SSE on unmount
   useEffect(() => {
@@ -406,12 +441,12 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
     if (!autoRefresh) return;
     const timer = setInterval(() => {
       setCountdown(prev => {
-        if (prev <= 1) { load(); return 60; }
+        if (prev <= 1) { load(); return scanInterval; }
         return prev - 1;
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, [autoRefresh, load]);
+  }, [autoRefresh, load, scanInterval]);
 
   useEffect(() => { load(); apiFetch("/api/settings/watchlist").then(r => setWatchlist(r.watchlist || [])); }, []);
 
@@ -539,7 +574,7 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
 
       {/* Controls */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
-        <button onClick={() => { load(); setCountdown(60); }} disabled={loading}
+        <button onClick={() => { load(); setCountdown(scanInterval); }} disabled={loading}
           className="clickable-btn"
           style={{
             padding: "6px 14px", borderRadius: 6, background: theme.accent,
@@ -623,6 +658,16 @@ function ScannerTab({ theme, onChain, onGreeks, onData }) {
             }}>
             {autoRefresh ? "⏱ Auto" : "⏸ Paused"}
           </button>
+          <select value={scanInterval} onChange={e => changeScanInterval(Number(e.target.value))}
+            style={{
+              padding: "3px 6px", borderRadius: 4, border: `1px solid ${theme.border}`,
+              background: theme.bg, color: theme.text, fontSize: 10, fontFamily: "inherit",
+              cursor: "pointer",
+            }}>
+            <option value={60}>1 min</option>
+            <option value={120}>2 min</option>
+            <option value={300}>5 min</option>
+          </select>
           {autoRefresh && (
             <span style={{ fontSize: 11, color: theme.muted, fontVariantNumeric: "tabular-nums" }}>
               {countdown}s

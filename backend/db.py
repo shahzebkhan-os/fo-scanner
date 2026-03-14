@@ -278,7 +278,20 @@ def init_db():
 # Paper Trades
 # ══════════════════════════════════════════════════════════════════════════════
 
+def has_open_trade(symbol, opt_type, strike):
+    """Check if an open trade already exists for this symbol/type/strike."""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT id FROM paper_trades WHERE symbol=? AND type=? AND strike=? AND status='OPEN'",
+            (symbol, opt_type, float(strike)),
+        ).fetchone()
+    return row is not None
+
+
 def add_trade(symbol, opt_type, strike, entry_price, reason="", lot_size=0):
+    # Prevent duplicate open trades for the same symbol/type/strike
+    if has_open_trade(symbol, opt_type, strike):
+        return False
     with _conn() as c:
         c.execute("""
             INSERT INTO paper_trades (symbol, type, strike, entry_price, reason, lot_size)

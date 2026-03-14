@@ -175,11 +175,12 @@ function SuggestionCard({ item, theme, goChain, marketOpen }) {
           <div style={{ fontSize: 10, color: theme.muted, fontWeight: 700, marginBottom: 6, textTransform: "uppercase" }}>Target / Stop Loss</div>
           <div style={{ fontSize: 12 }}>
             <div>R:R → <b style={{ color: "#22c55e" }}>{rr.risk_reward_ratio}</b></div>
-            <div>Target: <span style={{ color: "#22c55e" }}>
+            <div>Final Target: <b style={{ color: "#22c55e" }}>
               ₹{rr.target_price != null ? rr.target_price : rr.target}
+            </b>
               {rr.target != null && rr.target_price != null &&
                 <span style={{ color: theme.muted, fontSize: 10 }}> (+₹{rr.target})</span>}
-            </span></div>
+            </div>
             <div>Stop Loss: <span style={{ color: "#ef4444" }}>
               ₹{rr.stop_loss_price != null ? rr.stop_loss_price : rr.stop_loss}
               {rr.stop_loss != null && rr.stop_loss_price != null &&
@@ -193,7 +194,10 @@ function SuggestionCard({ item, theme, goChain, marketOpen }) {
           <div style={{ fontSize: 10, color: theme.muted, fontWeight: 700, marginBottom: 6, textTransform: "uppercase" }}>Position</div>
           <div style={{ fontSize: 12 }}>
             <div>Lot Size: <b>{sizing.lot_size}</b></div>
-            <div>Capital/Lot: <b>₹{(sizing.capital_per_lot || 0).toLocaleString()}</b></div>
+            <div>Lot Price: <b>₹{(sizing.lot_entry_price || entry.entry_premium * (sizing.lot_size || 1)).toLocaleString()}</b></div>
+            <div>Lot Target: <span style={{ color: "#22c55e" }}>
+              <b>₹{(sizing.lot_target_price || (rr.target_price || 0) * (sizing.lot_size || 1)).toLocaleString()}</b>
+            </span></div>
             <div>Target P&L: <span style={{ color: "#22c55e" }}>
               +₹{sizing.target_pnl_per_lot != null
                 ? sizing.target_pnl_per_lot.toLocaleString()
