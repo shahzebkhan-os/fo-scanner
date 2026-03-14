@@ -6,6 +6,13 @@ FO_STOCKS = [
     "DIVISLAB","CIPLA","TECHM","TATASTEEL","BAJAJFINSV","NESTLEIND",
     "HINDALCO","COALINDIA","VEDL","JSWSTEEL","SAIL","APOLLOHOSP",
     "PIDILITIND","SIEMENS","HAVELLS","VOLTAS",
+    # ── Additional F&O stocks ──
+    "BHARTIARTL","BANKBARODA","BEL","DLF","HAL","IRCTC","TATAPOWER",
+    "TATACONSUM","TRENT","PNB","CANBK","SBILIFE","SBICARD","PFC","RECLTD",
+    "BIOCON","LUPIN","JUBLFOOD","LICHSGFIN","MOTHERSON","CHOLAFIN",
+    "MUTHOOTFIN","FEDERALBNK","UPL","POLYCAB","SRF","DABUR","GODREJCP",
+    "BANDHANBNK","IDFCFIRSTB","INDUSTOWER","NAUKRI","BHARATFORG","COFORGE",
+    "GODREJPROP","PETRONET","RBLBANK","TATACOMM","INDHOTEL","PAGEIND",
 ]
 INDEX_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
 
@@ -19,7 +26,16 @@ LOT_SIZES = {
     "HEROMOTOCO": 150, "ASIANPAINT": 250, "MM": 350, "DRREDDY": 625,
     "BAJAJFINSV": 250, "HINDALCO": 700, "TATASTEEL": 5500, "DIVISLAB": 100, "CIPLA": 375,
     "TECHM": 600, "NESTLEIND": 500, "COALINDIA": 1350, "VEDL": 1150, "JSWSTEEL": 675, "SAIL": 4700,
-    "APOLLOHOSP": 125, "PIDILITIND": 500, "SIEMENS": 175, "HAVELLS": 500, "VOLTAS": 375
+    "APOLLOHOSP": 125, "PIDILITIND": 500, "SIEMENS": 175, "HAVELLS": 500, "VOLTAS": 375,
+    # ── Additional F&O stocks ──
+    "BHARTIARTL": 950, "BANKBARODA": 2925, "BEL": 1950, "DLF": 625, "HAL": 150,
+    "IRCTC": 575, "TATAPOWER": 1350, "TATACONSUM": 500, "TRENT": 75, "PNB": 4000,
+    "CANBK": 4500, "SBILIFE": 375, "SBICARD": 400, "PFC": 1400, "RECLTD": 1500,
+    "BIOCON": 1800, "LUPIN": 425, "JUBLFOOD": 1250, "LICHSGFIN": 775, "MOTHERSON": 3200,
+    "CHOLAFIN": 375, "MUTHOOTFIN": 250, "FEDERALBNK": 5000, "UPL": 1300, "POLYCAB": 100,
+    "SRF": 125, "DABUR": 1250, "GODREJCP": 500, "BANDHANBNK": 2400, "IDFCFIRSTB": 5000,
+    "INDUSTOWER": 1600, "NAUKRI": 75, "BHARATFORG": 500, "COFORGE": 75, "GODREJPROP": 225,
+    "PETRONET": 3000, "RBLBANK": 2800, "TATACOMM": 250, "INDHOTEL": 700, "PAGEIND": 15,
 }
 
 NSE_HEADERS = {
@@ -88,7 +104,47 @@ SLUG_MAP = {
   "PIDILITIND": "pidilite-industries-ltd-share-price",
   "SIEMENS": "siemens-ltd-share-price",
   "HAVELLS": "havells-india-ltd-share-price",
-  "VOLTAS": "voltas-ltd-share-price"
+  "VOLTAS": "voltas-ltd-share-price",
+  "BHARTIARTL": "bharti-airtel-ltd-share-price",
+  "BANKBARODA": "bank-of-baroda-share-price",
+  "BEL": "bharat-electronics-ltd-share-price",
+  "DLF": "dlf-ltd-share-price",
+  "HAL": "hindustan-aeronautics-ltd-share-price",
+  "IRCTC": "indian-railway-catering-tourism-corporation-ltd-share-price",
+  "TATAPOWER": "tata-power-company-ltd-share-price",
+  "TATACONSUM": "tata-consumer-products-ltd-share-price",
+  "TRENT": "trent-ltd-share-price",
+  "PNB": "punjab-national-bank-share-price",
+  "CANBK": "canara-bank-share-price",
+  "SBILIFE": "sbi-life-insurance-company-ltd-share-price",
+  "SBICARD": "sbi-cards-and-payment-services-ltd-share-price",
+  "PFC": "power-finance-corporation-ltd-share-price",
+  "RECLTD": "rec-ltd-share-price",
+  "BIOCON": "biocon-ltd-share-price",
+  "LUPIN": "lupin-ltd-share-price",
+  "JUBLFOOD": "jubilant-foodworks-ltd-share-price",
+  "LICHSGFIN": "lic-housing-finance-ltd-share-price",
+  "MOTHERSON": "samvardhana-motherson-international-ltd-share-price",
+  "CHOLAFIN": "cholamandalam-investment-and-finance-company-ltd-share-price",
+  "MUTHOOTFIN": "muthoot-finance-ltd-share-price",
+  "FEDERALBNK": "federal-bank-ltd-share-price",
+  "UPL": "upl-ltd-share-price",
+  "POLYCAB": "polycab-india-ltd-share-price",
+  "SRF": "srf-ltd-share-price",
+  "DABUR": "dabur-india-ltd-share-price",
+  "GODREJCP": "godrej-consumer-products-ltd-share-price",
+  "BANDHANBNK": "bandhan-bank-ltd-share-price",
+  "IDFCFIRSTB": "idfc-first-bank-ltd-share-price",
+  "INDUSTOWER": "indus-towers-ltd-share-price",
+  "NAUKRI": "info-edge-india-ltd-share-price",
+  "BHARATFORG": "bharat-forge-ltd-share-price",
+  "COFORGE": "coforge-ltd-share-price",
+  "GODREJPROP": "godrej-properties-ltd-share-price",
+  "PETRONET": "petronet-lng-ltd-share-price",
+  "RBLBANK": "rbl-bank-ltd-share-price",
+  "TATACOMM": "tata-communications-ltd-share-price",
+  "INDHOTEL": "indian-hotels-company-ltd-share-price",
+  "PAGEIND": "page-industries-ltd-share-price"
 }
 
 INDSTOCKS_BASE = "https://stocks.indmoney.com"
