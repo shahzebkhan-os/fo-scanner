@@ -70,7 +70,7 @@ const signalColor = (s) =>
 const signalBg = (s) =>
   s === "BULLISH" ? "rgba(34,197,94,.15)" : s === "BEARISH" ? "rgba(239,68,68,.15)" : "rgba(148,163,184,.1)";
 
-function SuggestionCard({ item, theme, goChain }) {
+function SuggestionCard({ item, theme, goChain, marketOpen }) {
   const strat = item.strategy || {};
   const entry = item.entry || {};
   const rr = item.risk_reward || {};
@@ -80,8 +80,44 @@ function SuggestionCard({ item, theme, goChain }) {
   const tags = item.tags || [];
   const reasons = item.reasons || [];
 
+  const [tradeStatus, setTradeStatus] = useState(null); // null | "loading" | "ok" | "err"
+  const [tradeMsg, setTradeMsg] = useState("");
+
   const borderColor = item.signal === "BULLISH" ? "rgba(34,197,94,.4)"
     : item.signal === "BEARISH" ? "rgba(239,68,68,.4)" : "rgba(148,163,184,.3)";
+
+  // Determine opt_type for single-leg strategies; fall back to CE for bullish, PE for bearish
+  const optType = entry.primary_type ||
+    (item.signal === "BEARISH" ? "PE" : "CE");
+
+  async function handlePaperTrade() {
+    if (tradeStatus === "loading") return;
+    const confirm = window.confirm(
+      `Paper trade: ${item.symbol} ${optType} ${entry.primary_strike} @ ₹${entry.entry_premium}\nLot size: ${sizing.lot_size}\n\nProceed?`
+    );
+    if (!confirm) return;
+    setTradeStatus("loading");
+    setTradeMsg("");
+    try {
+      const res = await apiFetch("/api/fo-suggestions/paper-trade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: item.symbol,
+          opt_type: optType,
+          strike: entry.primary_strike,
+          entry_price: entry.entry_premium,
+          lot_size: sizing.lot_size || 1,
+          reason: `Suggestion: ${item.signal} | Score ${item.score} | ${strat.strategy || ""}`,
+        }),
+      });
+      setTradeStatus("ok");
+      setTradeMsg(res.message || "Trade added!");
+    } catch (e) {
+      setTradeStatus("err");
+      setTradeMsg(e.message || "Failed to add trade");
+    }
+  }
 
   return (
     <Card theme={theme} style={{
@@ -129,18 +165,26 @@ function SuggestionCard({ item, theme, goChain }) {
           <div style={{ fontSize: 10, color: theme.muted, fontWeight: 700, marginBottom: 6, textTransform: "uppercase" }}>Entry</div>
           <div style={{ fontSize: 12 }}>
             <div>Strike: <b>{entry.primary_strike} {entry.primary_type}</b></div>
-            <div>Premium: <b style={{ color: "#6366f1" }}>₹{entry.entry_premium}</b></div>
+            <div>Entry Price: <b style={{ color: "#6366f1" }}>₹{entry.entry_premium}</b></div>
             <div>Spot: ₹{entry.spot_at_signal}</div>
           </div>
         </div>
 
         {/* Risk/Reward */}
         <div style={{ background: "rgba(34,197,94,.05)", borderRadius: 6, padding: 10 }}>
-          <div style={{ fontSize: 10, color: theme.muted, fontWeight: 700, marginBottom: 6, textTransform: "uppercase" }}>Risk / Reward</div>
+          <div style={{ fontSize: 10, color: theme.muted, fontWeight: 700, marginBottom: 6, textTransform: "uppercase" }}>Target / Stop Loss</div>
           <div style={{ fontSize: 12 }}>
             <div>R:R → <b style={{ color: "#22c55e" }}>{rr.risk_reward_ratio}</b></div>
-            <div>Target: <span style={{ color: "#22c55e" }}>₹{rr.target}</span></div>
-            <div>Stop Loss: <span style={{ color: "#ef4444" }}>₹{rr.stop_loss}</span></div>
+            <div>Target: <span style={{ color: "#22c55e" }}>
+              ₹{rr.target_price != null ? rr.target_price : rr.target}
+              {rr.target != null && rr.target_price != null &&
+                <span style={{ color: theme.muted, fontSize: 10 }}> (+₹{rr.target})</span>}
+            </span></div>
+            <div>Stop Loss: <span style={{ color: "#ef4444" }}>
+              ₹{rr.stop_loss_price != null ? rr.stop_loss_price : rr.stop_loss}
+              {rr.stop_loss != null && rr.stop_loss_price != null &&
+                <span style={{ color: theme.muted, fontSize: 10 }}> (-₹{rr.stop_loss})</span>}
+            </span></div>
           </div>
         </div>
 
@@ -150,7 +194,16 @@ function SuggestionCard({ item, theme, goChain }) {
           <div style={{ fontSize: 12 }}>
             <div>Lot Size: <b>{sizing.lot_size}</b></div>
             <div>Capital/Lot: <b>₹{(sizing.capital_per_lot || 0).toLocaleString()}</b></div>
-            <div>Max Loss: <span style={{ color: "#ef4444" }}>₹{rr.max_loss}</span></div>
+            <div>Target P&L: <span style={{ color: "#22c55e" }}>
+              +₹{sizing.target_pnl_per_lot != null
+                ? sizing.target_pnl_per_lot.toLocaleString()
+                : (rr.target * sizing.lot_size || 0).toLocaleString()}
+            </span></div>
+            <div>Max Loss: <span style={{ color: "#ef4444" }}>
+              -₹{sizing.sl_pnl_per_lot != null
+                ? sizing.sl_pnl_per_lot.toLocaleString()
+                : ((rr.max_loss || 0) * (sizing.lot_size || 1)).toLocaleString()}
+            </span></div>
           </div>
         </div>
       </div>
@@ -183,7 +236,7 @@ function SuggestionCard({ item, theme, goChain }) {
       )}
 
       {/* Action buttons */}
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+      <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
         <button
           onClick={() => goChain && goChain(item.symbol)}
           style={{
@@ -192,6 +245,43 @@ function SuggestionCard({ item, theme, goChain }) {
             cursor: "pointer",
           }}
         >View Chain →</button>
+
+        <button
+          onClick={handlePaperTrade}
+          disabled={tradeStatus === "loading"}
+          title={marketOpen ? "Add as paper trade" : "Market closed — paper trade anyway?"}
+          style={{
+            padding: "4px 12px", borderRadius: 4, fontSize: 10, fontWeight: 600,
+            background: tradeStatus === "ok"
+              ? "rgba(34,197,94,.15)"
+              : tradeStatus === "err"
+                ? "rgba(239,68,68,.15)"
+                : marketOpen
+                  ? "rgba(34,197,94,.12)"
+                  : "rgba(148,163,184,.1)",
+            color: tradeStatus === "ok"
+              ? "#22c55e"
+              : tradeStatus === "err"
+                ? "#ef4444"
+                : marketOpen ? "#22c55e" : "#94a3b8",
+            border: `1px solid ${tradeStatus === "ok" ? "rgba(34,197,94,.4)" : tradeStatus === "err" ? "rgba(239,68,68,.4)" : marketOpen ? "rgba(34,197,94,.3)" : "rgba(148,163,184,.25)"}`,
+            cursor: tradeStatus === "loading" ? "wait" : "pointer",
+            opacity: tradeStatus === "loading" ? 0.6 : 1,
+          }}
+        >
+          {tradeStatus === "loading" ? "⟳ Adding…" : tradeStatus === "ok" ? "✓ Trade Added" : "📝 Paper Trade"}
+        </button>
+
+        {!marketOpen && tradeStatus !== "ok" && (
+          <span style={{ fontSize: 9, color: theme.muted }}>Market closed</span>
+        )}
+
+        {tradeMsg && (
+          <span style={{
+            fontSize: 10,
+            color: tradeStatus === "ok" ? "#22c55e" : "#ef4444",
+          }}>{tradeMsg}</span>
+        )}
       </div>
     </Card>
   );
@@ -227,6 +317,7 @@ export default function SuggestionsTab({ theme, goChain }) {
 
   const suggestions = data?.suggestions || [];
   const mktStatus = data?.market_status || {};
+  const marketOpen = mktStatus.open === true;
 
   const bullish = suggestions.filter(s => s.signal === "BULLISH");
   const bearish = suggestions.filter(s => s.signal === "BEARISH");
@@ -290,8 +381,8 @@ export default function SuggestionsTab({ theme, goChain }) {
           <div style={{ fontSize: 10, color: theme.muted }}>Neutral</div>
         </Card>
         <Card theme={theme} style={{ textAlign: "center", padding: 12 }}>
-          <div style={{ fontSize: 22, fontWeight: 700, color: mktStatus.open ? "#22c55e" : "#ef4444" }}>
-            {mktStatus.open ? "OPEN" : "CLOSED"}
+          <div style={{ fontSize: 22, fontWeight: 700, color: marketOpen ? "#22c55e" : "#ef4444" }}>
+            {marketOpen ? "OPEN" : "CLOSED"}
           </div>
           <div style={{ fontSize: 10, color: theme.muted }}>Market</div>
         </Card>
@@ -310,7 +401,7 @@ export default function SuggestionsTab({ theme, goChain }) {
         </Card>
       ) : (
         suggestions.map((item, idx) => (
-          <SuggestionCard key={`${item.symbol}-${idx}`} item={item} theme={theme} goChain={goChain} />
+          <SuggestionCard key={`${item.symbol}-${idx}`} item={item} theme={theme} goChain={goChain} marketOpen={marketOpen} />
         ))
       )}
 
@@ -325,3 +416,4 @@ export default function SuggestionsTab({ theme, goChain }) {
     </div>
   );
 }
+

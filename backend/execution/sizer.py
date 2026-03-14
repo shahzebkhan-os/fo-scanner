@@ -61,9 +61,9 @@ class OptionsSizer:
     
     # Default lot sizes
     LOT_SIZES = {
-        "NIFTY": 50,
-        "BANKNIFTY": 15,
-        "FINNIFTY": 40,
+        "NIFTY": 75,
+        "BANKNIFTY": 35,
+        "FINNIFTY": 65,
     }
     
     # Default risk parameters (can be overridden in constructor)
