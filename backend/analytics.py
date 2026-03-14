@@ -221,7 +221,7 @@ PCR_BEARISH_THRESHOLD = 0.8
 IV_SKEW_CRITICAL_LEVEL = 2.0
 
 
-def compute_gex(records: list, spot: dict|float, lot_size: int = 50) -> dict:
+def compute_gex(records: list, spot: float, lot_size: int = 50) -> dict:
     total_call_gex = 0.0
     total_put_gex = 0.0
     gex_by_strike = []
@@ -302,10 +302,8 @@ def detect_buildup_type(records: list, spot: float, prev_records: list = None) -
         
     prev_map = {r.get("strikePrice"): r for r in prev_records}
     
-    long_buildup_pts = 0
-    short_buildup_pts = 0
-    long_unwind_pts = 0
-    short_cover_pts = 0
+    bull_pts = 0
+    bear_pts = 0
     
     strike_buildups = {}
     
@@ -314,25 +312,38 @@ def detect_buildup_type(records: list, spot: float, prev_records: list = None) -
         p_row = prev_map.get(strike)
         if not p_row: continue
         
+        # ── CE side buildup analysis ──
         ce = row.get("CE", {}) or {}; p_ce = p_row.get("CE", {}) or {}
         c_oi_chg = (ce.get("openInterest", 0) or 0) - (p_ce.get("openInterest", 0) or 0)
         c_ltp_chg = (ce.get("lastPrice", 0) or 0) - (p_ce.get("lastPrice", 0) or 0)
         
         ce_state = "NEUTRAL"
         if c_ltp_chg > 0 and c_oi_chg > 0:
-            ce_state = "LONG_BUILDUP"; long_buildup_pts += 1
+            ce_state = "CE_LONG_BUILDUP"; bull_pts += 1    # CE price ↑ + OI ↑ = bullish
         elif c_ltp_chg < 0 and c_oi_chg > 0:
-            ce_state = "SHORT_BUILDUP"; short_buildup_pts += 1
+            ce_state = "CE_SHORT_BUILDUP"; bear_pts += 1   # CE price ↓ + OI ↑ = bearish
         elif c_ltp_chg < 0 and c_oi_chg < 0:
-            ce_state = "LONG_UNWINDING"; long_unwind_pts += 1
+            ce_state = "CE_LONG_UNWINDING"; bear_pts += 1  # CE price ↓ + OI ↓ = bearish
         elif c_ltp_chg > 0 and c_oi_chg < 0:
-            ce_state = "SHORT_COVERING"; short_cover_pts += 1
-            
-        strike_buildups[strike] = ce_state
+            ce_state = "CE_SHORT_COVERING"; bull_pts += 1  # CE price ↑ + OI ↓ = bullish
 
-    bull_pts = long_buildup_pts + short_cover_pts
-    bear_pts = short_buildup_pts + long_unwind_pts
-    
+        # ── PE side buildup analysis ──
+        pe = row.get("PE", {}) or {}; p_pe = p_row.get("PE", {}) or {}
+        p_oi_chg = (pe.get("openInterest", 0) or 0) - (p_pe.get("openInterest", 0) or 0)
+        p_ltp_chg = (pe.get("lastPrice", 0) or 0) - (p_pe.get("lastPrice", 0) or 0)
+
+        pe_state = "NEUTRAL"
+        if p_ltp_chg > 0 and p_oi_chg > 0:
+            pe_state = "PE_LONG_BUILDUP"; bear_pts += 1    # PE price ↑ + OI ↑ = bearish
+        elif p_ltp_chg < 0 and p_oi_chg > 0:
+            pe_state = "PE_SHORT_BUILDUP"; bull_pts += 1   # PE price ↓ + OI ↑ = bullish
+        elif p_ltp_chg < 0 and p_oi_chg < 0:
+            pe_state = "PE_LONG_UNWINDING"; bull_pts += 1  # PE price ↓ + OI ↓ = bullish
+        elif p_ltp_chg > 0 and p_oi_chg < 0:
+            pe_state = "PE_SHORT_COVERING"; bear_pts += 1  # PE price ↑ + OI ↓ = bearish
+
+        strike_buildups[strike] = {"CE": ce_state, "PE": pe_state}
+
     overall = "NEUTRAL"
     if bull_pts > bear_pts * 1.5: overall = "BULLISH"
     elif bear_pts > bull_pts * 1.5: overall = "BEARISH"
@@ -445,12 +456,10 @@ def compute_stock_score_v2(
     dte = days_to_expiry(expiry_str, as_of) if expiry_str else 5
     iv_rank = (iv_rank_data or {}).get("iv_rank", 50.0)
     
-    regime = detect_regime(records, spot, symbol, dte, iv_rank)
-    weights = REGIME_WEIGHTS[regime]
-    
     lot_size = DEFAULT_LOT_SIZE.get(symbol, 50)
     
-    # Needs greeks computation for all strikes to be accurate
+    # Compute Greeks for all strikes BEFORE regime detection so that
+    # detect_regime → compute_gex can use accurate gamma values.
     for row in records:
         strike = row.get("strikePrice", 0)
         ce = row.get("CE", {}) or {}
@@ -464,6 +473,9 @@ def compute_stock_score_v2(
         
         if "CE" in row and row["CE"]: row["CE"].update(ce_greeks)
         if "PE" in row and row["PE"]: row["PE"].update(pe_greeks)
+
+    regime = detect_regime(records, spot, symbol, dte, iv_rank)
+    weights = REGIME_WEIGHTS[regime]
 
     gex_data = compute_gex(records, spot, lot_size)
     is_spot_above_zgl = spot > gex_data["zero_gamma_level"]
@@ -542,12 +554,24 @@ def compute_stock_score_v2(
         direction = "BEARISH"
         confidence = bear_count / active_indicators
         
-    sub_gex     = 100 if factors[0] == 1 else (0 if factors[0] == -1 else 50)
-    sub_volpcr  = min(100, max(0, vol_pcr * 50))
-    sub_dwoipcr = min(100, max(0, dwoi_pcr * 50))
-    sub_skew    = 100 - skew_data["skew_percentile"]
-    sub_build   = 100 if factors[4] == 1 else (0 if factors[4] == -1 else 50)
-    sub_velocity = max(0, min(100, 50 + (velocity_signal.score * 40)))
+    # ── Direction-aware sub-scores ──────────────────────────────────────────
+    # Sub-scores represent "alignment with detected direction" so that both
+    # BULLISH and BEARISH setups can reach high conviction scores.
+    if direction == "BEARISH":
+        # Invert binary factors: bearish factor → 100, bullish → 0
+        sub_gex     = 100 if factors[0] == -1 else (0 if factors[0] == 1 else 50)
+        sub_volpcr  = min(100, max(0, (2.0 - vol_pcr) * 50))
+        sub_dwoipcr = min(100, max(0, (2.0 - dwoi_pcr) * 50))
+        sub_skew    = skew_data["skew_percentile"]          # higher percentile = more bearish
+        sub_build   = 100 if factors[4] == -1 else (0 if factors[4] == 1 else 50)
+        sub_velocity = max(0, min(100, 50 - (velocity_signal.score * 40)))
+    else:
+        sub_gex     = 100 if factors[0] == 1 else (0 if factors[0] == -1 else 50)
+        sub_volpcr  = min(100, max(0, vol_pcr * 50))
+        sub_dwoipcr = min(100, max(0, dwoi_pcr * 50))
+        sub_skew    = 100 - skew_data["skew_percentile"]
+        sub_build   = 100 if factors[4] == 1 else (0 if factors[4] == -1 else 50)
+        sub_velocity = max(0, min(100, 50 + (velocity_signal.score * 40)))
     
     weighted_score = (
         (sub_gex      * weights["gex"]) +
@@ -564,7 +588,12 @@ def compute_stock_score_v2(
     # UOA override: if UOA detected with high confidence, boost/dampen score
     UOA_SCORE_BOOST = 8  # Points added/subtracted when institutional UOA detected
     if velocity_meta.get("is_uoa") and velocity_signal.confidence > 0.6:
-        uoa_boost = UOA_SCORE_BOOST if velocity_signal.score > 0 else -UOA_SCORE_BOOST
+        # Boost when UOA velocity aligns with detected direction
+        velocity_aligned = (
+            (direction == "BULLISH" and velocity_signal.score > 0)
+            or (direction == "BEARISH" and velocity_signal.score < 0)
+        )
+        uoa_boost = UOA_SCORE_BOOST if velocity_aligned else -UOA_SCORE_BOOST
         weighted_score = max(0, min(100, weighted_score + uoa_boost))
         
     def _directional_picks(options, signal):
