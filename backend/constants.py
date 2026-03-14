@@ -59,7 +59,7 @@ NSE_HEADERS = {
 SLUG_MAP = {
   "NIFTY": "nifty-50-share-price",
   "BANKNIFTY": "bank-nifty-share-price",
-  "FINNIFTY": "nifty-financial-services-share-price",
+  "FINNIFTY": "nifty-financial",
   "RELIANCE": "reliance-industries-ltd-share-price",
   "TCS": "tata-consultancy-services-ltd-share-price",
   "INFY": "infosys-ltd-share-price",
@@ -73,11 +73,11 @@ SLUG_MAP = {
   "HCLTECH": "hcl-technologies-ltd-share-price",
   "LT": "larsen-and-toubro-ltd-share-price",
   "KOTAKBANK": "kotak-mahindra-bank-ltd-share-price",
-  "TATAMOTORS": "tata-motors-ltd-share-price",
+  "TATAMOTORS": "tata-motors-passenger-vehicles-ltd-share-price",
   "MARUTI": "maruti-suzuki-india-ltd-share-price",
   "SUNPHARMA": "sun-pharmaceutical-industries-ltd-share-price",
   "ITC": "itc-ltd-share-price",
-  "ONGC": "oil-and-natural-gas-corporation-ltd-share-price",
+  "ONGC": "oil-and-natural-gas-corpn-ltd-share-price",
   "POWERGRID": "power-grid-corporation-of-india-ltd-share-price",
   "NTPC": "ntpc-ltd-share-price",
   "BPCL": "bharat-petroleum-corporation-ltd-share-price",
@@ -88,8 +88,8 @@ SLUG_MAP = {
   "HEROMOTOCO": "hero-motocorp-ltd-share-price",
   "ASIANPAINT": "asian-paints-ltd-share-price",
   "MM": "mahindra-and-mahindra-ltd-share-price",
-  "DRREDDY": "dr-reddy-s-laboratories-ltd-share-price",
-  "DIVISLAB": "divi-s-laboratories-ltd-share-price",
+  "DRREDDY": "dr-reddys-laboratories-ltd-share-price",
+  "DIVISLAB": "divis-laboratories-ltd-share-price",
   "CIPLA": "cipla-ltd-share-price",
   "TECHM": "tech-mahindra-ltd-share-price",
   "TATASTEEL": "tata-steel-ltd-share-price",
@@ -143,7 +143,7 @@ SLUG_MAP = {
   "PETRONET": "petronet-lng-ltd-share-price",
   "RBLBANK": "rbl-bank-ltd-share-price",
   "TATACOMM": "tata-communications-ltd-share-price",
-  "INDHOTEL": "indian-hotels-company-ltd-share-price",
+  "INDHOTEL": "indian-hotels-co-ltd-share-price",
   "PAGEIND": "page-industries-ltd-share-price"
 }
 

@@ -90,6 +90,23 @@ class Cache:
     def cache_key(self, prefix: str, *args) -> str:
         return f"fo_scanner:{prefix}:{':'.join(str(a) for a in args)}"
 
+    def decorator(self, expire: int = 60):
+        """Decorator to cache function results."""
+        def wrapper(func):
+            import functools
+            @functools.wraps(func)
+            async def wrapped(*args, **kwargs):
+                key = self.cache_key(func.__name__, *args)
+                cached_val = await self.get(key)
+                if cached_val is not None:
+                    return cached_val
+                val = await func(*args, **kwargs)
+                if val:
+                    await self.set(key, val, ttl=expire)
+                return val
+            return wrapped
+        return wrapper
+
     async def close(self):
         """Close Redis connection if open."""
         if self._redis:

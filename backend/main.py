@@ -168,57 +168,7 @@ NSE_HEADERS = {
     "Pragma":           "no-cache",
 }
 
-FO_STOCKS = [
-    "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","SBIN","ADANIENT","WIPRO",
-    "AXISBANK","BAJFINANCE","HCLTECH","LT","KOTAKBANK","TATAMOTORS","MARUTI",
-    "SUNPHARMA","ITC","ONGC","POWERGRID","NTPC","BPCL","GRASIM","TITAN",
-    "INDUSINDBK","ULTRACEMCO","HEROMOTOCO","ASIANPAINT","MM","DRREDDY",
-    "DIVISLAB","CIPLA","TECHM","TATASTEEL","BAJAJFINSV","NESTLEIND",
-    "HINDALCO","COALINDIA","VEDL","JSWSTEEL","SAIL","APOLLOHOSP",
-    "PIDILITIND","SIEMENS","HAVELLS","VOLTAS",
-    # ── Additional F&O stocks ──
-    "BHARTIARTL","BANKBARODA","BEL","DLF","HAL","IRCTC","TATAPOWER",
-    "TATACONSUM","TRENT","PNB","CANBK","SBILIFE","SBICARD","PFC","RECLTD",
-    "BIOCON","LUPIN","JUBLFOOD","LICHSGFIN","MOTHERSON","CHOLAFIN",
-    "MUTHOOTFIN","FEDERALBNK","UPL","POLYCAB","SRF","DABUR","GODREJCP",
-    "BANDHANBNK","IDFCFIRSTB","INDUSTOWER","NAUKRI","BHARATFORG","COFORGE",
-    "GODREJPROP","PETRONET","RBLBANK","TATACOMM","INDHOTEL","PAGEIND",
-]
-INDEX_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
-
-LOT_SIZES = {
-    "NIFTY": 75, "BANKNIFTY": 35, "FINNIFTY": 65, "MIDCPNIFTY": 120,
-    "RELIANCE": 500, "TCS": 175, "INFY": 400, "HDFCBANK": 550, "ICICIBANK": 700,
-    "SBIN": 750, "ADANIENT": 300, "WIPRO": 3000, "AXISBANK": 625, "BAJFINANCE": 750,
-    "HCLTECH": 350, "LT": 175, "KOTAKBANK": 2000, "TATAMOTORS": 1425, "MARUTI": 50,
-    "SUNPHARMA": 350, "ITC": 1600, "ONGC": 2250, "POWERGRID": 1900, "NTPC": 1500,
-    "BPCL": 1975, "GRASIM": 250, "TITAN": 175, "INDUSINDBK": 700, "ULTRACEMCO": 50,
-    "HEROMOTOCO": 150, "ASIANPAINT": 250, "MM": 350, "DRREDDY": 625,
-    "BAJAJFINSV": 250, "HINDALCO": 700, "TATASTEEL": 5500, "DIVISLAB": 100, "CIPLA": 375,
-    "TECHM": 600, "NESTLEIND": 500, "COALINDIA": 1350, "VEDL": 1150, "JSWSTEEL": 675, "SAIL": 4700,
-    "APOLLOHOSP": 125, "PIDILITIND": 500, "SIEMENS": 175, "HAVELLS": 500, "VOLTAS": 375,
-    # ── Additional F&O stocks ──
-    "BHARTIARTL": 950, "BANKBARODA": 2925, "BEL": 1950, "DLF": 625, "HAL": 150,
-    "IRCTC": 575, "TATAPOWER": 1350, "TATACONSUM": 500, "TRENT": 75, "PNB": 4000,
-    "CANBK": 4500, "SBILIFE": 375, "SBICARD": 400, "PFC": 1400, "RECLTD": 1500,
-    "BIOCON": 1800, "LUPIN": 425, "JUBLFOOD": 1250, "LICHSGFIN": 775, "MOTHERSON": 3200,
-    "CHOLAFIN": 375, "MUTHOOTFIN": 250, "FEDERALBNK": 5000, "UPL": 1300, "POLYCAB": 100,
-    "SRF": 125, "DABUR": 1250, "GODREJCP": 500, "BANDHANBNK": 2400, "IDFCFIRSTB": 5000,
-    "INDUSTOWER": 1600, "NAUKRI": 75, "BHARATFORG": 500, "COFORGE": 75, "GODREJPROP": 225,
-    "PETRONET": 3000, "RBLBANK": 2800, "TATACOMM": 250, "INDHOTEL": 700, "PAGEIND": 15,
-}
-
-try:
-    slugs_path = os.path.join(os.path.dirname(__file__), "slugs.json")
-    with open(slugs_path, "r") as f:
-        SLUG_MAP = json.load(f)
-except Exception as e:
-    print(f"FAILED TO LOAD slugs.json from {os.path.join(os.path.dirname(__file__), 'slugs.json')}: {e}")
-    SLUG_MAP = {
-        "NIFTY": "nifty-50-share-price",
-        "BANKNIFTY": "nifty-bank-share-price",
-        "FINNIFTY": "nifty-fin-service-share-price"
-    }
+from .constants import FO_STOCKS, INDEX_SYMBOLS, LOT_SIZES, SLUG_MAP
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -440,6 +390,7 @@ def find_oc_data(obj):
             if res: return res
     return None
 
+@cache.decorator(expire=300)  # Cache INDmoney scrape for 5 minutes
 async def fetch_nse_chain(symbol: str) -> dict:
     """
     Main data retrieval function.
@@ -926,7 +877,7 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
         gc_result = _compute_global_cues(ext_data)
 
         ltp_map = await fetch_indstocks_ltp(all_symbols)
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(10)  # Increased concurrency
         completed = 0
         total = min(limit, len(all_symbols))
 
@@ -990,8 +941,8 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
                     log.error(f"  Stream {symbol}: {e}")
                     return None
 
-        # Process symbols in small batches to allow streaming
-        batch_size = 3
+        # Process symbols in batches to allow streaming
+        batch_size = 5  # Higher batch size
         symbols_to_process = all_symbols[:total]
         for i in range(0, len(symbols_to_process), batch_size):
             batch = symbols_to_process[i:i + batch_size]

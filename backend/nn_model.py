@@ -316,26 +316,34 @@ def train_nn(db_path: str = None) -> dict:
 
 # ── Prediction ────────────────────────────────────────────────────────────────
 
+_cached_model = None
+_cached_meta = None
+_cached_scaler = None
 
 def predict_nn(symbol: str, current_features: dict, db_path: str = None) -> Optional[float]:
-    """Return P(bullish) from the LSTM model using recent historical bars.
+    """Return P(bullish) from the LSTM model using recent historical bars."""
+    global _cached_model, _cached_meta, _cached_scaler
 
-    Queries the last SEQ_LEN snapshots from market_snapshots for *symbol*,
-    appends the live *current_features* as the most recent bar, then runs
-    the sequence through the trained LSTM.
-
-    Returns None if the model is not trained or data is insufficient.
-    """
     if not TORCH_AVAILABLE or not NN_MODEL_PATH.exists() or not NN_SCALER_PATH.exists() or not NN_META_PATH.exists():
         return None
 
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=UserWarning)
-            with open(NN_META_PATH, "rb") as f:
-                meta = pickle.load(f)
-            with open(NN_SCALER_PATH, "rb") as f:
-                scaler = pickle.load(f)
+        # Load model and meta into memory if not already cached
+        if _cached_model is None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=UserWarning)
+                with open(NN_META_PATH, "rb") as f:
+                    _cached_meta = pickle.load(f)
+                with open(NN_SCALER_PATH, "rb") as f:
+                    _cached_scaler = pickle.load(f)
+            
+            _cached_model = LSTMPredictor(input_size=_cached_meta["input_size"])
+            _cached_model.load_state_dict(torch.load(str(NN_MODEL_PATH), map_location="cpu", weights_only=True))
+            _cached_model.eval()
+
+        meta = _cached_meta
+        scaler = _cached_scaler
+        model = _cached_model
 
         if db_path is None:
             db_path = os.path.join(os.path.dirname(__file__), "scanner.db")
