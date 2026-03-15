@@ -40,7 +40,7 @@ Imagine you're at a busy vegetable market. There are hundreds of stalls (stocks)
 
 **This app does exactly that — but for the stock market.**
 
-It watches **84+ stocks** on India's National Stock Exchange (NSE), looks at their options (financial contracts that let you bet on whether a stock will go up or down), and tells you:
+It watches **85+ stocks** on India's National Stock Exchange (NSE), looks at their options (financial contracts that let you bet on whether a stock will go up or down), and tells you:
 
 - **Which stocks are showing the strongest signals** (bullish = likely going up, bearish = likely going down)
 - **A score from 0 to 100** for each stock, so you can quickly compare them
@@ -80,13 +80,13 @@ The app pulls data from **three main sources**, all publicly available:
 
 ### 1. INDmoney Website (Live Options Data)
 
-This is the **primary source** for live options chain data. For each of the 84+ stocks, the app visits the INDmoney options page and reads:
+This is the **primary source** for live options chain data. For each of the 85+ stocks, the app visits the INDmoney options page and reads:
 - All available strike prices and their premiums (prices)
 - Open Interest (OI) — how many contracts are currently active
 - Volume — how many contracts traded today
 - Implied Volatility (IV) — the market's expectation of how much the stock will move
 
-**Analogy:** It's like automatically checking the prices on 84 different shopping websites every few minutes.
+**Analogy:** It's like automatically checking the prices on 85 different shopping websites every few minutes.
 
 ### 2. Yahoo Finance (Global Market Data)
 
@@ -140,7 +140,7 @@ The app also labels each stock as **BULLISH** (likely going up), **BEARISH** (li
 
 ### Step 4: Pick the Best Options
 
-For the top-scoring stocks, the app suggests the **best 3 option contracts** to consider — looking for the best combination of:
+For the top-scoring stocks, the app suggests the **best option contracts** to consider — looking for the best combination of:
 - Being close to the current stock price (ATM = at the money)
 - Having good trading volume (easy to buy and sell)
 - Having favorable risk-reward
@@ -158,11 +158,11 @@ If the machine learning models are trained, they add a **computer prediction**:
 
 ### 1. 📊 Scanner Tab — The Main Dashboard
 
-**What it does:** This is the **home screen**. It scans all 84+ stocks and shows them ranked by score.
+**What it does:** This is the **home screen**. It scans all 85+ stocks and shows them ranked by score.
 
 **What you see:**
 - A **table** with every stock, showing its score (0–100), signal (BULLISH/BEARISH/NEUTRAL), and key numbers
-- The **top picks** — the best 3 option contracts the app recommends for each stock
+- The **top picks** — the best option contracts the app recommends for each stock
 - **Color coding** — green for bullish, red for bearish, grey for neutral
 - A **score dial** that visually shows how strong each signal is
 
@@ -259,7 +259,7 @@ If the machine learning models are trained, they add a **computer prediction**:
 
 ### 7. 🏭 Sectors Tab — Industry Group Overview
 
-**What it does:** Groups all 84+ stocks into **10 industries** (Banking, IT, Auto, Pharma, Energy, Metal, Finance, Consumer, Capital Goods, Cement) and shows the overall mood of each sector.
+**What it does:** Groups all 85+ stocks into **10 industries** (Banking, IT, Auto, Pharma, Energy, Metal, Finance, Consumer, Capital Goods, Cement) and shows the overall mood of each sector.
 
 **What you see:**
 - A **heatmap** showing which sectors are bullish (green), bearish (red), or neutral (grey)
@@ -454,7 +454,7 @@ Here's the complete journey from when you start the app to when you see data on 
            │   ├─ Calculate IV Rank (needs historical data)
            │   ├─ Detect signals (OI buildup, UOA, regime)
            │   ├─ Score the stock (0-100)
-           │   ├─ Pick the best 3 option contracts
+           │   ├─ Pick the best option contracts
            │   └─ Run ML prediction (if models are trained)
            │
            └─→ Send results back to frontend
