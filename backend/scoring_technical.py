@@ -53,6 +53,13 @@ class TechnicalScore:
 # Indicator weights (must sum to 1.0)
 # ──────────────────────────────────────────────────────────────────────────────
 
+DIRECTION_THRESHOLD = 0.05          # min |raw_score| to count as directional
+MIN_INDICATOR_AGREEMENT = 4         # minimum indicators in same direction
+BASE_CONFIDENCE = 0.3               # baseline confidence before agreement
+AGREEMENT_WEIGHT = 0.5              # scaling for indicator agreement ratio
+STRONG_TREND_ADX = 25               # ADX above this boosts confidence
+ADX_CONFIDENCE_BOOST = 0.1          # extra confidence when ADX is strong
+
 # Weights are assigned based on each indicator's predictive reliability:
 #   MACD (0.20)         — strongest trend-following + momentum confirmation
 #   RSI (0.15)          — proven mean-reversion & momentum oscillator
@@ -206,12 +213,12 @@ def compute_technical_score(
         reasons.append(vwap_reason)
 
     # ── Determine direction by majority vote ─────────────────────────────
-    bull_count = sum(1 for s in raw_scores.values() if s > 0.05)
-    bear_count = sum(1 for s in raw_scores.values() if s < -0.05)
+    bull_count = sum(1 for s in raw_scores.values() if s > DIRECTION_THRESHOLD)
+    bear_count = sum(1 for s in raw_scores.values() if s < -DIRECTION_THRESHOLD)
 
-    if bull_count >= 4 and bull_count > bear_count:
+    if bull_count >= MIN_INDICATOR_AGREEMENT and bull_count > bear_count:
         direction = "BULLISH"
-    elif bear_count >= 4 and bear_count > bull_count:
+    elif bear_count >= MIN_INDICATOR_AGREEMENT and bear_count > bull_count:
         direction = "BEARISH"
     else:
         direction = "NEUTRAL"
@@ -234,10 +241,10 @@ def compute_technical_score(
     total_indicators = len(raw_scores)
     aligned = max(bull_count, bear_count)
     agreement = aligned / total_indicators if total_indicators else 0
-    confidence = 0.3 + agreement * 0.5
+    confidence = BASE_CONFIDENCE + agreement * AGREEMENT_WEIGHT
     # Boost confidence when ADX shows strong trend
-    if adx_val > 25:
-        confidence += 0.1
+    if adx_val > STRONG_TREND_ADX:
+        confidence += ADX_CONFIDENCE_BOOST
     confidence = max(0.0, min(1.0, confidence))
 
     return TechnicalScore(

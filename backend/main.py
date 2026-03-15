@@ -169,7 +169,7 @@ NSE_HEADERS = {
     "Pragma":           "no-cache",
 }
 
-from .constants import FO_STOCKS, INDEX_SYMBOLS, LOT_SIZES, SLUG_MAP
+from .constants import FO_STOCKS, INDEX_SYMBOLS, LOT_SIZES, SLUG_MAP, YFINANCE_TICKER_MAP
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -1643,14 +1643,7 @@ async def score_technical_endpoint(symbol: str):
         raise HTTPException(status_code=500, detail="yfinance is not installed")
 
     # Map NSE symbols to yfinance tickers
-    if symbol in ("NIFTY",):
-        ticker = "^NSEI"
-    elif symbol in ("BANKNIFTY",):
-        ticker = "^NSEBANK"
-    elif symbol in ("FINNIFTY",):
-        ticker = "NIFTY_FIN_SERVICE.NS"
-    else:
-        ticker = f"{symbol}.NS"
+    ticker = YFINANCE_TICKER_MAP.get(symbol, f"{symbol}.NS")
 
     try:
         df = await asyncio.to_thread(

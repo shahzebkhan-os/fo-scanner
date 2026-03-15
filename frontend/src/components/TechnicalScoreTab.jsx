@@ -183,13 +183,13 @@ export default function TechnicalScoreTab({ theme }) {
 
   // Prepare chart data
   const radarData = result ? Object.entries(result.technical_score.sub_scores).map(([k, v]) => ({
-    indicator: (INDICATOR_META[k]?.label || k).replace(/ \(.+\)/, ""),
+    indicator: (INDICATOR_META[k]?.label || k).replace(/ \([^)]+\)/, ""),
     score: v,
     fullMark: 100,
   })) : [];
 
   const barData = result ? Object.entries(result.technical_score.sub_scores).map(([k, v]) => ({
-    name: (INDICATOR_META[k]?.label || k).replace(/ \(.+\)/, ""),
+    name: (INDICATOR_META[k]?.label || k).replace(/ \([^)]+\)/, ""),
     score: v,
     weight: parseFloat(WEIGHT_LABELS[k]) || 0,
   })) : [];
