@@ -758,10 +758,10 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
                 _apply_global_cues_adjustment(stats, global_cues_result, signal)
                 stock_score = stats["score"]
 
-                # ── Auto paper-trade entry  (v6: Stricter ML-refined gate) ──
-                if (stock_score >= 85
+                # ── Auto paper-trade entry  (v7: confidence > 80 gate) ──────
+                if (stock_score > 80
                     and signal != "NEUTRAL"
-                    and (ml_prob is None or (signal == "BULLISH" and ml_prob > 0.65) or (signal == "BEARISH" and ml_prob < 0.35))
+                    and (ml_prob is None or (signal == "BULLISH" and ml_prob > 0.60) or (signal == "BEARISH" and ml_prob < 0.40))
                     and stats.get("vol_spike", 0) > 0.4
                     and is_market_open()
                     and is_optimal_trade_time()
@@ -1077,12 +1077,38 @@ async def get_paper_trades(status: str = "all"):
         trades = db.get_all_trades()
 
     stats = db.get_trade_stats()
+    auto_stats = db.get_trade_stats(trade_type="AUTO")
 
     return {
         "trades": trades,
         "stats": stats,
+        "auto_accuracy": auto_stats,
         "market_status": market_status(),
         "count": len(trades),
+    }
+
+
+@app.get("/api/paper-trades/auto-accuracy")
+async def get_auto_trade_accuracy():
+    """
+    Dedicated endpoint to check accuracy of auto paper trades.
+    Returns stats only for trades created automatically (reason starts with 'Auto:').
+    """
+    auto_stats = db.get_trade_stats(trade_type="AUTO")
+    manual_stats = db.get_trade_stats(trade_type="MANUAL")
+
+    return {
+        "auto": auto_stats,
+        "manual": manual_stats,
+        "market_status": market_status(),
+        "config": {
+            "score_threshold": 80,
+            "ml_bullish_gate": 0.60,
+            "ml_bearish_gate": 0.40,
+            "max_daily_trades": MAX_DAILY_AUTO_TRADES,
+            "max_sector_trades": MAX_SECTOR_TRADES,
+            "daily_trades_today": _daily_trade_count,
+        },
     }
 
 

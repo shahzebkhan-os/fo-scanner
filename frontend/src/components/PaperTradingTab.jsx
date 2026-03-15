@@ -101,7 +101,8 @@ export default function PaperTradingTab({ theme }) {
     setLoading(true);
     setError(null);
     try {
-      const result = await apiFetch(`/api/paper-trades?status=${filter}`);
+      const apiFilter = filter === "auto" ? "all" : filter;
+      const result = await apiFetch(`/api/paper-trades?status=${apiFilter}`);
       setData(result);
     } catch (e) {
       setError(e.message);
@@ -128,11 +129,13 @@ export default function PaperTradingTab({ theme }) {
 
   const trades = data?.trades || [];
   const stats = data?.stats || {};
+  const autoAcc = data?.auto_accuracy || {};
   const mktStatus = data?.market_status || {};
   const marketOpen = mktStatus.open === true;
 
   const openTrades = trades.filter(t => t.status === "OPEN");
   const closedTrades = trades.filter(t => t.status === "CLOSED");
+  const autoTrades = trades.filter(t => (t.reason || "").startsWith("Auto:"));
 
   return (
     <div>
@@ -143,7 +146,7 @@ export default function PaperTradingTab({ theme }) {
             📝 Paper Trading
           </h2>
           <div style={{ fontSize: 11, color: theme.muted, marginTop: 2 }}>
-            Auto paper trades from suggestions & manual entries · Managed with adaptive SL/TP
+            Auto paper trades when confidence &gt; 80 · Managed with adaptive SL/TP · Tracked for better exit
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -188,16 +191,41 @@ export default function PaperTradingTab({ theme }) {
         <StatCard label="Max Drawdown" value={`₹${(stats.max_drawdown || 0).toLocaleString()}`} color="#ef4444" theme={theme} />
       </div>
 
+      {/* Auto-Trade Accuracy Panel */}
+      <Card theme={theme} style={{ marginBottom: 16, padding: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <h3 style={{ margin: 0, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
+            ⚡ Auto-Trade Accuracy <span style={{ fontSize: 10, color: theme.muted, fontWeight: 400 }}>(confidence &gt; 80)</span>
+          </h3>
+          <span style={{ fontSize: 10, color: theme.muted }}>
+            {autoTrades.length} auto trade{autoTrades.length !== 1 ? "s" : ""} total
+          </span>
+        </div>
+        {autoAcc.total > 0 ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            <StatCard label="Auto Wins" value={autoAcc.wins || 0} color="#22c55e" theme={theme} />
+            <StatCard label="Auto Losses" value={autoAcc.losses || 0} color="#ef4444" theme={theme} />
+            <StatCard label="Auto Win Rate" value={`${autoAcc.win_rate || 0}%`} color={(autoAcc.win_rate || 0) >= 50 ? "#22c55e" : "#ef4444"} theme={theme} />
+            <StatCard label="Auto P&L" value={`₹${(autoAcc.total_pnl || 0).toLocaleString()}`} color={(autoAcc.total_pnl || 0) >= 0 ? "#22c55e" : "#ef4444"} theme={theme} />
+            <StatCard label="Auto Avg %" value={`${(autoAcc.avg_pnl_pct || 0).toFixed(1)}%`} color={(autoAcc.avg_pnl_pct || 0) >= 0 ? "#22c55e" : "#ef4444"} theme={theme} />
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: theme.muted, textAlign: "center", padding: 8 }}>
+            No closed auto-trades yet. Auto-trades are created during market hours when a stock scores above 80 with ML confirmation.
+          </div>
+        )}
+      </Card>
+
       {/* Filter Tabs */}
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-        {["all", "open", "closed"].map(f => (
+        {["all", "open", "closed", "auto"].map(f => (
           <button key={f} onClick={() => setFilter(f)} style={{
             padding: "5px 14px", borderRadius: 6, fontSize: 11, fontWeight: 600,
             background: filter === f ? "rgba(99,102,241,.12)" : "none",
             color: filter === f ? "#6366f1" : theme.muted,
             border: `1px solid ${filter === f ? "rgba(99,102,241,.3)" : theme.border}`,
             cursor: "pointer", textTransform: "uppercase",
-          }}>{f} ({f === "all" ? trades.length : f === "open" ? openTrades.length : closedTrades.length})</button>
+          }}>{f} ({f === "all" ? trades.length : f === "open" ? openTrades.length : f === "closed" ? closedTrades.length : autoTrades.length})</button>
         ))}
       </div>
 
@@ -226,14 +254,19 @@ export default function PaperTradingTab({ theme }) {
           <div>Status</div>
         </div>
 
-        {trades.length === 0 ? (
-          <div style={{ textAlign: "center", padding: 32, color: theme.muted, fontSize: 13 }}>
-            <div style={{ fontSize: 28, marginBottom: 8 }}>📋</div>
-            No paper trades yet. Trades are auto-created from high-conviction suggestions during market hours.
-          </div>
-        ) : (
-          trades.map((t, i) => <TradeRow key={t.id || i} trade={t} theme={theme} />)
-        )}
+        {(() => {
+          const displayTrades = filter === "auto" ? autoTrades : trades;
+          return displayTrades.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 32, color: theme.muted, fontSize: 13 }}>
+              <div style={{ fontSize: 28, marginBottom: 8 }}>📋</div>
+              {filter === "auto"
+                ? "No auto-trades yet. Auto-trades are created when confidence > 80 during market hours."
+                : "No paper trades yet. Trades are auto-created from high-conviction scans during market hours."}
+            </div>
+          ) : (
+            displayTrades.map((t, i) => <TradeRow key={t.id || i} trade={t} theme={theme} />)
+          );
+        })()}
       </Card>
 
       {/* Per-Symbol Breakdown */}
