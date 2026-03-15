@@ -22,6 +22,7 @@ from .historical_loader import get_backfill_progress, run_backfill_with_progress
 from .suggestions import generate_suggestions
 from . import market_external
 from .signals.global_cues import GlobalCuesSignal
+from .scoring_technical import compute_technical_score
 
 # Module-level GlobalCuesSignal singleton (stateless, safe to share)
 _global_cues_signal = GlobalCuesSignal()
@@ -168,7 +169,7 @@ NSE_HEADERS = {
     "Pragma":           "no-cache",
 }
 
-from .constants import FO_STOCKS, INDEX_SYMBOLS, LOT_SIZES, SLUG_MAP
+from .constants import FO_STOCKS, INDEX_SYMBOLS, LOT_SIZES, SLUG_MAP, YFINANCE_TICKER_MAP
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -1617,6 +1618,83 @@ async def ml_predictions_endpoint():
     """Return per-symbol LightGBM vs Neural Network prediction breakdown."""
     preds = await asyncio.to_thread(ml_get_predictions)
     return {"predictions": preds}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Technical Indicator Scoring (Experimental — for comparison only)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/score-technical/{symbol}")
+async def score_technical_endpoint(symbol: str):
+    """Return the experimental technical-indicator score for *symbol*.
+
+    Uses RSI, MACD, ADX, Stochastic, EMA alignment, Bollinger %B, Volume,
+    and VWAP to produce a 0-100 directional score.  This endpoint is separate
+    from the main OI/IV/Greeks scoring model and intended for comparison.
+
+    Price data is fetched from Yahoo Finance (yfinance) — 15-minute bars for the
+    most recent 5 trading days.
+    """
+    symbol = symbol.upper()
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        raise HTTPException(status_code=500, detail="yfinance is not installed")
+
+    # Map NSE symbols to yfinance tickers
+    ticker = YFINANCE_TICKER_MAP.get(symbol, f"{symbol}.NS")
+
+    try:
+        df = await asyncio.to_thread(
+            lambda: yf.download(ticker, period="5d", interval="15m", progress=False)
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch price data: {exc}")
+
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail=f"No price data for {symbol}")
+
+    closes = df["Close"].dropna().tolist()
+    highs = df["High"].dropna().tolist()
+    lows = df["Low"].dropna().tolist()
+    volumes = df["Volume"].dropna().tolist()
+
+    # Flatten multi-level columns that yfinance sometimes returns
+    def _flatten(lst):
+        if lst and isinstance(lst[0], (list, tuple)):
+            return [x[0] if isinstance(x, (list, tuple)) else x for x in lst]
+        return lst
+
+    closes = _flatten(closes)
+    highs = _flatten(highs)
+    lows = _flatten(lows)
+    volumes = _flatten(volumes)
+
+    result = compute_technical_score(closes, highs, lows, volumes)
+
+    # Also compute the existing OI-based score for comparison if chain data is available
+    existing_score = None
+    try:
+        cj = await fetch_nse_chain(symbol)
+        if cj and "records" in cj:
+            spot = cj.get("records", {}).get("underlyingValue", 0)
+            if spot:
+                stats = compute_stock_score(cj, float(spot), symbol)
+                existing_score = {
+                    "score": stats.get("score", 0),
+                    "signal": stats.get("signal", "NEUTRAL"),
+                    "confidence": stats.get("confidence", 0),
+                }
+    except Exception:
+        pass  # comparison is best-effort
+
+    return {
+        "symbol": symbol,
+        "technical_score": result.to_dict(),
+        "existing_score": existing_score,
+        "bars_used": len(closes),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════

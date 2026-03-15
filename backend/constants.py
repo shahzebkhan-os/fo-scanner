@@ -152,3 +152,10 @@ NSE_BASE = "https://www.nseindia.com"
 
 MAX_DAILY_AUTO_TRADES = 10
 MAX_SECTOR_TRADES = 3
+
+# NSE symbol → Yahoo Finance ticker overrides (used by technical scoring)
+YFINANCE_TICKER_MAP = {
+    "NIFTY": "^NSEI",
+    "BANKNIFTY": "^NSEBANK",
+    "FINNIFTY": "NIFTY_FIN_SERVICE.NS",
+}
