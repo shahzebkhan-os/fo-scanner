@@ -302,6 +302,7 @@ docker-compose up -d
 ## 📚 Documentation
 
 ### Getting Started
+- **[FRAMEWORK_GUIDE.md](FRAMEWORK_GUIDE.md)** - 🧭 How the entire app works, explained in plain English (for non-technical readers!)
 - **[QUICKSTART.md](QUICKSTART.md)** - 🚀 Simple step-by-step guide to get started (NEW!)
 - **[HOW_TO_RUN.txt](HOW_TO_RUN.txt)** - Quick reference text file for running the project
 
