@@ -1632,8 +1632,8 @@ async def score_technical_endpoint(symbol: str):
     and VWAP to produce a 0-100 directional score.  This endpoint is separate
     from the main OI/IV/Greeks scoring model and intended for comparison.
 
-    Price data is fetched from Yahoo Finance (yfinance) — 5-minute bars for the
-    most recent trading day(s).
+    Price data is fetched from Yahoo Finance (yfinance) — 15-minute bars for the
+    most recent 5 trading days.
     """
     symbol = symbol.upper()
 
@@ -1668,14 +1668,15 @@ async def score_technical_endpoint(symbol: str):
     volumes = df["Volume"].dropna().tolist()
 
     # Flatten multi-level columns that yfinance sometimes returns
-    if closes and isinstance(closes[0], (list, tuple)):
-        closes = [c[0] if isinstance(c, (list, tuple)) else c for c in closes]
-    if highs and isinstance(highs[0], (list, tuple)):
-        highs = [h[0] if isinstance(h, (list, tuple)) else h for h in highs]
-    if lows and isinstance(lows[0], (list, tuple)):
-        lows = [l[0] if isinstance(l, (list, tuple)) else l for l in lows]
-    if volumes and isinstance(volumes[0], (list, tuple)):
-        volumes = [v[0] if isinstance(v, (list, tuple)) else v for v in volumes]
+    def _flatten(lst):
+        if lst and isinstance(lst[0], (list, tuple)):
+            return [x[0] if isinstance(x, (list, tuple)) else x for x in lst]
+        return lst
+
+    closes = _flatten(closes)
+    highs = _flatten(highs)
+    lows = _flatten(lows)
+    volumes = _flatten(volumes)
 
     result = compute_technical_score(closes, highs, lows, volumes)
 

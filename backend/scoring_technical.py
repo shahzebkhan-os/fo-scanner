@@ -53,6 +53,16 @@ class TechnicalScore:
 # Indicator weights (must sum to 1.0)
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Weights are assigned based on each indicator's predictive reliability:
+#   MACD (0.20)         — strongest trend-following + momentum confirmation
+#   RSI (0.15)          — proven mean-reversion & momentum oscillator
+#   ADX (0.15)          — essential trend-strength filter
+#   EMA alignment (0.15)— multi-timeframe trend consensus
+#   Stochastic (0.10)   — complementary overbought/oversold oscillator
+#   Bollinger (0.10)    — volatility + mean-reversion context
+#   Volume (0.10)       — confirmation of price moves
+#   VWAP (0.05)         — intraday institutional-interest proxy (least weight
+#                         because it is most meaningful on intraday data only)
 WEIGHTS: Dict[str, float] = {
     "rsi": 0.15,
     "macd": 0.20,
