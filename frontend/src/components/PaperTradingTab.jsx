@@ -35,12 +35,16 @@ function StatCard({ label, value, color, theme }) {
   );
 }
 
+function isAutoTrade(trade) {
+  return (trade.reason || "").startsWith("Auto:");
+}
+
 function TradeRow({ trade, theme }) {
   const pnl = trade.pnl || 0;
   const pnlPct = trade.pnl_pct || 0;
   const isOpen = trade.status === "OPEN";
   const isProfit = pnl > 0;
-  const isAuto = (trade.reason || "").startsWith("Auto:");
+  const isAuto = isAutoTrade(trade);
   const isSuggestion = (trade.reason || "").includes("Suggestion");
 
   return (
@@ -135,7 +139,7 @@ export default function PaperTradingTab({ theme }) {
 
   const openTrades = trades.filter(t => t.status === "OPEN");
   const closedTrades = trades.filter(t => t.status === "CLOSED");
-  const autoTrades = trades.filter(t => (t.reason || "").startsWith("Auto:"));
+  const autoTrades = trades.filter(t => isAutoTrade(t));
 
   return (
     <div>
@@ -218,15 +222,18 @@ export default function PaperTradingTab({ theme }) {
 
       {/* Filter Tabs */}
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-        {["all", "open", "closed", "auto"].map(f => (
-          <button key={f} onClick={() => setFilter(f)} style={{
-            padding: "5px 14px", borderRadius: 6, fontSize: 11, fontWeight: 600,
-            background: filter === f ? "rgba(99,102,241,.12)" : "none",
-            color: filter === f ? "#6366f1" : theme.muted,
-            border: `1px solid ${filter === f ? "rgba(99,102,241,.3)" : theme.border}`,
-            cursor: "pointer", textTransform: "uppercase",
-          }}>{f} ({f === "all" ? trades.length : f === "open" ? openTrades.length : f === "closed" ? closedTrades.length : autoTrades.length})</button>
-        ))}
+        {["all", "open", "closed", "auto"].map(f => {
+          const counts = { all: trades.length, open: openTrades.length, closed: closedTrades.length, auto: autoTrades.length };
+          return (
+            <button key={f} onClick={() => setFilter(f)} style={{
+              padding: "5px 14px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+              background: filter === f ? "rgba(99,102,241,.12)" : "none",
+              color: filter === f ? "#6366f1" : theme.muted,
+              border: `1px solid ${filter === f ? "rgba(99,102,241,.3)" : theme.border}`,
+              cursor: "pointer", textTransform: "uppercase",
+            }}>{f} ({counts[f] || 0})</button>
+          );
+        })}
       </div>
 
       {/* Trades Table */}
