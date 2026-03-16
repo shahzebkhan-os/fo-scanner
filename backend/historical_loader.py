@@ -378,6 +378,8 @@ def merge_data_sources(bhavcopy_dir: str, kaggle_files: list, symbols: list) -> 
     combo = pd.concat(dfs, ignore_index=True)
     combo = combo[combo["symbol"].isin(symbols)]
     combo = combo.drop_duplicates(subset=["trade_date", "symbol", "expiry_date", "strike", "opt_type"])
+    
+    logger.info(f"Merged {len(dfs)} data sources. Total rows after filtering: {len(combo)}")
     return combo
 
 
@@ -1062,6 +1064,10 @@ if __name__ == "__main__":
 
     logger.info("NSE F&O HISTORICAL LOADER")
 
+    # Ensure data directory exists
+    os.makedirs(CONFIG["data_dir"], exist_ok=True)
+    os.makedirs(os.path.join(CONFIG["data_dir"], "bhavcopies"), exist_ok=True)
+
     if args.cmd in ["download", "full"]:
         download_spot_prices(syms, args.start, args.end, CONFIG["data_dir"])
         download_bhavcopy_range(args.start, args.end, CONFIG["data_dir"])
@@ -1073,7 +1079,13 @@ if __name__ == "__main__":
         out.to_csv(os.path.join(CONFIG["data_dir"], "reconstructed.csv"), index=False)
 
     if args.cmd in ["load-db", "full"]:
-        out = pd.read_csv(os.path.join(CONFIG["data_dir"], "reconstructed.csv"))
+        recon_path = os.path.join(CONFIG["data_dir"], "reconstructed.csv")
+        if not os.path.exists(recon_path):
+            logger.error(f"❌ '{recon_path}' not found.")
+            logger.error("Please run the 'process' command first to generate reconstructed features.")
+            sys.exit(1)
+            
+        out = pd.read_csv(recon_path)
         load_to_database(out, args.db)
         load_iv_history(out, args.db)
 
