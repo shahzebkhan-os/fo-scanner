@@ -39,6 +39,7 @@ except ImportError:
 
 MODEL_PATH = Path(os.path.dirname(__file__)) / "models" / "lgbm_signal.txt"
 CALIBRATOR_PATH = Path(os.path.dirname(__file__)) / "models" / "isotonic_calibrator.pkl"
+FEATURE_META_PATH = Path(os.path.dirname(__file__)) / "models" / "lgbm_features.pkl"
 MIN_ROWS_TO_TRAIN = 500  # Need at least 500 historical snapshots
 
 # Ensemble blend weights
@@ -46,152 +47,257 @@ LGB_WEIGHT = 0.60
 NN_WEIGHT = 0.40
 assert abs(LGB_WEIGHT + NN_WEIGHT - 1.0) < 1e-9, "Ensemble weights must sum to 1.0"
 
+# ── Feature definition ────────────────────────────────────────────────────────
+# Ordered list of features for LightGBM training and inference.
+# ORDER MATTERS — must be identical between _load_training_data and _predict_lgb.
+# Backward-compatible: if a saved model has fewer features, FEATURE_META_PATH
+# records the exact list used during training and _predict_lgb uses that list.
+FEATURE_NAMES = [
+    "weighted_score",      # composite quant score (0–100)
+    "gex",                 # net gamma exposure
+    "iv_skew",             # PE IV − CE IV
+    "pcr",                 # put/call ratio by open interest
+    "pcr_vol",             # put/call ratio by volume
+    "regime_encoded",      # 0=PINNED, 1=TRENDING, 2=EXPIRY, 3=SQUEEZE, 4=NEUTRAL
+    "oi_velocity_score",   # OI change velocity (−1 to +1)
+    "uoa_detected",        # unusual options activity flag (0/1)
+    "dte",                 # days to nearest expiry (clipped at 90)
+    "iv_rank",             # IV rank (0–100 percentile over lookback)
+    "avg_iv",              # average ATM IV ((CE IV + PE IV) / 2)
+    "max_pain_dist_pct",   # |spot − max_pain| / spot × 100
+]
+
+_REGIME_MAP = {"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3, "NEUTRAL": 4}
+
+
+def _get_feature_value(feature_name: str, features: dict) -> float:
+    """Extract a named feature from a scan stats / features dict with sensible fallbacks.
+
+    ``features`` is whatever dict is passed to ``predict()`` — typically the
+    output of ``compute_stock_score_v2`` potentially enriched with a
+    ``spot_price`` key by the scan loop.
+    """
+    m = features.get("metrics", {}) or {}
+
+    if feature_name == "weighted_score":
+        return float(features.get("weighted_score", features.get("score", 0)))
+    if feature_name == "gex":
+        return float(features.get("gex", features.get("net_gex", m.get("gex", 0))))
+    if feature_name == "iv_skew":
+        return float(features.get("iv_skew", m.get("iv_skew", 0)))
+    if feature_name == "pcr":
+        return float(features.get("pcr", features.get("pcr_oi", 1.0)))
+    if feature_name == "pcr_vol":
+        return float(features.get("pcr_vol", m.get("vol_pcr", 1.0)))
+    if feature_name == "regime_encoded":
+        return float(_REGIME_MAP.get(features.get("regime", "TRENDING"), 1))
+    if feature_name == "oi_velocity_score":
+        return float(features.get("oi_velocity_score", m.get("oi_velocity_score", 0)))
+    if feature_name == "uoa_detected":
+        return float(features.get("uoa_detected", m.get("uoa_detected", 0)))
+    if feature_name == "dte":
+        raw = float(features.get("dte", features.get("days_to_expiry", m.get("dte", 5))))
+        return min(raw, 90.0)
+    if feature_name == "iv_rank":
+        return float(features.get("iv_rank", m.get("iv_rank", 50.0)))
+    if feature_name == "avg_iv":
+        if "avg_iv" in features:
+            return float(features["avg_iv"])
+        if "iv" in features:
+            return float(features["iv"])
+        ce = float(features.get("atm_ce_iv", 0))
+        pe = float(features.get("atm_pe_iv", 0))
+        return (ce + pe) / 2.0
+    if feature_name == "max_pain_dist_pct":
+        spot = float(features.get("spot_price", 1) or 1)
+        mp = float(features.get("max_pain", features.get("max_pain_strike", spot)) or spot)
+        return abs(spot - mp) / max(spot, 1) * 100
+    return 0.0
+
 
 def _load_training_data(db_path: str = None) -> tuple:
-    """
-    Load features from market_snapshots table.
-    Labels: 1 if next_bar_close > current_close else 0.
+    """Load features and labels from market_snapshots.
+
+    Label priority:
+      1. ``trade_result`` = 'WIN'  → 1  (option gained ≥ 20 %)
+      2. ``trade_result`` = 'LOSS' → 0  (option lost ≥ 20 %)
+      3. Fallback: next-bar spot price direction (1 if up, 0 if down)
+
+    Using actual trade outcomes as the primary label gives a more direct
+    signal about the profitability of the F&O strategy than raw spot direction.
     """
     if db_path is None:
         db_path = os.path.join(os.path.dirname(__file__), "scanner.db")
-    
+
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"Database not found at {db_path}")
-    
+
     conn = sqlite3.connect(db_path)
-    
-    # Check if market_snapshots table exists
+
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='market_snapshots'")
     if not cursor.fetchone():
         conn.close()
         raise ValueError("market_snapshots table does not exist. Run historical backfill first.")
-    
+
     query = """
         SELECT
-            score as weighted_score,
-            COALESCE(net_gex, 0) as gex,
-            COALESCE(iv_skew, 0) as iv_skew,
-            COALESCE(pcr_oi, 1) as pcr,
+            COALESCE(score, 0)                                              AS weighted_score,
+            COALESCE(net_gex, 0)                                            AS gex,
+            COALESCE(iv_skew, 0)                                            AS iv_skew,
+            COALESCE(pcr_oi, 1)                                             AS pcr,
+            COALESCE(pcr_vol, 1)                                            AS pcr_vol,
+            COALESCE(oi_velocity_score, 0)                                  AS oi_velocity_score,
+            COALESCE(uoa_detected, 0)                                       AS uoa_detected,
+            MIN(COALESCE(dte, 5), 90)                                       AS dte,
+            COALESCE(iv_rank, 50)                                           AS iv_rank,
+            COALESCE((atm_ce_iv + atm_pe_iv) / 2.0, 0)                     AS avg_iv,
+            CASE WHEN spot_price > 0
+                 THEN ABS(spot_price - COALESCE(max_pain_strike, spot_price)) / spot_price * 100
+                 ELSE 0 END                                                 AS max_pain_dist_pct,
             regime,
             spot_price,
+            COALESCE(trade_result, '')                                      AS trade_result,
             symbol,
             snapshot_time
         FROM market_snapshots
         WHERE spot_price IS NOT NULL AND spot_price > 0
         ORDER BY symbol, snapshot_time ASC
     """
-    
+
     df = pd.read_sql(query, conn)
     conn.close()
-    
+
     if df.empty:
         raise ValueError("No data found in market_snapshots table")
-    
-    # Create labels: 1 if next bar's spot > current spot, else 0
-    # Group by symbol to compute next_spot correctly
-    df['next_spot'] = df.groupby('symbol')['spot_price'].shift(-1)
-    df = df.dropna(subset=["next_spot"])
-    
-    df["label"] = (df["next_spot"] > df["spot_price"]).astype(int)
-    df["regime_encoded"] = df["regime"].map({
-        "PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3
-    }).fillna(1)  # Default to TRENDING
-    
-    features = ["weighted_score", "gex", "iv_skew", "pcr", "regime_encoded"]
-    
-    # Add OI velocity / UOA features if present in the data
-    extra = ["oi_velocity_score", "uoa_detected"]
-    features = features + [f for f in extra if f in df.columns and f not in features]
 
-    # Handle missing values
-    for col in features:
+    # ── Label construction ────────────────────────────────────────────────
+    # Primary: use trade_result when available (direct profitability signal).
+    df["label"] = np.nan
+    df.loc[df["trade_result"] == "WIN", "label"] = 1.0
+    df.loc[df["trade_result"] == "LOSS", "label"] = 0.0
+
+    # Fallback: next-bar spot direction for rows without a clear trade result.
+    df["next_spot"] = df.groupby("symbol")["spot_price"].shift(-1)
+    spot_label = (df["next_spot"] > df["spot_price"]).astype(float)
+    fallback_mask = df["label"].isna() & df["next_spot"].notna()
+    df.loc[fallback_mask, "label"] = spot_label[fallback_mask]
+
+    df = df.dropna(subset=["label"])
+    df["label"] = df["label"].astype(np.int32)
+
+    # ── Regime encoding ────────────────────────────────────────────────────
+    df["regime_encoded"] = (
+        df["regime"]
+        .map(_REGIME_MAP)
+        .fillna(1)  # default to TRENDING
+        .astype(float)
+    )
+
+    # Fill any remaining NaN feature values with safe defaults
+    for col in FEATURE_NAMES:
         if col in df.columns:
-            df[col] = df[col].fillna(0)
-    
-    X = df[features].values.astype(np.float64)
+            default = 1.0 if col in ("pcr", "pcr_vol") else 50.0 if col == "iv_rank" else 0.0
+            df[col] = df[col].fillna(default)
+
+    X = df[FEATURE_NAMES].values.astype(np.float64)
     y = df["label"].values.astype(np.int32)
-    
-    return X, y, features
+
+    win_pct = round(float(y.mean()) * 100, 1)
+    log.info(f"Training data: {len(X)} rows | label=1 (bullish/WIN): {win_pct}%")
+
+    return X, y, FEATURE_NAMES
 
 
 def train_model(db_path: str = None) -> dict:
     """Train LightGBM on market_snapshots. Returns training metrics."""
     if not LGB_AVAILABLE:
         return {"error": "lightgbm not installed. Run: pip install lightgbm scikit-learn pandas"}
-    
+
     if db_path is None:
         db_path = os.path.join(os.path.dirname(__file__), "scanner.db")
-    
+
     try:
         X, y, feature_names = _load_training_data(db_path)
     except (FileNotFoundError, ValueError) as e:
         return {"error": str(e)}
-    
+
     if len(X) < MIN_ROWS_TO_TRAIN:
         return {"error": f"Need {MIN_ROWS_TO_TRAIN} snapshots, have {len(X)}. Run more historical backfill first."}
-    
+
     print(f"Training LightGBM on {len(X)} snapshots with {X.shape[1]} features...")
-    
+
     # Time-series cross validation (no future leakage)
-    n_splits = min(5, len(X) // 100)  # Ensure enough data per fold
+    n_splits = min(5, len(X) // 100)
     if n_splits < 2:
         n_splits = 2
-    
+
     tscv = TimeSeriesSplit(n_splits=n_splits)
     val_losses = []
-    
+
     params = {
         "objective": "binary",
         "metric": "binary_logloss",
         "learning_rate": 0.05,
         "num_leaves": 31,
         "min_child_samples": 20,
-        "n_estimators": 200,
+        "n_estimators": 300,
+        # Regularisation — reduces over-fitting on smaller datasets
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "reg_alpha": 0.1,
+        "reg_lambda": 0.1,
+        # Balance WIN vs LOSS classes automatically
+        "class_weight": "balanced",
         "random_state": 42,
         "verbose": -1,
     }
-    
+
     for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
         print(f"  LightGBM Fold {fold + 1}/{n_splits}: train={len(train_idx)}, val={len(val_idx)}")
         model = lgb.LGBMClassifier(**params)
         model.fit(
             X[train_idx], y[train_idx],
             eval_set=[(X[val_idx], y[val_idx])],
-            callbacks=[lgb.early_stopping(20, verbose=False)]
+            callbacks=[lgb.early_stopping(30, verbose=False)],
         )
         preds = model.predict_proba(X[val_idx])[:, 1]
         loss = log_loss(y[val_idx], preds)
         print(f"    Fold {fold + 1} LogLoss: {loss:.4f}")
         val_losses.append(loss)
-    
+
     # Final model on all data
     log.info("Training final LightGBM model on all data...")
     print("Training final LightGBM model on all data...")
     final_model = lgb.LGBMClassifier(**params)
     final_model.fit(X, y)
-    
+
     # Isotonic calibration
     log.info("Calibrating probabilities...")
     print("Calibrating probabilities...")
     raw_probs = final_model.predict_proba(X)[:, 1]
     calibrator = IsotonicRegression(out_of_bounds="clip")
     calibrator.fit(raw_probs, y)
-    
-    # Save model
+
+    # Save model and feature metadata
     MODEL_PATH.parent.mkdir(exist_ok=True)
     final_model.booster_.save_model(str(MODEL_PATH))
-    
+
     import pickle
     with open(CALIBRATOR_PATH, "wb") as f:
         pickle.dump(calibrator, f)
-    
+    # Persist which features (and their order) this model was trained on so
+    # _predict_lgb can reconstruct the exact same vector at inference time.
+    with open(FEATURE_META_PATH, "wb") as f:
+        pickle.dump({"features": feature_names}, f)
+
     importances = dict(zip(feature_names, map(float, final_model.feature_importances_)))
     result = {
         "cv_log_loss_mean": round(float(np.mean(val_losses)), 4),
         "cv_log_loss_std": round(float(np.std(val_losses)), 4),
         "feature_importances": importances,
         "training_rows": len(X),
+        "features_used": feature_names,
         "model_saved": str(MODEL_PATH),
     }
 
@@ -207,7 +313,13 @@ def train_model(db_path: str = None) -> dict:
 
 
 def _predict_lgb(features: dict) -> Optional[float]:
-    """LightGBM point-in-time prediction (calibrated)."""
+    """LightGBM point-in-time prediction (calibrated).
+
+    Loads the saved feature list from FEATURE_META_PATH so that predictions
+    always use the same feature order and set that was used during training.
+    Falls back to the legacy 5-feature set if the metadata file is missing
+    (i.e. for models trained before this version).
+    """
     if not LGB_AVAILABLE or not MODEL_PATH.exists() or not CALIBRATOR_PATH.exists():
         return None
 
@@ -222,16 +334,17 @@ def _predict_lgb(features: dict) -> Optional[float]:
 
         model = lgb.Booster(model_file=str(MODEL_PATH))
 
-        regime_map = {"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3}
-        metrics = features.get("metrics", {})
+        # Determine which features the saved model expects
+        if FEATURE_META_PATH.exists():
+            with open(FEATURE_META_PATH, "rb") as f:
+                meta = pickle.load(f)
+            feature_names = meta["features"]
+        else:
+            # Legacy fallback for models trained before feature-metadata was saved
+            feature_names = ["weighted_score", "gex", "iv_skew", "pcr", "regime_encoded"]
 
-        X = np.array([[
-            float(features.get("weighted_score", features.get("score", 0))),
-            float(features.get("gex", metrics.get("gex", 0))),
-            float(features.get("iv_skew", metrics.get("iv_skew", 0))),
-            float(features.get("pcr", metrics.get("pcr", features.get("pcr_oi", 1)))),
-            float(regime_map.get(features.get("regime", "TRENDING"), 1)),
-        ]])
+        feat_vals = [_get_feature_value(fn, features) for fn in feature_names]
+        X = np.array([feat_vals])
 
         raw_prob = model.predict(X)[0]
         calibrated_prob = calibrator.predict([raw_prob])[0]
@@ -304,14 +417,19 @@ def get_model_details(db_path: str = None) -> dict:
         "available": LGB_AVAILABLE,
         "trained": status.get("lgb_trained", False),
         "model_type": "LightGBM Gradient Boosted Trees",
-        "features": ["weighted_score", "gex", "iv_skew", "pcr", "regime_encoded", "oi_velocity_score", "uoa_detected"],
+        "features": FEATURE_NAMES,
         "hyperparameters": {
             "objective": "binary",
             "metric": "binary_logloss",
             "learning_rate": 0.05,
             "num_leaves": 31,
             "min_child_samples": 20,
-            "n_estimators": 200,
+            "n_estimators": 300,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "reg_alpha": 0.1,
+            "reg_lambda": 0.1,
+            "class_weight": "balanced",
         },
         "calibration": "Isotonic Regression",
         "feature_importances": None,
@@ -324,10 +442,18 @@ def get_model_details(db_path: str = None) -> dict:
             feat_names = model.feature_name()
             feat_imp = model.feature_importance(importance_type="gain")
             total = sum(feat_imp) if sum(feat_imp) > 0 else 1
-            # Use known feature names as fallback if model has generic names
-            known_features = ["weighted_score", "gex", "iv_skew", "pcr", "regime_encoded", "oi_velocity_score", "uoa_detected"]
-            if feat_names and feat_names[0].startswith("Column_") and len(known_features) >= len(feat_names):
-                feat_names = known_features[: len(feat_names)]
+            # Use saved feature names if available; otherwise fall back to FEATURE_NAMES
+            if feat_names and feat_names[0].startswith("Column_"):
+                if FEATURE_META_PATH.exists():
+                    try:
+                        import pickle as _pkl
+                        with open(FEATURE_META_PATH, "rb") as _f:
+                            _meta = _pkl.load(_f)
+                        feat_names = _meta["features"][: len(feat_names)]
+                    except Exception:
+                        feat_names = FEATURE_NAMES[: len(feat_names)]
+                else:
+                    feat_names = FEATURE_NAMES[: len(feat_names)]
             lgb_details["feature_importances"] = {
                 name: round(float(imp / total * 100), 2) for name, imp in zip(feat_names, feat_imp)
             }
@@ -441,10 +567,18 @@ def get_symbol_predictions(db_path: str = None) -> list:
             conn.close()
             return []
 
-        # Get the latest snapshot per symbol
+        # Get the latest snapshot per symbol with expanded feature columns
         cursor.execute("""
             SELECT symbol, score, COALESCE(net_gex, 0), COALESCE(iv_skew, 0),
-                   COALESCE(pcr_oi, 1), regime, spot_price
+                   COALESCE(pcr_oi, 1), COALESCE(pcr_vol, 1),
+                   COALESCE(oi_velocity_score, 0), COALESCE(uoa_detected, 0),
+                   MIN(COALESCE(dte, 5), 90),
+                   COALESCE(iv_rank, 50),
+                   COALESCE((atm_ce_iv + atm_pe_iv) / 2.0, 0),
+                   CASE WHEN spot_price > 0
+                        THEN ABS(spot_price - COALESCE(max_pain_strike, spot_price)) / spot_price * 100
+                        ELSE 0 END,
+                   regime, spot_price
             FROM market_snapshots
             WHERE snapshot_time = (
                 SELECT MAX(snapshot_time) FROM market_snapshots AS ms2
@@ -458,14 +592,23 @@ def get_symbol_predictions(db_path: str = None) -> list:
         conn.close()
 
         for row in rows:
-            symbol, score, gex, iv_skew, pcr, regime, spot = row
+            (symbol, score, gex, iv_skew, pcr, pcr_vol, oi_vel, uoa,
+             dte, iv_rank, avg_iv, mp_dist, regime, spot) = row
             features = {
                 "weighted_score": float(score or 0),
                 "gex": float(gex or 0),
                 "iv_skew": float(iv_skew or 0),
                 "pcr": float(pcr or 1),
+                "pcr_vol": float(pcr_vol or 1),
+                "oi_velocity_score": float(oi_vel or 0),
+                "uoa_detected": float(uoa or 0),
+                "dte": float(dte or 5),
+                "iv_rank": float(iv_rank or 50),
+                "avg_iv": float(avg_iv or 0),
+                "max_pain_dist_pct": float(mp_dist or 0),
                 "regime": regime or "TRENDING",
                 "score": float(score or 0),
+                "spot_price": float(spot or 1),
             }
 
             lgb_prob = _predict_lgb(features)
