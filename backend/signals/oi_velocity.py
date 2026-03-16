@@ -169,15 +169,16 @@ class OiVelocitySignal(BaseSignal):
         pe_spike = abs(top_pe_v) / max(rolling_pe_mean, 1.0)
 
         is_uoa = max(ce_spike, pe_spike) >= UOA_THRESHOLD
+        max_spike = max(ce_spike, pe_spike, 0.001)
 
         # Score: positive = call velocity dominant (bullish), negative = put (bearish)
         # Use rolling mean as scaling factor so tanh spreads across the velocity range
         net_velocity = top_ce_v - top_pe_v
         scaling_factor = max(rolling_ce_mean, rolling_pe_mean, 1.0)
-        raw_score = float(np.tanh(net_velocity / scaling_factor))
+        spike_factor = max(1.0, min(max_spike, 5.0))  # amplify sharp spikes but keep bounded
+        raw_score = float(np.tanh((net_velocity / scaling_factor) * spike_factor))
 
         # Confidence: scales with spike extremity, capped at 0.95
-        max_spike = max(ce_spike, pe_spike, 0.001)
         confidence = min(0.95, (max_spike - 1.0) / 4.0) if max_spike > 1.0 else 0.1
 
         # Build reason string
