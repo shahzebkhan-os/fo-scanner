@@ -268,7 +268,8 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
         target_pnl_per_lot = round(risk_reward["target"] * lot_size, 2)
         sl_pnl_per_lot = round(risk_reward["max_loss"] * lot_size, 2)
         lot_entry_price = round(entry_premium * lot_size, 2)
-        lot_target_price = round(risk_reward["target_price"] * lot_size, 2)
+        lot_exit_value = round(risk_reward["target_price"] * lot_size, 2)
+        lot_stop_value = round(risk_reward["stop_loss_price"] * lot_size, 2)
 
         # Conviction score: blend of stock score, ML confidence, and option quality
         conviction = score
@@ -328,7 +329,8 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
                 "target_pnl_per_lot": target_pnl_per_lot,
                 "sl_pnl_per_lot": sl_pnl_per_lot,
                 "lot_entry_price": lot_entry_price,
-                "lot_target_price": lot_target_price,
+                "lot_exit_value": lot_exit_value,
+                "lot_stop_value": lot_stop_value,
             },
             "context": {
                 "regime": regime,

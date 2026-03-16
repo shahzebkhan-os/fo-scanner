@@ -143,21 +143,63 @@ export default function App() {
           )}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={() => {
+          <button onClick={async () => {
             if (!scanData.length) return;
-            const cols = ["Symbol", "Signal", "Score", "ML Score", "Price", "Suggested Trade", "Trade LTP", "Trade Score", "Trade ML Score", "Lot Value"];
+
+            // Try to enrich rows with suggestion targets/lot sizing
+            let suggestionMap = {};
+            try {
+              const resp = await fetch("/api/fo-suggestions");
+              if (resp.ok) {
+                const data = await resp.json();
+                suggestionMap = Object.fromEntries((data.suggestions || []).map(s => [s.symbol, s]));
+              }
+            } catch (e) {
+              console.warn("Excel export: suggestion enrichment skipped", e);
+            }
+
+            const cols = [
+              "Symbol", "Signal", "Score", "Confidence",
+              "Suggested Trade", "Option Price", "Option Target", "Option Stop",
+              "Lot Size", "Lot Value", "Lot Target", "Lot Stop",
+              "Trade ML Score"
+            ];
+
             const rowsHtml = scanData.map(r => {
               const pick = r.top_picks?.[0];
               const sig = r.signal || "NEUTRAL";
               const bgColor = sig === "BULLISH" ? "#d4edda" : sig === "BEARISH" ? "#f8d7da" : "transparent";
               const suggested_trade = pick ? `${pick.strike} ${pick.type}` : "";
               const trade_ltp = pick ? pick.ltp : "";
-              const trade_score = pick ? pick.score : "";
               const trade_ml_score = pick ? (r.ml_score || 0) : "";
+              const confidence = r.confidence != null ? (r.confidence * 100).toFixed(1) + "%" : "";
               const ls = lotSizes[r.symbol] || 0;
               const lot_value = (pick && ls) ? (pick.ltp * ls).toFixed(2) : "";
-              
-              const vals = [r.symbol, sig, r.score, r.ml_score, r.ltp, suggested_trade, trade_ltp, trade_score, trade_ml_score, lot_value];
+
+              const sug = suggestionMap[r.symbol];
+              const rr = sug?.risk_reward || {};
+              const sizing = sug?.sizing || {};
+              const lot_target = sizing.lot_exit_value ?? "";
+              const lot_stop = sizing.lot_stop_value ?? "";
+              const option_target = rr.target_price ?? "";
+              const option_stop = rr.stop_loss_price ?? "";
+              const lot_size_display = sizing.lot_size || ls || "";
+
+              const vals = [
+                r.symbol,
+                sig,
+                r.score,
+                confidence,
+                suggested_trade,
+                trade_ltp,
+                option_target,
+                option_stop,
+                lot_size_display,
+                lot_value,
+                lot_target,
+                lot_stop,
+                trade_ml_score,
+              ];
               return `<tr style="background-color: ${bgColor};">${vals.map(v => `<td style="border: 1px solid #ccc; padding: 4px;">${v ?? ""}</td>`).join("")}</tr>`;
             }).join("");
 

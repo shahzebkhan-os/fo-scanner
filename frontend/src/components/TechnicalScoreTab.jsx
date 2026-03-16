@@ -159,6 +159,7 @@ export default function TechnicalScoreTab({ theme }) {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [sortIndicators, setSortIndicators] = useState(false);
 
   const analyse = useCallback(async (sym) => {
     const s = (sym || symbol).toUpperCase().trim();
@@ -196,6 +197,51 @@ export default function TechnicalScoreTab({ theme }) {
 
   const tech = result?.technical_score;
   const existing = result?.existing_score;
+  const hasExistingScore = existing?.score != null;
+  const indicatorEntries = tech ? Object.entries(tech.sub_scores) : [];
+  const sortedIndicatorEntries = sortIndicators
+    ? [...indicatorEntries].sort((a, b) => b[1] - a[1])
+    : indicatorEntries;
+  const blendedDenominator = hasExistingScore ? 2 : 1;
+  const blendedScore = tech ? Math.round((tech.score + (hasExistingScore ? existing.score : 0)) / blendedDenominator) : null;
+
+  const exportTechExcel = () => {
+    if (!tech) return;
+    const cols = ["Symbol", "Final Score", "Technical Score", "Direction", "Confidence", "Existing Score", "Existing Signal"];
+    const rows = [[
+      symbol,
+      blendedScore ?? "",
+      tech.score,
+      tech.direction,
+      `${fmt((tech.confidence || 0) * 100, 1)}%`,
+      existing?.score ?? "",
+      existing?.signal ?? "",
+    ]];
+    const indicatorRows = sortedIndicatorEntries
+      .map(([k, v]) => [INDICATOR_META[k]?.label || k, fmt(v, 1), WEIGHT_LABELS[k] || "", JSON.stringify(tech.indicators[k] || {})]);
+
+    const summaryHeader = `<tr>${cols.map(c => `<th style="border:1px solid #ccc;padding:6px;text-align:left;">${c}</th>`).join("")}</tr>`;
+    const summaryBody = rows.map(r => `<tr>${r.map(c => `<td style="border:1px solid #ccc;padding:4px;">${c}</td>`).join("")}</tr>`).join("");
+    const indicatorHeader = `<tr>${["Indicator", "Score", "Weight", "Details"].map(c => `<th style="border:1px solid #ccc;padding:6px;text-align:left;">${c}</th>`).join("")}</tr>`;
+    const indicatorBody = indicatorRows.map(r => `<tr>${r.map(c => `<td style="border:1px solid #ccc;padding:4px;">${c}</td>`).join("")}</tr>`).join("");
+    const table = `
+      <table style="border-collapse:collapse;font-family:sans-serif;font-size:12px;margin-bottom:12px;">
+        <thead>${summaryHeader}</thead>
+        <tbody>${summaryBody}</tbody>
+      </table>
+      <table style="border-collapse:collapse;font-family:sans-serif;font-size:12px;">
+        <thead>${indicatorHeader}</thead>
+        <tbody>${indicatorBody}</tbody>
+      </table>
+    `;
+    const blob = new Blob([table], { type: "application/vnd.ms-excel" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `technical_score_${symbol}_${new Date().toISOString()}.xls`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div>
@@ -252,6 +298,26 @@ export default function TechnicalScoreTab({ theme }) {
         ))}
       </div>
 
+      {/* Actions */}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <label style={{ fontSize: 11, color: theme.muted, display: "flex", alignItems: "center", gap: 6 }}>
+          <input type="checkbox" checked={sortIndicators} onChange={() => setSortIndicators(v => !v)} />
+          Sort indicators by score
+        </label>
+        <button
+          onClick={exportTechExcel}
+          disabled={!tech}
+          style={{
+            padding: "6px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
+            background: tech ? "rgba(99,102,241,.1)" : theme.border,
+            color: tech ? "#6366f1" : theme.muted,
+            fontSize: 11, fontWeight: 700, cursor: tech ? "pointer" : "not-allowed",
+          }}
+        >
+          ↓ Export Excel
+        </button>
+      </div>
+
       {/* Loading */}
       {loading && <Loader theme={theme} />}
 
@@ -285,6 +351,11 @@ export default function TechnicalScoreTab({ theme }) {
             {/* Comparison */}
             <Card theme={theme} style={{ padding: 24 }}>
               <div style={{ fontSize: 11, color: theme.muted, marginBottom: 12, fontWeight: 600 }}>MODEL COMPARISON</div>
+              {blendedScore !== null && (
+                <div style={{ marginBottom: 10, padding: "6px 10px", borderRadius: 6, background: "rgba(99,102,241,.08)", fontSize: 12 }}>
+                  Blended score: <b style={{ color: "#6366f1" }}>{blendedScore}</b>
+                </div>
+              )}
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 {/* Technical model */}
                 <div>
@@ -400,7 +471,7 @@ export default function TechnicalScoreTab({ theme }) {
           {/* Indicator detail cards */}
           <div style={{ fontSize: 11, color: theme.muted, marginBottom: 8, fontWeight: 600 }}>INDICATOR DETAILS</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            {Object.entries(tech.sub_scores).map(([name, subScore]) => (
+            {sortedIndicatorEntries.map(([name, subScore]) => (
               <IndicatorCard
                 key={name}
                 name={name}

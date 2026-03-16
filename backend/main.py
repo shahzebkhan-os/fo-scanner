@@ -127,6 +127,10 @@ INDSTOCKS_BASE  = "https://api.indstocks.com/v1"
 NSE_BASE        = "https://www.nseindia.com"
 
 # Telegram alerts are deduplicated via db.is_signal_notified / mark_signal_notified
+# Auto-trade thresholds are adjustable via environment or API
+AUTO_SCORE_THRESHOLD = int(os.getenv("AUTO_TRADE_SCORE_THRESHOLD", "80"))
+AUTO_ML_BULLISH_GATE = float(os.getenv("AUTO_TRADE_ML_BULLISH", "0.60"))
+AUTO_ML_BEARISH_GATE = float(os.getenv("AUTO_TRADE_ML_BEARISH", "0.40"))
 
 async def send_telegram_alert(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
@@ -176,11 +180,32 @@ log = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
 
+
+def _load_auto_trade_config():
+    """Reload persisted auto-trade thresholds after DB init."""
+    global AUTO_SCORE_THRESHOLD, AUTO_ML_BULLISH_GATE, AUTO_ML_BEARISH_GATE
+    stored_score = db.get_setting("auto_score_threshold", AUTO_SCORE_THRESHOLD)
+    stored_bull = db.get_setting("auto_ml_bullish_gate", AUTO_ML_BULLISH_GATE)
+    stored_bear = db.get_setting("auto_ml_bearish_gate", AUTO_ML_BEARISH_GATE)
+    try:
+        AUTO_SCORE_THRESHOLD = int(stored_score)
+    except (TypeError, ValueError):
+        log.warning("Invalid auto_score_threshold setting: %s", stored_score)
+    try:
+        AUTO_ML_BULLISH_GATE = float(stored_bull)
+    except (TypeError, ValueError):
+        log.warning("Invalid auto_ml_bullish_gate setting: %s", stored_bull)
+    try:
+        AUTO_ML_BEARISH_GATE = float(stored_bear)
+    except (TypeError, ValueError):
+        log.warning("Invalid auto_ml_bearish_gate setting: %s", stored_bear)
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    _load_auto_trade_config()
     
     # Connect Redis cache (falls back to in-memory if unavailable)
     await cache.connect()
@@ -759,10 +784,10 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
                 _apply_global_cues_adjustment(stats, global_cues_result, signal)
                 stock_score = stats["score"]
 
-                # ── Auto paper-trade entry  (v7: confidence > 80 gate) ──────
-                if (stock_score > 80
+                # ── Auto paper-trade entry  (thresholds configurable) ───────
+                if (stock_score > AUTO_SCORE_THRESHOLD
                     and signal != "NEUTRAL"
-                    and (ml_prob is None or (signal == "BULLISH" and ml_prob > 0.60) or (signal == "BEARISH" and ml_prob < 0.40))
+                    and (ml_prob is None or (signal == "BULLISH" and ml_prob > AUTO_ML_BULLISH_GATE) or (signal == "BEARISH" and ml_prob < AUTO_ML_BEARISH_GATE))
                     and stats.get("vol_spike", 0) > 0.4
                     and is_market_open()
                     and is_optimal_trade_time()
@@ -1035,6 +1060,12 @@ class PaperTradeRequest(BaseModel):
     reason: str = ""
 
 
+class AutoTradeConfig(BaseModel):
+    score_threshold: Optional[int] = Field(None, ge=0, le=100)
+    ml_bullish_gate: Optional[float] = Field(None, ge=0, le=1)
+    ml_bearish_gate: Optional[float] = Field(None, ge=0, le=1)
+
+
 @app.post("/api/fo-suggestions/paper-trade")
 async def suggestion_paper_trade(req: PaperTradeRequest):
     """
@@ -1096,14 +1127,48 @@ async def get_paper_trades(status: str = "all"):
         "open_auto": open_auto,
         "open_manual": open_manual,
         "config": {
-            "score_threshold": 80,
-            "ml_bullish_gate": 0.60,
-            "ml_bearish_gate": 0.40,
+            "score_threshold": AUTO_SCORE_THRESHOLD,
+            "ml_bullish_gate": AUTO_ML_BULLISH_GATE,
+            "ml_bearish_gate": AUTO_ML_BEARISH_GATE,
             "max_daily_trades": MAX_DAILY_AUTO_TRADES,
             "max_sector_trades": MAX_SECTOR_TRADES,
             "daily_trades_today": _daily_trade_count,
         },
     }
+
+
+@app.post("/api/paper-trades/config")
+async def update_auto_trade_config(cfg: AutoTradeConfig):
+    """
+    Adjust auto-trade confidence thresholds at runtime.
+    """
+    global AUTO_SCORE_THRESHOLD, AUTO_ML_BULLISH_GATE, AUTO_ML_BEARISH_GATE
+    if cfg.score_threshold is not None:
+        AUTO_SCORE_THRESHOLD = int(cfg.score_threshold)
+        db.set_setting("auto_score_threshold", AUTO_SCORE_THRESHOLD)
+    if cfg.ml_bullish_gate is not None:
+        AUTO_ML_BULLISH_GATE = float(cfg.ml_bullish_gate)
+        db.set_setting("auto_ml_bullish_gate", AUTO_ML_BULLISH_GATE)
+    if cfg.ml_bearish_gate is not None:
+        AUTO_ML_BEARISH_GATE = float(cfg.ml_bearish_gate)
+        db.set_setting("auto_ml_bearish_gate", AUTO_ML_BEARISH_GATE)
+    return {
+        "score_threshold": AUTO_SCORE_THRESHOLD,
+        "ml_bullish_gate": AUTO_ML_BULLISH_GATE,
+        "ml_bearish_gate": AUTO_ML_BEARISH_GATE,
+    }
+
+
+@app.get("/api/paper-trades/{trade_id}/history")
+async def get_trade_history(trade_id: int):
+    """
+    Return a trade along with its recorded price history for charting.
+    """
+    trade = db.get_trade(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    history = db.get_trade_history(trade_id, limit=400)
+    return {"trade": trade, "history": history}
 
 
 @app.get("/api/paper-trades/auto-accuracy")
@@ -1120,9 +1185,9 @@ async def get_auto_trade_accuracy():
         "manual": manual_stats,
         "market_status": market_status(),
         "config": {
-            "score_threshold": 80,
-            "ml_bullish_gate": 0.60,
-            "ml_bearish_gate": 0.40,
+            "score_threshold": AUTO_SCORE_THRESHOLD,
+            "ml_bullish_gate": AUTO_ML_BULLISH_GATE,
+            "ml_bearish_gate": AUTO_ML_BEARISH_GATE,
             "max_daily_trades": MAX_DAILY_AUTO_TRADES,
             "max_sector_trades": MAX_SECTOR_TRADES,
             "daily_trades_today": _daily_trade_count,
@@ -1815,5 +1880,3 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False, log_level="info")
 
 # End of file
-
-
