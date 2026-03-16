@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Optional
 
 import numpy as np
-import pandas as pd
 import pytz
 
 try:
@@ -64,33 +63,50 @@ def _compute_price_indicators(symbol: str, spot: float, timestamp: datetime) -> 
     history = _price_history[symbol]
     history.append((timestamp, float(spot)))
 
-    # Ensure chronological order (append order is already chronological in live scans)
-    prices = pd.Series([p for _, p in history], dtype=float)
-    if prices.empty:
+    prices = np.array([p for _, p in history], dtype=float)
+    if prices.size == 0:
         return {}
 
-    # RSI (14) using Wilder smoothing
-    delta = prices.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    roll_up = gain.ewm(alpha=1 / 14, adjust=False).mean()
-    roll_down = loss.ewm(alpha=1 / 14, adjust=False).mean()
-    rs = roll_up / roll_down.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
+    last_price = float(prices[-1])
 
-    sma20 = prices.rolling(window=20, min_periods=1).mean()
-    ema9 = prices.ewm(span=9, adjust=False).mean()
+    # RSI(14) using simple Wilder average on the last 14 deltas
+    deltas = np.diff(prices[-15:])  # at most last 15 prices → 14 deltas
+    gains = np.clip(deltas, a_min=0, a_max=None)
+    losses = -np.clip(deltas, a_min=None, a_max=0)
+    avg_gain = gains.mean() if gains.size else 0.0
+    avg_loss = losses.mean() if losses.size else 0.0
+    if avg_loss == 0 and avg_gain == 0:
+        last_rsi = 50.0
+    elif avg_loss == 0:
+        last_rsi = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        last_rsi = 100 - (100 / (1 + rs))
 
-    rolling_std = prices.rolling(window=20, min_periods=1).std()
-    upper_band = sma20 + 2 * rolling_std
-    lower_band = sma20 - 2 * rolling_std
+    # SMA20
+    sma_window = prices[-20:] if prices.size >= 1 else prices
+    last_sma20 = float(np.mean(sma_window)) if sma_window.size else last_price
 
-    last_price = prices.iloc[-1]
-    last_rsi = float(rsi.iloc[-1]) if not rsi.dropna().empty else 50.0
-    last_sma20 = float(sma20.iloc[-1]) if not sma20.dropna().empty else last_price
-    last_ema9 = float(ema9.iloc[-1]) if not ema9.dropna().empty else last_price
-    last_upper = float(upper_band.iloc[-1]) if not upper_band.dropna().empty else last_price
-    last_lower = float(lower_band.iloc[-1]) if not lower_band.dropna().empty else last_price
+    # EMA9 computed iteratively over the last 9 samples (or fewer if not available)
+    ema_values = prices[-9:] if prices.size > 0 else prices
+    if ema_values.size:
+        alpha = 2 / (9 + 1)
+        ema = ema_values[0]
+        for v in ema_values[1:]:
+            ema = (v - ema) * alpha + ema
+        last_ema9 = float(ema)
+    else:
+        last_ema9 = last_price
+
+    # Bollinger distances based on 20-period window
+    bb_window = prices[-20:] if prices.size else prices
+    if bb_window.size:
+        mean = float(np.mean(bb_window))
+        std = float(np.std(bb_window))
+        last_upper = mean + 2 * std
+        last_lower = mean - 2 * std
+    else:
+        last_upper = last_lower = last_price
 
     # Distances scaled to price to avoid magnitude drift
     upper_dist = (last_price - last_upper) / last_price if last_price else 0.0
