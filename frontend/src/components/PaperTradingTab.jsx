@@ -48,12 +48,17 @@ function isAutoTrade(trade) {
 /* ── Win-Rate Ring ──────────────────────────────────────────────────── */
 function WinRateRing({ winRate, wins, losses, total, theme, size = 110 }) {
   const wr = Number(winRate) || 0;
+  if (total === 0) {
+    return (
+      <div style={{ width: size, height: size, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "50%", border: `3px solid ${theme.border}` }}>
+        <span style={{ fontSize: size * 0.12, color: theme.muted }}>No data</span>
+      </div>
+    );
+  }
   const data = [
     { name: "Wins", value: wins || 0 },
     { name: "Losses", value: losses || 0 },
   ];
-  // Ensure at least a sliver so the ring is visible when 0
-  if (total === 0) data[0].value = data[1].value = 0.5;
 
   const COLORS = ["#22c55e", "#ef4444"];
 
