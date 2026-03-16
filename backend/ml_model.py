@@ -60,6 +60,12 @@ FEATURE_NAMES = [
     "pcr_vol",             # put/call ratio by volume
     "regime_encoded",      # 0=PINNED, 1=TRENDING, 2=EXPIRY, 3=SQUEEZE, 4=NEUTRAL
     "oi_velocity_score",   # OI change velocity (−1 to +1)
+    "pcr_velocity",        # rate of change of PCR across recent snapshots
+    "rsi_14",              # 14-period RSI of spot price
+    "sma_20",              # 20-period simple moving average
+    "ema_9",               # 9-period exponential moving average
+    "bb_upper_dist",       # distance of price from upper Bollinger band
+    "bb_lower_dist",       # distance of price from lower Bollinger band
     "uoa_detected",        # unusual options activity flag (0/1)
     "dte",                 # days to nearest expiry (clipped at 90)
     "iv_rank",             # IV rank (0–100 percentile over lookback)
@@ -93,6 +99,18 @@ def _get_feature_value(feature_name: str, features: dict) -> float:
         return float(_REGIME_MAP.get(features.get("regime", "TRENDING"), 1))
     if feature_name == "oi_velocity_score":
         return float(features.get("oi_velocity_score", m.get("oi_velocity_score", 0)))
+    if feature_name == "pcr_velocity":
+        return float(features.get("pcr_velocity", m.get("pcr_velocity", 0)))
+    if feature_name == "rsi_14":
+        return float(features.get("rsi_14", m.get("rsi_14", 50.0)))
+    if feature_name == "sma_20":
+        return float(features.get("sma_20", m.get("sma_20", features.get("spot_price", 0))))
+    if feature_name == "ema_9":
+        return float(features.get("ema_9", m.get("ema_9", features.get("spot_price", 0))))
+    if feature_name == "bb_upper_dist":
+        return float(features.get("bb_upper_dist", m.get("bb_upper_dist", 0)))
+    if feature_name == "bb_lower_dist":
+        return float(features.get("bb_lower_dist", m.get("bb_lower_dist", 0)))
     if feature_name == "uoa_detected":
         return float(features.get("uoa_detected", m.get("uoa_detected", 0)))
     if feature_name == "dte":
@@ -171,6 +189,51 @@ def _load_training_data(db_path: str = None) -> tuple:
     if df.empty:
         raise ValueError("No data found in market_snapshots table")
 
+    # Ensure ordering per symbol for rolling calculations
+    df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
+    df = df.sort_values(["symbol", "snapshot_time"])
+
+    # ── Price-action technicals & PCR velocity ─────────────────────────────
+    df["pcr_velocity"] = 0.0
+    df["rsi_14"] = 50.0
+    df["sma_20"] = df["spot_price"]
+    df["ema_9"] = df["spot_price"]
+    df["bb_upper_dist"] = 0.0
+    df["bb_lower_dist"] = 0.0
+
+    for sym, group in df.groupby("symbol"):
+        idx = group.index
+        prices = group["spot_price"].astype(float)
+        pcr_series = group["pcr"].astype(float)
+
+        delta = prices.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        roll_up = gain.ewm(alpha=1 / 14, adjust=False).mean()
+        roll_down = loss.ewm(alpha=1 / 14, adjust=False).mean()
+        rs = roll_up / roll_down.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+
+        sma20 = prices.rolling(window=20, min_periods=1).mean()
+        ema9 = prices.ewm(span=9, adjust=False).mean()
+        rolling_std = prices.rolling(window=20, min_periods=1).std()
+        upper_band = sma20 + 2 * rolling_std
+        lower_band = sma20 - 2 * rolling_std
+
+        upper_dist = (prices - upper_band) / prices.replace(0, np.nan)
+        lower_dist = (prices - lower_band) / prices.replace(0, np.nan)
+
+        pcr_vel = pcr_series.rolling(window=5, min_periods=2).apply(
+            lambda x: (x[-1] - x[0]) / max(len(x) - 1, 1), raw=True
+        )
+
+        df.loc[idx, "rsi_14"] = rsi.fillna(50.0)
+        df.loc[idx, "sma_20"] = sma20.ffill().bfill()
+        df.loc[idx, "ema_9"] = ema9.ffill().bfill()
+        df.loc[idx, "bb_upper_dist"] = upper_dist.replace([np.inf, -np.inf], 0).fillna(0)
+        df.loc[idx, "bb_lower_dist"] = lower_dist.replace([np.inf, -np.inf], 0).fillna(0)
+        df.loc[idx, "pcr_velocity"] = pcr_vel.replace([np.inf, -np.inf], 0).fillna(0)
+
     # ── Label construction ────────────────────────────────────────────────
     # Primary: use trade_result when available (direct profitability signal).
     df["label"] = np.nan
@@ -195,9 +258,20 @@ def _load_training_data(db_path: str = None) -> tuple:
     )
 
     # Fill any remaining NaN feature values with safe defaults
+    spot_median = float(df["spot_price"].median()) if not df["spot_price"].dropna().empty else 0.0
+
     for col in FEATURE_NAMES:
         if col in df.columns:
-            default = 1.0 if col in ("pcr", "pcr_vol") else 50.0 if col == "iv_rank" else 0.0
+            if col in ("pcr", "pcr_vol"):
+                default = 1.0
+            elif col == "iv_rank":
+                default = 50.0
+            elif col == "rsi_14":
+                default = 50.0
+            elif col in ("sma_20", "ema_9"):
+                default = spot_median
+            else:
+                default = 0.0
             df[col] = df[col].fillna(default)
 
     X = df[FEATURE_NAMES].values.astype(np.float64)

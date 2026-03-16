@@ -47,6 +47,12 @@ FEATURES = [
     "pcr_vol",           # put/call ratio by volume
     "regime_encoded",    # 0=PINNED, 1=TRENDING, 2=EXPIRY, 3=SQUEEZE, 4=NEUTRAL
     "oi_velocity_score", # OI change velocity
+    "pcr_velocity",      # rate of change of PCR across recent snapshots
+    "rsi_14",            # 14-period RSI of spot price
+    "sma_20",            # 20-period SMA
+    "ema_9",             # 9-period EMA
+    "bb_upper_dist",     # distance of price from upper Bollinger band
+    "bb_lower_dist",     # distance of price from lower Bollinger band
     "uoa_detected",      # unusual options activity flag (0/1)
     "dte",               # days to expiry (clipped at 90)
     "iv_rank",           # IV rank (0–100 percentile)
@@ -153,6 +159,49 @@ def _load_sequence_data(db_path: str = None):
     if df.empty:
         raise ValueError("No data found in market_snapshots table")
 
+    df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
+    df = df.sort_values(["symbol", "snapshot_time"])
+
+    df["pcr_velocity"] = 0.0
+    df["rsi_14"] = 50.0
+    df["sma_20"] = df["spot_price"]
+    df["ema_9"] = df["spot_price"]
+    df["bb_upper_dist"] = 0.0
+    df["bb_lower_dist"] = 0.0
+
+    for sym, group in df.groupby("symbol"):
+        idx = group.index
+        prices = group["spot_price"].astype(float)
+        pcr_series = group["pcr"].astype(float)
+
+        delta = prices.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        roll_up = gain.ewm(alpha=1 / 14, adjust=False).mean()
+        roll_down = loss.ewm(alpha=1 / 14, adjust=False).mean()
+        rs = roll_up / roll_down.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+
+        sma20 = prices.rolling(window=20, min_periods=1).mean()
+        ema9 = prices.ewm(span=9, adjust=False).mean()
+        rolling_std = prices.rolling(window=20, min_periods=1).std()
+        upper_band = sma20 + 2 * rolling_std
+        lower_band = sma20 - 2 * rolling_std
+
+        upper_dist = (prices - upper_band) / prices.replace(0, np.nan)
+        lower_dist = (prices - lower_band) / prices.replace(0, np.nan)
+
+        pcr_vel = pcr_series.rolling(window=5, min_periods=2).apply(
+            lambda x: (x[-1] - x[0]) / max(len(x) - 1, 1), raw=True
+        )
+
+        df.loc[idx, "rsi_14"] = rsi.fillna(50.0)
+        df.loc[idx, "sma_20"] = sma20.ffill().bfill()
+        df.loc[idx, "ema_9"] = ema9.ffill().bfill()
+        df.loc[idx, "bb_upper_dist"] = upper_dist.replace([np.inf, -np.inf], 0).fillna(0)
+        df.loc[idx, "bb_lower_dist"] = lower_dist.replace([np.inf, -np.inf], 0).fillna(0)
+        df.loc[idx, "pcr_velocity"] = pcr_vel.replace([np.inf, -np.inf], 0).fillna(0)
+
     # ── Label construction (mirrors ml_model.py) ──────────────────────────
     df["label"] = np.nan
     df.loc[df.get("trade_result", pd.Series(dtype=str)) == "WIN", "label"] = 1.0
@@ -174,7 +223,16 @@ def _load_sequence_data(db_path: str = None):
 
     for col in FEATURES:
         if col in df.columns:
-            default = 1.0 if col in ("pcr", "pcr_vol") else 50.0 if col == "iv_rank" else 0.0
+            if col in ("pcr", "pcr_vol"):
+                default = 1.0
+            elif col == "iv_rank":
+                default = 50.0
+            elif col == "rsi_14":
+                default = 50.0
+            elif col in ("sma_20", "ema_9"):
+                default = float(df["spot_price"].median()) if not df["spot_price"].dropna().empty else 0.0
+            else:
+                default = 0.0
             df[col] = df[col].fillna(default)
 
     # Fit scaler on all rows
@@ -404,7 +462,9 @@ def predict_nn(symbol: str, current_features: dict, db_path: str = None) -> Opti
                 CASE WHEN spot_price > 0
                      THEN ABS(spot_price - COALESCE(max_pain_strike, spot_price)) / spot_price * 100
                      ELSE 0 END                                                 AS max_pain_dist_pct,
-                regime
+                regime,
+                spot_price,
+                snapshot_time
             FROM market_snapshots
             WHERE symbol = ? AND spot_price IS NOT NULL AND spot_price > 0
             ORDER BY snapshot_time DESC
@@ -418,19 +478,64 @@ def predict_nn(symbol: str, current_features: dict, db_path: str = None) -> Opti
 
         _rmap = {"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3, "NEUTRAL": 4}
 
-        # Build historical feature matrix (oldest → newest).
-        # Column order must match `features_list` (saved in meta["features"]).
-        # Legacy models (5 features) are supported via the fallback below.
+        df_hist = pd.DataFrame(rows, columns=[
+            "weighted_score", "gex", "iv_skew", "pcr", "pcr_vol", "oi_velocity_score",
+            "uoa_detected", "dte", "iv_rank", "avg_iv", "max_pain_dist_pct", "regime",
+            "spot_price", "snapshot_time",
+        ])
+        df_hist["snapshot_time"] = pd.to_datetime(df_hist["snapshot_time"])
+        df_hist = df_hist.sort_values("snapshot_time")
+
+        prices = df_hist["spot_price"].astype(float)
+        pcr_series = df_hist["pcr"].astype(float)
+
+        delta = prices.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        roll_up = gain.ewm(alpha=1 / 14, adjust=False).mean()
+        roll_down = loss.ewm(alpha=1 / 14, adjust=False).mean()
+        rs = roll_up / roll_down.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+
+        sma20 = prices.rolling(window=20, min_periods=1).mean()
+        ema9 = prices.ewm(span=9, adjust=False).mean()
+        rolling_std = prices.rolling(window=20, min_periods=1).std()
+        upper_band = sma20 + 2 * rolling_std
+        lower_band = sma20 - 2 * rolling_std
+
+        upper_dist = (prices - upper_band) / prices.replace(0, np.nan)
+        lower_dist = (prices - lower_band) / prices.replace(0, np.nan)
+        pcr_vel = pcr_series.rolling(window=5, min_periods=2).apply(
+            lambda x: (x[-1] - x[0]) / max(len(x) - 1, 1), raw=True
+        )
+
+        df_hist["rsi_14"] = rsi.fillna(50.0)
+        df_hist["sma_20"] = sma20.ffill().bfill()
+        df_hist["ema_9"] = ema9.ffill().bfill()
+        df_hist["bb_upper_dist"] = upper_dist.replace([np.inf, -np.inf], 0).fillna(0)
+        df_hist["bb_lower_dist"] = lower_dist.replace([np.inf, -np.inf], 0).fillna(0)
+        df_hist["pcr_velocity"] = pcr_vel.replace([np.inf, -np.inf], 0).fillna(0)
+
+        df_hist = df_hist.tail(seq_len)
+
+        # Build historical feature matrix (oldest → newest) matching `features_list`.
         hist = []
-        for row in reversed(rows):
-            ws, gex, ivs, pcr, pcr_vol, oi_vel, uoa, dte, ivr, avg_iv, mp_dist, reg = row
+        for _, row in df_hist.iterrows():
+            reg = row["regime"]
             hist.append([
-                float(ws or 0), float(gex or 0), float(ivs or 0),
-                float(pcr or 1), float(pcr_vol or 1),
+                float(row["weighted_score"] or 0), float(row["gex"] or 0), float(row["iv_skew"] or 0),
+                float(row["pcr"] or 1), float(row["pcr_vol"] or 1),
                 float(_rmap.get(reg, 1)),
-                float(oi_vel or 0), float(uoa or 0),
-                float(dte or 5), float(ivr or 50),
-                float(avg_iv or 0), float(mp_dist or 0),
+                float(row["oi_velocity_score"] or 0),
+                float(row["pcr_velocity"] or 0),
+                float(row["rsi_14"] or 50),
+                float(row["sma_20"] or row["spot_price"] or 0),
+                float(row["ema_9"] or row["spot_price"] or 0),
+                float(row["bb_upper_dist"] or 0),
+                float(row["bb_lower_dist"] or 0),
+                float(row["uoa_detected"] or 0),
+                float(row["dte"] or 5), float(row["iv_rank"] or 50),
+                float(row["avg_iv"] or 0), float(row["max_pain_dist_pct"] or 0),
             ])
 
         # Append current live bar using the same feature order

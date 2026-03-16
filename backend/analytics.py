@@ -6,9 +6,11 @@ Covers: Black-Scholes Greeks, IV Rank, Max Pain, OI Walls,
 
 from __future__ import annotations
 import math
+from collections import deque, defaultdict
 from datetime import datetime
 from typing import Optional
 
+import numpy as np
 import pytz
 
 try:
@@ -18,6 +20,8 @@ except ImportError:
 
 # Module-level singleton — maintains rolling OI history across scans
 _oi_velocity = OiVelocitySignal()
+_price_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
+_pcr_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
 _IST = pytz.timezone("Asia/Kolkata")
 
 # ── Strike Intervals ──────────────────────────────────────────────────────────
@@ -49,6 +53,91 @@ def get_strike_interval(symbol: str) -> int:
 def nearest_atm(spot: float, symbol: str) -> float:
     iv = get_strike_interval(symbol)
     return round(spot / iv) * iv
+
+
+def _compute_price_indicators(symbol: str, spot: float, timestamp: datetime) -> dict:
+    """
+    Maintain a short rolling price history per symbol and compute common
+    price-action technical indicators. Uses pandas/numpy for robustness.
+    """
+    history = _price_history[symbol]
+    history.append((timestamp, float(spot)))
+
+    prices = np.array([p for _, p in history], dtype=float)
+    if prices.size == 0:
+        return {}
+
+    last_price = float(prices[-1])
+
+    # RSI(14) using simple Wilder average on the last 14 deltas
+    deltas = np.diff(prices[-15:])  # at most last 15 prices → 14 deltas
+    gains = np.clip(deltas, a_min=0, a_max=None)
+    losses = -np.clip(deltas, a_min=None, a_max=0)
+    avg_gain = gains.mean() if gains.size else 0.0
+    avg_loss = losses.mean() if losses.size else 0.0
+    if avg_loss == 0 and avg_gain == 0:
+        last_rsi = 50.0
+    elif avg_loss == 0:
+        last_rsi = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        last_rsi = 100 - (100 / (1 + rs))
+
+    # SMA20
+    sma_window = prices[-20:]
+    last_sma20 = float(np.mean(sma_window)) if sma_window.size else last_price
+
+    # EMA9 computed iteratively over the last 9 samples (or fewer if not available)
+    ema_values = prices[-9:]
+    alpha = 2 / (9 + 1) if ema_values.size else 0
+    ema = ema_values[0] if ema_values.size else last_price
+    for v in ema_values[1:]:
+        ema = (v - ema) * alpha + ema
+    last_ema9 = float(ema)
+
+    # Bollinger distances based on 20-period window
+    bb_window = prices[-20:]
+    if bb_window.size:
+        mean = float(np.mean(bb_window))
+        std = float(np.std(bb_window))
+        last_upper = mean + 2 * std
+        last_lower = mean - 2 * std
+    else:
+        last_upper = last_lower = last_price
+
+    # Distances scaled to price to avoid magnitude drift
+    upper_dist = (last_price - last_upper) / last_price if last_price else 0.0
+    lower_dist = (last_price - last_lower) / last_price if last_price else 0.0
+
+    return {
+        "rsi_14": round(last_rsi, 3) if np.isfinite(last_rsi) else 50.0,
+        "sma_20": round(last_sma20, 3),
+        "ema_9": round(last_ema9, 3),
+        "bb_upper_dist": round(upper_dist, 4) if np.isfinite(upper_dist) else 0.0,
+        "bb_lower_dist": round(lower_dist, 4) if np.isfinite(lower_dist) else 0.0,
+    }
+
+
+def _compute_pcr_velocity(symbol: str, pcr_value: float, timestamp: datetime, window: int = 5) -> float:
+    """
+    Track PCR over recent snapshots and return the per-snapshot rate of change.
+    Positive → PCR rising, Negative → PCR falling.
+    """
+    history = _pcr_history[symbol]
+    history.append((timestamp, float(pcr_value)))
+
+    if len(history) < 2:
+        return 0.0
+
+    # Use the last `window` observations
+    relevant = list(history)[-window:]
+    values = [v for _, v in relevant]
+    if len(values) < 2:
+        return 0.0
+
+    delta = values[-1] - values[0]
+    steps = max(len(values) - 1, 1)
+    return round(delta / steps, 4)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -442,16 +531,21 @@ def compute_stock_score_v2(
     if not records or spot <= 0:
         return _empty
 
+    ts_now = datetime.now(_IST) if as_of is None else _IST.localize(datetime.combine(as_of, datetime.min.time()))
+
     # Push new OI snapshot to velocity tracker
     _oi_velocity.push_snapshot(
         symbol=symbol,
         records=records,
         spot=spot,
-        timestamp=datetime.now(_IST),
+        timestamp=ts_now,
     )
     # Compute velocity signal
     velocity_signal = _oi_velocity.compute(symbol=symbol, records=records, spot=spot)
     velocity_meta = velocity_signal.metadata
+
+    # Price-action technicals
+    price_indicators = _compute_price_indicators(symbol, spot, ts_now)
 
     dte = days_to_expiry(expiry_str, as_of) if expiry_str else 5
     iv_rank = (iv_rank_data or {}).get("iv_rank", 50.0)
@@ -506,10 +600,13 @@ def compute_stock_score_v2(
         if p.get("lastPrice", 0) > 0:
             p_s = score_option_v2(p, spot, symbol, dte, iv_rank, regime, p)
             all_options.append({"type": "PE", "strike": strike, "ltp": p["lastPrice"], "score": p_s["score"]})
-        
+    
     dwoi_pcr = pe_dwoi / ce_dwoi if ce_dwoi > 0 else 1.0
     vol_pcr = pe_vol / ce_vol if ce_vol > 0 else 1.0
     pcr = tpe_oi / tce_oi if tce_oi > 0 else 1.0
+    
+    # Velocity of PCR across recent snapshots
+    pcr_velocity = _compute_pcr_velocity(symbol, pcr, ts_now)
     
     skew_data = compute_iv_skew(records, spot, symbol)
     prev_records = prev_chain_data.get("records", {}).get("data", []) if prev_chain_data else None
@@ -676,13 +773,20 @@ def compute_stock_score_v2(
             "zgl": gex_data["zero_gamma_level"],
             "vol_pcr": round(vol_pcr, 2),
             "dwoi_pcr": round(dwoi_pcr, 2),
-            "iv_skew": round(skew_data["skew_value"], 2)
+            "iv_skew": round(skew_data["skew_value"], 2),
+            "pcr_velocity": pcr_velocity,
+            "rsi_14": price_indicators.get("rsi_14", 50.0),
+            "sma_20": price_indicators.get("sma_20", spot),
+            "ema_9": price_indicators.get("ema_9", spot),
+            "bb_upper_dist": price_indicators.get("bb_upper_dist", 0.0),
+            "bb_lower_dist": price_indicators.get("bb_lower_dist", 0.0),
         },
         net_gex            = gex_data["net_gex"],
         zero_gamma_level   = gex_data["zero_gamma_level"],
         oi_velocity_score  = velocity_signal.score,
         oi_velocity_conf   = velocity_signal.confidence,
         oi_velocity_reason = velocity_signal.reason,
+        pcr_velocity       = pcr_velocity,
+        **price_indicators,
         **uoa_stats,
     )
-
