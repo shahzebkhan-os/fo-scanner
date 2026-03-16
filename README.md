@@ -333,6 +333,27 @@ python backend/backtest_runner.py --score 85 --signal BULLISH
 
 See [README_BACKTESTING.md](README_BACKTESTING.md) for detailed documentation.
 
+### ML / Neural Network Training (CLI)
+
+Train the LightGBM + LSTM models from the command line:
+
+```bash
+# Install ML deps (from project root)
+pip install lightgbm scikit-learn pandas torch
+
+# Activate your virtualenv if you use one
+# source backend/venv/bin/activate
+
+# Run the trainer (saves models to backend/models/)
+python -m backend.ml_model
+# or
+python backend/ml_model.py
+```
+
+Requirements:
+- `backend/scanner.db` must contain at least ~500 `market_snapshots` rows (run the scanner or historical backfill to populate).
+- `torch` is optional but needed for the LSTM NN; LightGBM will still train without it.
+
 ## 📝 Important Notes
 
 - **IV Rank**: Requires 30+ days of history for accurate percentiles
