@@ -22,7 +22,8 @@ import io
 try:
     from jugaad_data.nse import bhavcopy_fo_save
 except ImportError:
-    print("WARNING: jugaad_data missing. Bhavcopy downloading might fail.")
+    print("WARNING: jugaad_data missing. Falling back to direct NSE archive downloads for pre-Jul-2024 dates.")
+    bhavcopy_fo_save = None
 
 try:
     import yfinance as yf
@@ -208,6 +209,20 @@ def download_spot_prices(symbols: list, start_date_str: str, end_date_str: str, 
 
 # ── STEP 1C: BHAVCOPY DOWNLOADER ─────────────────────────────────────────────
 
+def _http_download_bhavcopy(url: str, fpath: str):
+    """Download a bhavcopy ZIP from the given NSE archive URL and save as CSV."""
+    s = requests.Session()
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    s.get("https://www.nseindia.com/all-reports", headers=headers, timeout=10)
+    r = s.get(url, headers=headers, timeout=15)
+    r.raise_for_status()
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        csv_name = next((n for n in z.namelist() if n.endswith(".csv")), z.namelist()[0])
+        with z.open(csv_name) as f:
+            df = pd.read_csv(f)
+            df.to_csv(fpath, index=False)
+
+
 def _download_single_bhavcopy(d: date, data_dir: str):
     # jugaad_data format: fo01Aug2023bhav.csv
     fname = f"fo{d.strftime('%d%b%Y')}bhav.csv"
@@ -220,21 +235,19 @@ def _download_single_bhavcopy(d: date, data_dir: str):
         try:
             if d >= date(2024, 7, 8):
                 # NSE changed its entire API/URL structure for Bhavcopies on July 8, 2024
-                s = requests.Session()
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                s.get("https://www.nseindia.com/all-reports", headers=headers, timeout=10)
-
                 dt_str = d.strftime("%Y%m%d")
                 url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{dt_str}_F_0000.csv.zip"
-                r = s.get(url, headers=headers, timeout=10)
-                r.raise_for_status()
-
-                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                    with z.open(z.namelist()[0]) as f:
-                        df = pd.read_csv(f)
-                        df.to_csv(fpath, index=False)
-            else:
+                _http_download_bhavcopy(url, fpath)
+            elif bhavcopy_fo_save is not None:
                 bhavcopy_fo_save(d, os.path.join(data_dir, "bhavcopies"))
+            else:
+                # jugaad_data not installed — fall back to direct NSE archive download
+                mon = d.strftime("%b").upper()
+                yr = d.strftime("%Y")
+                day = d.strftime("%d")
+                zip_fname = f"fo{day}{mon}{yr}bhav.csv.zip"
+                url = f"https://nsearchives.nseindia.com/content/historical/DERIVATIVES/{yr}/{mon}/{zip_fname}"
+                _http_download_bhavcopy(url, fpath)
 
             time.sleep(float(CONFIG["rate_limit_seconds"]) / 3)
             return fpath
