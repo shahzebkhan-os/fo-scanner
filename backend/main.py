@@ -744,6 +744,7 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
                     return None
                 
                 # Add ML prediction if model is trained
+                stats["spot_price"] = float(spot or 1)  # needed for max_pain_dist_pct feature
                 ml_prob = ml_predict(stats, symbol=symbol)
                 stats["ml_bullish_probability"] = ml_prob
 
@@ -950,6 +951,7 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
                     if not spot:
                         return None
 
+                    stats["spot_price"] = float(spot or 1)  # needed for max_pain_dist_pct feature
                     ml_prob = ml_predict(stats, symbol=symbol)
                     stats["ml_bullish_probability"] = ml_prob
 

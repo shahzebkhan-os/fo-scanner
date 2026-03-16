@@ -37,7 +37,22 @@ NN_SCALER_PATH = Path(os.path.dirname(__file__)) / "models" / "nn_scaler.pkl"
 NN_META_PATH = Path(os.path.dirname(__file__)) / "models" / "nn_meta.pkl"
 
 SEQ_LEN = 10  # sliding-window length (number of past bars per sample)
-FEATURES = ["weighted_score", "gex", "iv_skew", "pcr", "regime_encoded"]
+# Feature list for the LSTM — must match FEATURE_NAMES in ml_model.py exactly
+# so that the two models see the same input representation.
+FEATURES = [
+    "weighted_score",    # composite quant score (0–100)
+    "gex",               # net gamma exposure
+    "iv_skew",           # PE IV − CE IV
+    "pcr",               # put/call ratio by open interest
+    "pcr_vol",           # put/call ratio by volume
+    "regime_encoded",    # 0=PINNED, 1=TRENDING, 2=EXPIRY, 3=SQUEEZE, 4=NEUTRAL
+    "oi_velocity_score", # OI change velocity
+    "uoa_detected",      # unusual options activity flag (0/1)
+    "dte",               # days to expiry (clipped at 90)
+    "iv_rank",           # IV rank (0–100 percentile)
+    "avg_iv",            # average ATM IV ((CE IV + PE IV) / 2)
+    "max_pain_dist_pct", # |spot − max_pain| / spot × 100
+]
 MIN_ROWS_TO_TRAIN = 500
 RANDOM_BASELINE_LOSS = 0.693  # ln(2) — log-loss of a coin-flip classifier
 
@@ -110,10 +125,19 @@ def _load_sequence_data(db_path: str = None):
 
     query = """
         SELECT
-            score      AS weighted_score,
-            COALESCE(net_gex, 0)  AS gex,
-            COALESCE(iv_skew, 0)  AS iv_skew,
-            COALESCE(pcr_oi, 1)   AS pcr,
+            COALESCE(score, 0)                                              AS weighted_score,
+            COALESCE(net_gex, 0)                                            AS gex,
+            COALESCE(iv_skew, 0)                                            AS iv_skew,
+            COALESCE(pcr_oi, 1)                                             AS pcr,
+            COALESCE(pcr_vol, 1)                                            AS pcr_vol,
+            COALESCE(oi_velocity_score, 0)                                  AS oi_velocity_score,
+            COALESCE(uoa_detected, 0)                                       AS uoa_detected,
+            MIN(COALESCE(dte, 5), 90)                                       AS dte,
+            COALESCE(iv_rank, 50)                                           AS iv_rank,
+            COALESCE((atm_ce_iv + atm_pe_iv) / 2.0, 0)                     AS avg_iv,
+            CASE WHEN spot_price > 0
+                 THEN ABS(spot_price - COALESCE(max_pain_strike, spot_price)) / spot_price * 100
+                 ELSE 0 END                                                 AS max_pain_dist_pct,
             regime,
             spot_price,
             symbol,
@@ -129,19 +153,29 @@ def _load_sequence_data(db_path: str = None):
     if df.empty:
         raise ValueError("No data found in market_snapshots table")
 
-    # Next-bar label (per symbol)
+    # ── Label construction (mirrors ml_model.py) ──────────────────────────
+    df["label"] = np.nan
+    df.loc[df.get("trade_result", pd.Series(dtype=str)) == "WIN", "label"] = 1.0
+    df.loc[df.get("trade_result", pd.Series(dtype=str)) == "LOSS", "label"] = 0.0
+
     df["next_spot"] = df.groupby("symbol")["spot_price"].shift(-1)
-    df = df.dropna(subset=["next_spot"])
-    df["label"] = (df["next_spot"] > df["spot_price"]).astype(int)
+    spot_label = (df["next_spot"] > df["spot_price"]).astype(float)
+    fallback_mask = df["label"].isna() & df["next_spot"].notna()
+    df.loc[fallback_mask, "label"] = spot_label[fallback_mask]
+    df = df.dropna(subset=["label"])
+    df["label"] = df["label"].astype(int)
+
     df["regime_encoded"] = (
         df["regime"]
-        .map({"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3})
+        .map({"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3, "NEUTRAL": 4})
         .fillna(1)
+        .astype(float)
     )
 
     for col in FEATURES:
         if col in df.columns:
-            df[col] = df[col].fillna(0)
+            default = 1.0 if col in ("pcr", "pcr_vol") else 50.0 if col == "iv_rank" else 0.0
+            df[col] = df[col].fillna(default)
 
     # Fit scaler on all rows
     scaler = StandardScaler()
@@ -353,14 +387,23 @@ def predict_nn(symbol: str, current_features: dict, db_path: str = None) -> Opti
         features_list = meta["features"]
         seq_len = meta["seq_len"]
 
-        # Fetch recent snapshots
+        # Fetch recent snapshots using the same feature columns as training
         conn = sqlite3.connect(db_path)
         query = f"""
             SELECT
-                score      AS weighted_score,
-                COALESCE(net_gex, 0)  AS gex,
-                COALESCE(iv_skew, 0)  AS iv_skew,
-                COALESCE(pcr_oi, 1)   AS pcr,
+                COALESCE(score, 0)                                              AS weighted_score,
+                COALESCE(net_gex, 0)                                            AS gex,
+                COALESCE(iv_skew, 0)                                            AS iv_skew,
+                COALESCE(pcr_oi, 1)                                             AS pcr,
+                COALESCE(pcr_vol, 1)                                            AS pcr_vol,
+                COALESCE(oi_velocity_score, 0)                                  AS oi_velocity_score,
+                COALESCE(uoa_detected, 0)                                       AS uoa_detected,
+                MIN(COALESCE(dte, 5), 90)                                       AS dte,
+                COALESCE(iv_rank, 50)                                           AS iv_rank,
+                COALESCE((atm_ce_iv + atm_pe_iv) / 2.0, 0)                     AS avg_iv,
+                CASE WHEN spot_price > 0
+                     THEN ABS(spot_price - COALESCE(max_pain_strike, spot_price)) / spot_price * 100
+                     ELSE 0 END                                                 AS max_pain_dist_pct,
                 regime
             FROM market_snapshots
             WHERE symbol = ? AND spot_price IS NOT NULL AND spot_price > 0
@@ -373,30 +416,34 @@ def predict_nn(symbol: str, current_features: dict, db_path: str = None) -> Opti
         if len(rows) < seq_len - 1:
             return None  # need at least seq_len-1 historical bars + 1 live bar
 
-        regime_map = {"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3}
+        _rmap = {"PINNED": 0, "TRENDING": 1, "EXPIRY": 2, "SQUEEZE": 3, "NEUTRAL": 4}
 
-        # Build historical feature matrix (oldest → newest)
+        # Build historical feature matrix (oldest → newest).
+        # Column order must match `features_list` (saved in meta["features"]).
+        # Legacy models (5 features) are supported via the fallback below.
         hist = []
         for row in reversed(rows):
-            ws, gex, ivs, pcr, reg = row
+            ws, gex, ivs, pcr, pcr_vol, oi_vel, uoa, dte, ivr, avg_iv, mp_dist, reg = row
             hist.append([
-                float(ws or 0),
-                float(gex or 0),
-                float(ivs or 0),
-                float(pcr or 1),
-                float(regime_map.get(reg, 1)),
+                float(ws or 0), float(gex or 0), float(ivs or 0),
+                float(pcr or 1), float(pcr_vol or 1),
+                float(_rmap.get(reg, 1)),
+                float(oi_vel or 0), float(uoa or 0),
+                float(dte or 5), float(ivr or 50),
+                float(avg_iv or 0), float(mp_dist or 0),
             ])
 
-        # Append current live bar
-        metrics = current_features.get("metrics", {})
-        live_bar = [
-            float(current_features.get("weighted_score", current_features.get("score", 0))),
-            float(current_features.get("gex", metrics.get("gex", 0))),
-            float(current_features.get("iv_skew", metrics.get("iv_skew", 0))),
-            float(current_features.get("pcr", current_features.get("pcr_oi", 1))),
-            float(regime_map.get(current_features.get("regime", "TRENDING"), 1)),
-        ]
+        # Append current live bar using the same feature order
+        try:
+            from .ml_model import _get_feature_value
+        except ImportError:
+            from ml_model import _get_feature_value
+        live_bar = [_get_feature_value(fn, current_features) for fn in features_list]
         hist.append(live_bar)
+
+        # If saved model has fewer features (legacy), trim to match
+        n_expected = meta["input_size"]
+        hist = [[row[i] for i in range(min(len(row), n_expected))] for row in hist]
 
         # Use the last seq_len bars
         seq = hist[-seq_len:]
@@ -406,11 +453,7 @@ def predict_nn(symbol: str, current_features: dict, db_path: str = None) -> Opti
         arr = np.array(seq, dtype=np.float64)
         arr = scaler.transform(arr).astype(np.float32)
 
-        # Run through LSTM
-        model = LSTMPredictor(input_size=meta["input_size"])
-        model.load_state_dict(torch.load(str(NN_MODEL_PATH), map_location="cpu", weights_only=True))
-        model.eval()
-
+        # Run through LSTM using the already-loaded cached model
         with torch.no_grad():
             x_t = torch.tensor(arr, dtype=torch.float32).unsqueeze(0)  # (1, seq_len, features)
             prob = model(x_t).item()

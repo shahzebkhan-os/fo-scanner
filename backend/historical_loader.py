@@ -11,6 +11,7 @@ import logging
 import sqlite3
 import pandas as pd
 import numpy as np
+from collections import deque
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
@@ -477,6 +478,9 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
 
     logger.info(f"Reconstructing {total_len} snapshots with progress tracking...")
 
+    # Per-symbol rolling IV history for iv_rank computation (252-bar lookback ≈ 1 year)
+    iv_history_per_symbol: dict = {}
+
     # Use tqdm for better progress visualization
     with tqdm(total=total_len, desc="Processing snapshots", unit="snapshot") as pbar:
         for i, ((tdate, sym), day_df) in enumerate(grouped_days):
@@ -618,6 +622,14 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
             except Exception:
                 pass
 
+            # ── Rolling IV rank (252-bar percentile, per symbol) ─────────────
+            iv_hist = iv_history_per_symbol.setdefault(sym, deque(maxlen=252))
+            if iv_hist:
+                iv_rank = float(np.mean(np.array(iv_hist) <= avg_iv) * 100)
+            else:
+                iv_rank = 50.0  # insufficient history; neutral default
+            iv_hist.append(avg_iv)
+
             # Fast regime: derive from dte + OI concentration
             ce_oi_series = chain[chain["opt_type"] == "CE"]["open_interest"]
             pe_oi_series = chain[chain["opt_type"] == "PE"]["open_interest"]
@@ -626,12 +638,11 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
             oi_conc = (top_ce_conc + top_pe_conc) / 2.0
             oi_concentration_ratio = oi_conc
 
+            straddle_iv = avg_iv / 100.0
+
             if dte <= 2:
                 regime = "EXPIRY"
-            else:
-                straddle_iv = avg_iv / 100.0
-                
-            if oi_conc > 0.70:
+            elif oi_conc > 0.70:
                 regime = "PINNED"
             elif straddle_iv < 0.12:
                 regime = "SQUEEZE"
@@ -707,7 +718,7 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
                 "top_pick_ltp": top_pr,
                 "net_gex": round(net_gex, 2),
                 "zero_gamma_level": round(zero_gamma_level, 2),
-                "iv_rank": 50, # Computed fully next pass
+                "iv_rank": round(iv_rank, 1),
                 "max_pain_strike": max_pain,
                 "oi_concentration_ratio": round(oi_concentration_ratio, 4),
                 "net_delta_flow": 0,
