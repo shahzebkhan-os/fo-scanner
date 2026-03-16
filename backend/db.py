@@ -333,12 +333,21 @@ def update_trade(trade_id, current_price, exit_flag=False, reason=""):
         pnl_abs  = (current_price - entry) * lot_size
 
         if exit_flag:
+            # Preserve original reason prefix (e.g. "Auto:") so that
+            # get_trade_stats(trade_type="AUTO") can still identify
+            # auto-created trades after they are closed.
+            original_reason = row["reason"] or ""
+            if reason:
+                combined_reason = f"{original_reason} | Exit: {reason}" if original_reason else reason
+            else:
+                combined_reason = original_reason
+
             c.execute("""
                 UPDATE paper_trades
                 SET current_price=?, exit_price=?, status='CLOSED',
                     exit_time=datetime('now'), pnl=?, pnl_pct=?, reason=?
                 WHERE id=?
-            """, (current_price, current_price, round(pnl_abs,2), round(pnl_pct,2), reason, trade_id))
+            """, (current_price, current_price, round(pnl_abs,2), round(pnl_pct,2), combined_reason, trade_id))
         else:
             c.execute("""
                 UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?

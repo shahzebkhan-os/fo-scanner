@@ -1079,13 +1079,30 @@ async def get_paper_trades(status: str = "all"):
 
     stats = db.get_trade_stats()
     auto_stats = db.get_trade_stats(trade_type="AUTO")
+    manual_stats = db.get_trade_stats(trade_type="MANUAL")
+
+    # Count open auto/manual trades for the summary
+    all_trades = trades if status == "all" else db.get_all_trades()
+    open_auto = sum(1 for t in all_trades if t["status"] == "OPEN" and (t.get("reason") or "").startswith("Auto:"))
+    open_manual = sum(1 for t in all_trades if t["status"] == "OPEN" and not (t.get("reason") or "").startswith("Auto:"))
 
     return {
         "trades": trades,
         "stats": stats,
         "auto_accuracy": auto_stats,
+        "manual_accuracy": manual_stats,
         "market_status": market_status(),
         "count": len(trades),
+        "open_auto": open_auto,
+        "open_manual": open_manual,
+        "config": {
+            "score_threshold": 80,
+            "ml_bullish_gate": 0.60,
+            "ml_bearish_gate": 0.40,
+            "max_daily_trades": MAX_DAILY_AUTO_TRADES,
+            "max_sector_trades": MAX_SECTOR_TRADES,
+            "daily_trades_today": _daily_trade_count,
+        },
     }
 
 

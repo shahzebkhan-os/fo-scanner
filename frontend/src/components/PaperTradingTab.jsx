@@ -1,4 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
+import {
+  PieChart, Pie, Cell, ResponsiveContainer,
+  AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
+  BarChart, Bar,
+} from "recharts";
 
 const API = "";
 
@@ -26,9 +31,10 @@ function Card({ children, theme, style = {} }) {
   );
 }
 
-function StatCard({ label, value, color, theme }) {
+function StatCard({ label, value, color, theme, icon }) {
   return (
     <Card theme={theme} style={{ textAlign: "center", padding: 12, flex: "1 1 120px" }}>
+      {icon && <div style={{ fontSize: 16, marginBottom: 2 }}>{icon}</div>}
       <div style={{ fontSize: 22, fontWeight: 700, color: color || theme.text }}>{value}</div>
       <div style={{ fontSize: 10, color: theme.muted }}>{label}</div>
     </Card>
@@ -37,6 +43,118 @@ function StatCard({ label, value, color, theme }) {
 
 function isAutoTrade(trade) {
   return (trade.reason || "").startsWith("Auto:");
+}
+
+/* ── Win-Rate Ring ──────────────────────────────────────────────────── */
+function WinRateRing({ winRate, wins, losses, total, theme, size = 110 }) {
+  const wr = Number(winRate) || 0;
+  const data = [
+    { name: "Wins", value: wins || 0 },
+    { name: "Losses", value: losses || 0 },
+  ];
+  // Ensure at least a sliver so the ring is visible when 0
+  if (total === 0) data[0].value = data[1].value = 0.5;
+
+  const COLORS = ["#22c55e", "#ef4444"];
+
+  return (
+    <div style={{ position: "relative", width: size, height: size }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <PieChart>
+          <Pie
+            data={data}
+            dataKey="value"
+            innerRadius={size * 0.35}
+            outerRadius={size * 0.47}
+            startAngle={90}
+            endAngle={-270}
+            paddingAngle={2}
+            stroke="none"
+          >
+            {data.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+          </Pie>
+        </PieChart>
+      </ResponsiveContainer>
+      {/* Center label */}
+      <div style={{
+        position: "absolute", inset: 0, display: "flex",
+        flexDirection: "column", alignItems: "center", justifyContent: "center",
+        pointerEvents: "none",
+      }}>
+        <span style={{ fontSize: size * 0.22, fontWeight: 800, color: wr >= 50 ? "#22c55e" : "#ef4444" }}>
+          {wr.toFixed(0)}%
+        </span>
+        <span style={{ fontSize: size * 0.1, color: theme.muted }}>Win Rate</span>
+      </div>
+    </div>
+  );
+}
+
+/* ── Equity Curve Chart ─────────────────────────────────────────────── */
+function EquityCurve({ curve, theme, height = 180 }) {
+  if (!curve || curve.length === 0) return null;
+  return (
+    <div style={{ width: "100%", height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={curve} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
+              <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
+          <XAxis dataKey="date" tick={{ fontSize: 9, fill: theme.muted }} tickLine={false} />
+          <YAxis tick={{ fontSize: 9, fill: theme.muted }} tickLine={false} axisLine={false}
+            tickFormatter={v => `₹${v}`} />
+          <Tooltip
+            contentStyle={{
+              background: theme.card, border: `1px solid ${theme.border}`,
+              borderRadius: 6, fontSize: 11,
+            }}
+            formatter={(v, name) => [`₹${Number(v).toFixed(2)}`, name === "cumulative" ? "Cumulative P&L" : "Trade P&L"]}
+          />
+          <Area type="monotone" dataKey="cumulative" stroke="#6366f1" fill="url(#equityGrad)" strokeWidth={2} dot={false} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/* ── Per-Symbol Bar Chart ───────────────────────────────────────────── */
+function SymbolPnlChart({ bySymbol, theme, height = 160 }) {
+  if (!bySymbol || Object.keys(bySymbol).length === 0) return null;
+  const chartData = Object.entries(bySymbol)
+    .map(([sym, s]) => ({ symbol: sym, pnl: s.pnl, trades: s.trades, win_rate: s.win_rate }))
+    .sort((a, b) => b.pnl - a.pnl);
+
+  return (
+    <div style={{ width: "100%", height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
+          <XAxis dataKey="symbol" tick={{ fontSize: 9, fill: theme.muted }} tickLine={false} />
+          <YAxis tick={{ fontSize: 9, fill: theme.muted }} tickLine={false} axisLine={false}
+            tickFormatter={v => `₹${v}`} />
+          <Tooltip
+            contentStyle={{
+              background: theme.card, border: `1px solid ${theme.border}`,
+              borderRadius: 6, fontSize: 11,
+            }}
+            formatter={(v, name) => {
+              if (name === "pnl") return [`₹${Number(v).toFixed(2)}`, "P&L"];
+              return [v, name];
+            }}
+          />
+          <Bar dataKey="pnl" radius={[4, 4, 0, 0]}>
+            {chartData.map((entry, i) => (
+              <Cell key={i} fill={entry.pnl >= 0 ? "#22c55e" : "#ef4444"} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
 }
 
 function TradeRow({ trade, theme }) {
@@ -134,8 +252,12 @@ export default function PaperTradingTab({ theme }) {
   const trades = data?.trades || [];
   const stats = data?.stats || {};
   const autoAcc = data?.auto_accuracy || {};
+  const manualAcc = data?.manual_accuracy || {};
   const mktStatus = data?.market_status || {};
   const marketOpen = mktStatus.open === true;
+  const config = data?.config || {};
+  const openAuto = data?.open_auto || 0;
+  const openManual = data?.open_manual || 0;
 
   const openTrades = trades.filter(t => t.status === "OPEN");
   const closedTrades = trades.filter(t => t.status === "CLOSED");
@@ -187,38 +309,211 @@ export default function PaperTradingTab({ theme }) {
 
       {/* Stats Summary */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 16 }}>
-        <StatCard label="Open Trades" value={openTrades.length} color="#6366f1" theme={theme} />
-        <StatCard label="Total Closed" value={stats.total || 0} color={theme.text} theme={theme} />
-        <StatCard label="Win Rate" value={`${stats.win_rate || 0}%`} color={(stats.win_rate || 0) >= 50 ? "#22c55e" : "#ef4444"} theme={theme} />
-        <StatCard label="Total P&L" value={`₹${(stats.total_pnl || 0).toLocaleString()}`} color={(stats.total_pnl || 0) >= 0 ? "#22c55e" : "#ef4444"} theme={theme} />
-        <StatCard label="Avg P&L %" value={`${(stats.avg_pnl_pct || 0).toFixed(1)}%`} color={(stats.avg_pnl_pct || 0) >= 0 ? "#22c55e" : "#ef4444"} theme={theme} />
-        <StatCard label="Max Drawdown" value={`₹${(stats.max_drawdown || 0).toLocaleString()}`} color="#ef4444" theme={theme} />
+        <StatCard label="Open Trades" value={openTrades.length} color="#6366f1" theme={theme} icon="📂" />
+        <StatCard label="Total Closed" value={stats.total || 0} color={theme.text} theme={theme} icon="✅" />
+        <StatCard label="Win Rate" value={`${stats.win_rate || 0}%`} color={(stats.win_rate || 0) >= 50 ? "#22c55e" : "#ef4444"} theme={theme} icon="🎯" />
+        <StatCard label="Total P&L" value={`₹${(stats.total_pnl || 0).toLocaleString()}`} color={(stats.total_pnl || 0) >= 0 ? "#22c55e" : "#ef4444"} theme={theme} icon="💰" />
+        <StatCard label="Avg P&L %" value={`${(stats.avg_pnl_pct || 0).toFixed(1)}%`} color={(stats.avg_pnl_pct || 0) >= 0 ? "#22c55e" : "#ef4444"} theme={theme} icon="📈" />
+        <StatCard label="Max Drawdown" value={`₹${(stats.max_drawdown || 0).toLocaleString()}`} color="#ef4444" theme={theme} icon="📉" />
       </div>
 
-      {/* Auto-Trade Accuracy Panel */}
-      <Card theme={theme} style={{ marginBottom: 16, padding: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <h3 style={{ margin: 0, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
-            ⚡ Auto-Trade Accuracy <span style={{ fontSize: 10, color: theme.muted, fontWeight: 400 }}>(confidence &gt; 80)</span>
+      {/* ═══ Auto-Trade Accuracy Dashboard ═══ */}
+      <Card theme={theme} style={{ marginBottom: 16, padding: 0, overflow: "hidden" }}>
+        {/* Section header */}
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          padding: "12px 16px",
+          background: "linear-gradient(135deg, rgba(99,102,241,.08), rgba(139,92,246,.06))",
+          borderBottom: `1px solid ${theme.border}`,
+        }}>
+          <h3 style={{ margin: 0, fontSize: 15, display: "flex", alignItems: "center", gap: 6 }}>
+            ⚡ Auto-Trade Accuracy
+            <span style={{
+              fontSize: 10, padding: "2px 8px", borderRadius: 10,
+              background: "rgba(99,102,241,.12)", color: "#6366f1", fontWeight: 600,
+            }}>confidence &gt; {config.score_threshold || 80}</span>
           </h3>
-          <span style={{ fontSize: 10, color: theme.muted }}>
-            {autoTrades.length} auto trade{autoTrades.length !== 1 ? "s" : ""} total
-          </span>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ fontSize: 10, color: theme.muted }}>
+              {openAuto} open · {autoAcc.total || 0} closed
+            </span>
+            {config.daily_trades_today != null && (
+              <span style={{
+                fontSize: 9, padding: "2px 6px", borderRadius: 4,
+                background: "rgba(99,102,241,.08)", color: "#6366f1",
+              }}>
+                Today: {config.daily_trades_today}/{config.max_daily_trades || "∞"}
+              </span>
+            )}
+          </div>
         </div>
-        {autoAcc.total > 0 ? (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-            <StatCard label="Auto Wins" value={autoAcc.wins || 0} color="#22c55e" theme={theme} />
-            <StatCard label="Auto Losses" value={autoAcc.losses || 0} color="#ef4444" theme={theme} />
-            <StatCard label="Auto Win Rate" value={`${autoAcc.win_rate || 0}%`} color={(autoAcc.win_rate || 0) >= 50 ? "#22c55e" : "#ef4444"} theme={theme} />
-            <StatCard label="Auto P&L" value={`₹${(autoAcc.total_pnl || 0).toLocaleString()}`} color={(autoAcc.total_pnl || 0) >= 0 ? "#22c55e" : "#ef4444"} theme={theme} />
-            <StatCard label="Auto Avg %" value={`${(autoAcc.avg_pnl_pct || 0).toFixed(1)}%`} color={(autoAcc.avg_pnl_pct || 0) >= 0 ? "#22c55e" : "#ef4444"} theme={theme} />
-          </div>
-        ) : (
-          <div style={{ fontSize: 11, color: theme.muted, textAlign: "center", padding: 8 }}>
-            No closed auto-trades yet. Auto-trades are created during market hours when a stock scores above 80 with ML confirmation.
-          </div>
-        )}
+
+        <div style={{ padding: 16 }}>
+          {autoAcc.total > 0 ? (
+            <>
+              {/* Top row: Ring + Stats + Best/Worst */}
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16, alignItems: "center" }}>
+                {/* Win Rate Ring */}
+                <WinRateRing
+                  winRate={autoAcc.win_rate}
+                  wins={autoAcc.wins}
+                  losses={autoAcc.losses}
+                  total={autoAcc.total}
+                  theme={theme}
+                  size={120}
+                />
+                {/* Stat cards */}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, flex: 1 }}>
+                  <StatCard label="Auto Wins" value={autoAcc.wins || 0} color="#22c55e" theme={theme} icon="🟢" />
+                  <StatCard label="Auto Losses" value={autoAcc.losses || 0} color="#ef4444" theme={theme} icon="🔴" />
+                  <StatCard label="Total P&L" value={`₹${(autoAcc.total_pnl || 0).toLocaleString()}`}
+                    color={(autoAcc.total_pnl || 0) >= 0 ? "#22c55e" : "#ef4444"} theme={theme} icon="💰" />
+                  <StatCard label="Avg Return" value={`${(autoAcc.avg_pnl_pct || 0).toFixed(1)}%`}
+                    color={(autoAcc.avg_pnl_pct || 0) >= 0 ? "#22c55e" : "#ef4444"} theme={theme} icon="📊" />
+                  <StatCard label="Max Drawdown" value={`₹${(autoAcc.max_drawdown || 0).toLocaleString()}`}
+                    color="#ef4444" theme={theme} icon="⬇" />
+                </div>
+              </div>
+
+              {/* Best & Worst Trade */}
+              {(autoAcc.best || autoAcc.worst) && (
+                <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+                  {autoAcc.best && (
+                    <Card theme={theme} style={{
+                      flex: "1 1 200px", padding: 10,
+                      borderLeft: "3px solid #22c55e",
+                    }}>
+                      <div style={{ fontSize: 10, color: "#22c55e", fontWeight: 700, marginBottom: 4 }}>🏆 Best Auto Trade</div>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>
+                        {autoAcc.best.symbol} {autoAcc.best.type} {autoAcc.best.strike}
+                      </div>
+                      <div style={{ fontSize: 11, color: "#22c55e" }}>
+                        +₹{(autoAcc.best.pnl || 0).toFixed(2)} ({(autoAcc.best.pnl_pct || 0).toFixed(1)}%)
+                      </div>
+                    </Card>
+                  )}
+                  {autoAcc.worst && (
+                    <Card theme={theme} style={{
+                      flex: "1 1 200px", padding: 10,
+                      borderLeft: "3px solid #ef4444",
+                    }}>
+                      <div style={{ fontSize: 10, color: "#ef4444", fontWeight: 700, marginBottom: 4 }}>📉 Worst Auto Trade</div>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>
+                        {autoAcc.worst.symbol} {autoAcc.worst.type} {autoAcc.worst.strike}
+                      </div>
+                      <div style={{ fontSize: 11, color: "#ef4444" }}>
+                        ₹{(autoAcc.worst.pnl || 0).toFixed(2)} ({(autoAcc.worst.pnl_pct || 0).toFixed(1)}%)
+                      </div>
+                    </Card>
+                  )}
+                </div>
+              )}
+
+              {/* Equity Curve */}
+              {autoAcc.equity_curve && autoAcc.equity_curve.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: theme.text }}>
+                    📈 Auto-Trade Equity Curve
+                  </div>
+                  <EquityCurve curve={autoAcc.equity_curve} theme={theme} height={180} />
+                </div>
+              )}
+
+              {/* Per-Symbol Bar Chart for Auto Trades */}
+              {autoAcc.by_symbol && Object.keys(autoAcc.by_symbol).length > 0 && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: theme.text }}>
+                    📊 Auto P&L by Symbol
+                  </div>
+                  <SymbolPnlChart bySymbol={autoAcc.by_symbol} theme={theme} height={160} />
+                </div>
+              )}
+            </>
+          ) : (
+            <div style={{
+              textAlign: "center", padding: "24px 16px", color: theme.muted,
+            }}>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>🤖</div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>No closed auto-trades yet</div>
+              <div style={{ fontSize: 11, maxWidth: 400, margin: "0 auto" }}>
+                Auto-trades are created during market hours when a stock scores above {config.score_threshold || 80} with ML confirmation
+                (bullish &gt; {((config.ml_bullish_gate || 0.6) * 100).toFixed(0)}% / bearish &lt; {((config.ml_bearish_gate || 0.4) * 100).toFixed(0)}%).
+              </div>
+            </div>
+          )}
+        </div>
       </Card>
+
+      {/* Auto vs Manual Comparison */}
+      {(autoAcc.total > 0 || manualAcc.total > 0) && (
+        <Card theme={theme} style={{ marginBottom: 16, padding: 14 }}>
+          <h3 style={{ margin: "0 0 12px 0", fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
+            ⚖ Auto vs Manual Comparison
+          </h3>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            {/* Auto column */}
+            <div style={{
+              padding: 12, borderRadius: 8,
+              background: "rgba(99,102,241,.06)", border: "1px solid rgba(99,102,241,.15)",
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#6366f1", marginBottom: 8 }}>⚡ Auto Trades</div>
+              <div style={{ fontSize: 11, color: theme.muted, display: "flex", flexDirection: "column", gap: 4 }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Closed</span><span style={{ fontWeight: 600, color: theme.text }}>{autoAcc.total || 0}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Win Rate</span>
+                  <span style={{ fontWeight: 600, color: (autoAcc.win_rate || 0) >= 50 ? "#22c55e" : "#ef4444" }}>
+                    {autoAcc.win_rate || 0}%
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Total P&L</span>
+                  <span style={{ fontWeight: 600, color: (autoAcc.total_pnl || 0) >= 0 ? "#22c55e" : "#ef4444" }}>
+                    ₹{(autoAcc.total_pnl || 0).toLocaleString()}
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Avg Return</span>
+                  <span style={{ fontWeight: 600, color: (autoAcc.avg_pnl_pct || 0) >= 0 ? "#22c55e" : "#ef4444" }}>
+                    {(autoAcc.avg_pnl_pct || 0).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+            </div>
+            {/* Manual column */}
+            <div style={{
+              padding: 12, borderRadius: 8,
+              background: "rgba(245,158,11,.06)", border: "1px solid rgba(245,158,11,.15)",
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#f59e0b", marginBottom: 8 }}>🖐 Manual Trades</div>
+              <div style={{ fontSize: 11, color: theme.muted, display: "flex", flexDirection: "column", gap: 4 }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Closed</span><span style={{ fontWeight: 600, color: theme.text }}>{manualAcc.total || 0}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Win Rate</span>
+                  <span style={{ fontWeight: 600, color: (manualAcc.win_rate || 0) >= 50 ? "#22c55e" : "#ef4444" }}>
+                    {manualAcc.win_rate || 0}%
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Total P&L</span>
+                  <span style={{ fontWeight: 600, color: (manualAcc.total_pnl || 0) >= 0 ? "#22c55e" : "#ef4444" }}>
+                    ₹{(manualAcc.total_pnl || 0).toLocaleString()}
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Avg Return</span>
+                  <span style={{ fontWeight: 600, color: (manualAcc.avg_pnl_pct || 0) >= 0 ? "#22c55e" : "#ef4444" }}>
+                    {(manualAcc.avg_pnl_pct || 0).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Filter Tabs */}
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -276,11 +571,20 @@ export default function PaperTradingTab({ theme }) {
         })()}
       </Card>
 
+      {/* Equity Curve (All trades) */}
+      {stats.equity_curve && stats.equity_curve.length > 0 && (
+        <Card theme={theme} style={{ marginTop: 16, padding: 14 }}>
+          <h3 style={{ margin: "0 0 10px 0", fontSize: 14, color: theme.text }}>📈 Overall Equity Curve</h3>
+          <EquityCurve curve={stats.equity_curve} theme={theme} height={200} />
+        </Card>
+      )}
+
       {/* Per-Symbol Breakdown */}
       {stats.by_symbol && Object.keys(stats.by_symbol).length > 0 && (
         <div style={{ marginTop: 16 }}>
           <h3 style={{ fontSize: 14, marginBottom: 10, color: theme.text }}>📊 Per-Symbol Performance</h3>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
+          <SymbolPnlChart bySymbol={stats.by_symbol} theme={theme} height={180} />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10, marginTop: 12 }}>
             {Object.entries(stats.by_symbol)
               .sort((a, b) => b[1].pnl - a[1].pnl)
               .map(([sym, s]) => (
@@ -296,6 +600,44 @@ export default function PaperTradingTab({ theme }) {
               ))}
           </div>
         </div>
+      )}
+
+      {/* Auto-Trade Config Panel */}
+      {Object.keys(config).length > 0 && (
+        <Card theme={theme} style={{ marginTop: 16, padding: 14 }}>
+          <h3 style={{ margin: "0 0 10px 0", fontSize: 13, color: theme.text, display: "flex", alignItems: "center", gap: 6 }}>
+            ⚙ Auto-Trade Configuration
+          </h3>
+          <div style={{
+            display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+            gap: 8, fontSize: 11,
+          }}>
+            <div style={{ padding: 8, borderRadius: 6, background: "rgba(99,102,241,.05)" }}>
+              <div style={{ color: theme.muted, marginBottom: 2 }}>Score Threshold</div>
+              <div style={{ fontWeight: 700, color: theme.text }}>&gt; {config.score_threshold || 80}</div>
+            </div>
+            <div style={{ padding: 8, borderRadius: 6, background: "rgba(34,197,94,.05)" }}>
+              <div style={{ color: theme.muted, marginBottom: 2 }}>ML Bullish Gate</div>
+              <div style={{ fontWeight: 700, color: "#22c55e" }}>&gt; {((config.ml_bullish_gate || 0.6) * 100).toFixed(0)}%</div>
+            </div>
+            <div style={{ padding: 8, borderRadius: 6, background: "rgba(239,68,68,.05)" }}>
+              <div style={{ color: theme.muted, marginBottom: 2 }}>ML Bearish Gate</div>
+              <div style={{ fontWeight: 700, color: "#ef4444" }}>&lt; {((config.ml_bearish_gate || 0.4) * 100).toFixed(0)}%</div>
+            </div>
+            <div style={{ padding: 8, borderRadius: 6, background: "rgba(245,158,11,.05)" }}>
+              <div style={{ color: theme.muted, marginBottom: 2 }}>Max Daily Trades</div>
+              <div style={{ fontWeight: 700, color: theme.text }}>{config.max_daily_trades || "—"}</div>
+            </div>
+            <div style={{ padding: 8, borderRadius: 6, background: "rgba(99,102,241,.05)" }}>
+              <div style={{ color: theme.muted, marginBottom: 2 }}>Max Sector Trades</div>
+              <div style={{ fontWeight: 700, color: theme.text }}>{config.max_sector_trades || "—"}</div>
+            </div>
+            <div style={{ padding: 8, borderRadius: 6, background: "rgba(139,92,246,.05)" }}>
+              <div style={{ color: theme.muted, marginBottom: 2 }}>Trades Today</div>
+              <div style={{ fontWeight: 700, color: "#8b5cf6" }}>{config.daily_trades_today ?? "—"}</div>
+            </div>
+          </div>
+        </Card>
       )}
 
       {/* Info */}
