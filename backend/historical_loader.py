@@ -151,7 +151,8 @@ def download_spot_prices(symbols: list, start_date_str: str, end_date_str: str, 
         "NIFTY":      ["^NSEI"],
         "BANKNIFTY":  ["^NSEBANK"],
         "FINNIFTY":   ["NIFTY_FIN_SERVICE.NS", "^CNXFIN"],
-        "TATAMOTORS": ["TATAMOTORS.NS", "TATAMTRDVT.NS", "TATAMOTOR.NS"],
+        "TATAMOTORS": ["TATAMOTORS.NS", "TATAMTRDVR.NS", "TATAMOTORS.BO", "TTM"],
+        "MM":         ["M&M.NS", "M&M.BO", "MM.NS"],
     }
 
     end_buf = (end + timedelta(days=1)).strftime("%Y-%m-%d")
