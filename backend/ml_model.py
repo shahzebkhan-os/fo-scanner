@@ -258,6 +258,8 @@ def _load_training_data(db_path: str = None) -> tuple:
     )
 
     # Fill any remaining NaN feature values with safe defaults
+    spot_median = float(df["spot_price"].median()) if not df["spot_price"].dropna().empty else 0.0
+
     for col in FEATURE_NAMES:
         if col in df.columns:
             if col in ("pcr", "pcr_vol"):
@@ -267,7 +269,7 @@ def _load_training_data(db_path: str = None) -> tuple:
             elif col == "rsi_14":
                 default = 50.0
             elif col in ("sma_20", "ema_9"):
-                default = float(df["spot_price"].median()) if not df["spot_price"].dropna().empty else 0.0
+                default = spot_median
             else:
                 default = 0.0
             df[col] = df[col].fillna(default)
