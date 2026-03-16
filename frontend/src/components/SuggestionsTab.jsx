@@ -166,6 +166,8 @@ function SuggestionCard({ item, theme, goChain, marketOpen }) {
           <div style={{ fontSize: 12 }}>
             <div>Strike: <b>{entry.primary_strike} {entry.primary_type}</b></div>
             <div>Entry Price: <b style={{ color: "#6366f1" }}>₹{entry.entry_premium}</b></div>
+            <div>Option Target: <b style={{ color: "#22c55e" }}>₹{rr.target_price}</b></div>
+            <div>Option Stop: <b style={{ color: "#ef4444" }}>₹{rr.stop_loss_price}</b></div>
             <div>Spot: ₹{entry.spot_at_signal}</div>
           </div>
         </div>
@@ -195,8 +197,11 @@ function SuggestionCard({ item, theme, goChain, marketOpen }) {
           <div style={{ fontSize: 12 }}>
             <div>Lot Size: <b>{sizing.lot_size}</b></div>
             <div>Lot Price: <b>₹{(sizing.lot_entry_price || entry.entry_premium * (sizing.lot_size || 1)).toLocaleString()}</b></div>
-            <div>Lot Target: <span style={{ color: "#22c55e" }}>
-              <b>₹{(sizing.lot_target_price || (rr.target_price || 0) * (sizing.lot_size || 1)).toLocaleString()}</b>
+            <div>Lot Exit (target): <span style={{ color: "#22c55e" }}>
+              <b>₹{(sizing.lot_exit_value || (rr.target_price || 0) * (sizing.lot_size || 1)).toLocaleString()}</b>
+            </span></div>
+            <div>Lot Stop: <span style={{ color: "#ef4444" }}>
+              <b>₹{(sizing.lot_stop_value || (rr.stop_loss_price || 0) * (sizing.lot_size || 1)).toLocaleString()}</b>
             </span></div>
             <div>Target P&L: <span style={{ color: "#22c55e" }}>
               +₹{sizing.target_pnl_per_lot != null
@@ -420,4 +425,3 @@ export default function SuggestionsTab({ theme, goChain }) {
     </div>
   );
 }
-

@@ -49,6 +49,15 @@ def init_db():
             lot_size     INTEGER DEFAULT 0
         );
 
+        -- Minute-level price history per paper trade (for charts)
+        CREATE TABLE IF NOT EXISTS paper_trade_prices (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id  INTEGER NOT NULL REFERENCES paper_trades(id) ON DELETE CASCADE,
+            ts        TEXT    DEFAULT (datetime('now')),
+            price     REAL    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_prices_trade_id ON paper_trade_prices(trade_id);
+
         CREATE TABLE IF NOT EXISTS tracked_picks (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             symbol       TEXT    NOT NULL,
@@ -290,16 +299,34 @@ def has_open_trade(symbol, opt_type, strike):
     return row is not None
 
 
+def record_trade_price(trade_id: Optional[int], price: float):
+    """Persist a point-in-time price for the trade to build a history graph."""
+    if trade_id is None:
+        logger.warning("record_trade_price called without trade_id")
+        return
+    ts = datetime.utcnow().isoformat() + "Z"
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO paper_trade_prices (trade_id, price, ts) VALUES (?, ?, ?)",
+            (trade_id, float(price), ts),
+        )
+
+
 def add_trade(symbol, opt_type, strike, entry_price, reason="", lot_size=0):
     # Prevent duplicate open trades for the same symbol/type/strike
     if has_open_trade(symbol, opt_type, strike):
         logger.info("Skipped duplicate trade: %s %s %s (already open)", symbol, opt_type, strike)
         return False
     with _conn() as c:
-        c.execute("""
+        cur = c.execute("""
             INSERT INTO paper_trades (symbol, type, strike, entry_price, reason, lot_size)
             VALUES (?,?,?,?,?,?)
         """, (symbol, opt_type, float(strike), float(entry_price), reason, lot_size))
+        trade_id = cur.lastrowid
+    try:
+        record_trade_price(trade_id, entry_price)
+    except Exception as e:
+        logger.error("Failed to record initial trade price: %s", e)
     return True
 
 def get_open_trades():
@@ -352,6 +379,25 @@ def update_trade(trade_id, current_price, exit_flag=False, reason=""):
             c.execute("""
                 UPDATE paper_trades SET current_price=?, pnl=?, pnl_pct=? WHERE id=?
             """, (current_price, round(pnl_abs,2), round(pnl_pct,2), trade_id))
+    try:
+        record_trade_price(trade_id, current_price)
+    except Exception as e:
+        logger.error("Failed to record trade price for %s: %s", trade_id, e)
+
+
+def get_trade(trade_id: int):
+    with _conn() as c:
+        row = c.execute("SELECT * FROM paper_trades WHERE id=?", (trade_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_trade_history(trade_id: int, limit: int = 300):
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT ts, price FROM paper_trade_prices WHERE trade_id=? ORDER BY ts ASC LIMIT ?",
+            (trade_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 def get_trade_stats(trade_type: str = "ALL"):
     with _conn() as c:

@@ -6,6 +6,7 @@ import {
 } from "recharts";
 
 const API = "";
+const IST_TZ = "Asia/Kolkata";
 
 async function apiFetch(path, options = {}) {
   const r = await fetch(API + path, options);
@@ -162,6 +163,65 @@ function SymbolPnlChart({ bySymbol, theme, height = 160 }) {
   );
 }
 
+/* ── Per-trade price history ───────────────────────────────────────────── */
+function TradePriceHistory({ history, trade, theme, loading }) {
+  if (!trade) return null;
+  const data = (history || []).map(p => {
+    const hasTZ = typeof p.ts === "string" && p.ts.endsWith("Z");
+    if (typeof p.ts === "string" && !hasTZ) {
+      console.warn("Paper trade history timestamp missing timezone suffix, assuming UTC:", p.ts);
+    }
+    const iso = hasTZ ? p.ts : `${p.ts}Z`;
+    const tsText = new Date(iso).toLocaleTimeString("en-IN", { timeZone: IST_TZ, hour: "2-digit", minute: "2-digit" });
+    return { ts: tsText, price: p.price };
+  });
+  const fallback = [
+    { ts: "Entry", price: trade.entry_price },
+    { ts: "Current", price: trade.current_price || trade.entry_price },
+  ];
+  const chartData = data.length > 1 ? data : fallback;
+
+  return (
+    <Card theme={theme} style={{ marginTop: 12, padding: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: theme.text }}>
+          📈 {trade.symbol} {trade.type} {trade.strike} price history
+        </div>
+        {loading && <span style={{ fontSize: 11, color: theme.muted }}>Loading…</span>}
+      </div>
+      <div style={{ width: "100%", height: 180 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+            <defs>
+              <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="#22c55e" stopOpacity={0.3} />
+                <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
+            <XAxis dataKey="ts" tick={{ fontSize: 9, fill: theme.muted }} tickLine={false} />
+            <YAxis tick={{ fontSize: 9, fill: theme.muted }} tickLine={false} axisLine={false}
+              tickFormatter={v => `₹${v}`} />
+            <Tooltip
+              contentStyle={{
+                background: theme.card, border: `1px solid ${theme.border}`,
+                borderRadius: 6, fontSize: 11,
+              }}
+              formatter={(v) => [`₹${Number(v).toFixed(2)}`, "Price"]}
+            />
+            <Area type="monotone" dataKey="price" stroke="#22c55e" fill="url(#priceGrad)" strokeWidth={2} dot />
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+      {data.length === 0 && (
+        <div style={{ fontSize: 11, color: theme.muted, marginTop: 6 }}>
+          No intraday history yet — showing entry vs current price.
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function TradeRow({ trade, theme }) {
   const pnl = trade.pnl || 0;
   const pnlPct = trade.pnl_pct || 0;
@@ -179,7 +239,8 @@ function TradeRow({ trade, theme }) {
       borderBottom: `1px solid ${theme.border}`,
       fontSize: 12,
       alignItems: "center",
-    }}>
+      cursor: "pointer",
+    }} onClick={trade.onSelect}>
       <div>
         <span style={{ fontWeight: 700 }}>{trade.symbol}</span>
         <span style={{
@@ -223,6 +284,11 @@ export default function PaperTradingTab({ theme }) {
   const [autoTradeEnabled, setAutoTradeEnabled] = useState(
     () => localStorage.getItem("autoTradeFromSuggestions") !== "false"
   );
+  const [selectedTrade, setSelectedTrade] = useState(null);
+  const [tradeHistory, setTradeHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(null);
+  const [configSaving, setConfigSaving] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -237,6 +303,38 @@ export default function PaperTradingTab({ theme }) {
       setLoading(false);
     }
   }, [filter]);
+
+  const fetchTradeHistory = async (trade) => {
+    if (!trade?.id) return;
+    setSelectedTrade(trade);
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const res = await apiFetch(`/api/paper-trades/${trade.id}/history`);
+      setTradeHistory(res.history || []);
+    } catch (e) {
+      setHistoryError(e.message || "Failed to load history");
+      setTradeHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const updateAutoConfig = async (field, value) => {
+    setConfigSaving(true);
+    setData(prev => prev ? { ...prev, config: { ...prev.config, [field]: value } } : prev);
+    try {
+      await apiFetch("/api/paper-trades/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: value }),
+      });
+    } catch (e) {
+      setError(e.message || "Failed to update config");
+    } finally {
+      setConfigSaving(false);
+    }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -567,14 +665,32 @@ export default function PaperTradingTab({ theme }) {
             <div style={{ textAlign: "center", padding: 32, color: theme.muted, fontSize: 13 }}>
               <div style={{ fontSize: 28, marginBottom: 8 }}>📋</div>
               {filter === "auto"
-                ? "No auto-trades yet. Auto-trades are created when confidence > 80 during market hours."
+                ? `No auto-trades yet. Auto-trades are created when confidence > ${config.score_threshold || 80} during market hours.`
                 : "No paper trades yet. Trades are auto-created from high-conviction scans during market hours."}
             </div>
           ) : (
-            displayTrades.map((t, i) => <TradeRow key={t.id || i} trade={t} theme={theme} />)
+            displayTrades.map((t, i) => (
+              <TradeRow
+                key={t.id || i}
+                trade={{ ...t, onSelect: () => fetchTradeHistory(t) }}
+                theme={theme}
+              />
+            ))
           );
         })()}
       </Card>
+
+      {/* Trade price history viewer */}
+      {(selectedTrade || historyError) && (
+        <div style={{ marginTop: 12 }}>
+          {historyError && (
+            <Card theme={theme} style={{ marginBottom: 8, color: "#ef4444", fontSize: 11 }}>
+              ⚠ {historyError}
+            </Card>
+          )}
+          <TradePriceHistory history={tradeHistory} trade={selectedTrade} theme={theme} loading={historyLoading} />
+        </div>
+      )}
 
       {/* Equity Curve (All trades) */}
       {stats.equity_curve && stats.equity_curve.length > 0 && (
@@ -613,6 +729,48 @@ export default function PaperTradingTab({ theme }) {
           <h3 style={{ margin: "0 0 10px 0", fontSize: 13, color: theme.text, display: "flex", alignItems: "center", gap: 6 }}>
             ⚙ Auto-Trade Configuration
           </h3>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontSize: 11, color: theme.muted }}>
+              Confidence threshold
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
+                <input
+                  type="range"
+                  min={60}
+                  max={100}
+                  value={config.score_threshold || 80}
+                  onChange={(e) => updateAutoConfig("score_threshold", Number(e.target.value))}
+                  style={{ accentColor: "#6366f1" }}
+                />
+                <span style={{ fontWeight: 700, color: theme.text }}>{config.score_threshold || 80}</span>
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: theme.muted }}>
+              ML gates
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={config.ml_bullish_gate || 0.6}
+                  onChange={(e) => updateAutoConfig("ml_bullish_gate", Number(e.target.value))}
+                  style={{ width: 70, padding: 4, borderRadius: 4, border: `1px solid ${theme.border}`, background: theme.bg, color: theme.text }}
+                  title="Bullish ML probability gate"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={config.ml_bearish_gate || 0.4}
+                  onChange={(e) => updateAutoConfig("ml_bearish_gate", Number(e.target.value))}
+                  style={{ width: 70, padding: 4, borderRadius: 4, border: `1px solid ${theme.border}`, background: theme.bg, color: theme.text }}
+                  title="Bearish ML probability gate"
+                />
+                {configSaving && <span style={{ fontSize: 10, color: theme.muted }}>Saving…</span>}
+              </div>
+            </div>
+          </div>
           <div style={{
             display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
             gap: 8, fontSize: 11,
