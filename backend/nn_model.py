@@ -196,8 +196,8 @@ def _load_sequence_data(db_path: str = None):
         )
 
         df.loc[idx, "rsi_14"] = rsi.fillna(50.0)
-        df.loc[idx, "sma_20"] = sma20.fillna(method="ffill").fillna(method="bfill")
-        df.loc[idx, "ema_9"] = ema9.fillna(method="ffill").fillna(method="bfill")
+        df.loc[idx, "sma_20"] = sma20.ffill().bfill()
+        df.loc[idx, "ema_9"] = ema9.ffill().bfill()
         df.loc[idx, "bb_upper_dist"] = upper_dist.replace([np.inf, -np.inf], 0).fillna(0)
         df.loc[idx, "bb_lower_dist"] = lower_dist.replace([np.inf, -np.inf], 0).fillna(0)
         df.loc[idx, "pcr_velocity"] = pcr_vel.replace([np.inf, -np.inf], 0).fillna(0)
@@ -510,8 +510,8 @@ def predict_nn(symbol: str, current_features: dict, db_path: str = None) -> Opti
         )
 
         df_hist["rsi_14"] = rsi.fillna(50.0)
-        df_hist["sma_20"] = sma20.fillna(method="ffill").fillna(method="bfill")
-        df_hist["ema_9"] = ema9.fillna(method="ffill").fillna(method="bfill")
+        df_hist["sma_20"] = sma20.ffill().bfill()
+        df_hist["ema_9"] = ema9.ffill().bfill()
         df_hist["bb_upper_dist"] = upper_dist.replace([np.inf, -np.inf], 0).fillna(0)
         df_hist["bb_lower_dist"] = lower_dist.replace([np.inf, -np.inf], 0).fillna(0)
         df_hist["pcr_velocity"] = pcr_vel.replace([np.inf, -np.inf], 0).fillna(0)

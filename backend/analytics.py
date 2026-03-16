@@ -84,22 +84,19 @@ def _compute_price_indicators(symbol: str, spot: float, timestamp: datetime) -> 
         last_rsi = 100 - (100 / (1 + rs))
 
     # SMA20
-    sma_window = prices[-20:] if prices.size >= 1 else prices
+    sma_window = prices[-20:]
     last_sma20 = float(np.mean(sma_window)) if sma_window.size else last_price
 
     # EMA9 computed iteratively over the last 9 samples (or fewer if not available)
-    ema_values = prices[-9:] if prices.size > 0 else prices
-    if ema_values.size:
-        alpha = 2 / (9 + 1)
-        ema = ema_values[0]
-        for v in ema_values[1:]:
-            ema = (v - ema) * alpha + ema
-        last_ema9 = float(ema)
-    else:
-        last_ema9 = last_price
+    ema_values = prices[-9:]
+    alpha = 2 / (9 + 1) if ema_values.size else 0
+    ema = ema_values[0] if ema_values.size else last_price
+    for v in ema_values[1:]:
+        ema = (v - ema) * alpha + ema
+    last_ema9 = float(ema)
 
     # Bollinger distances based on 20-period window
-    bb_window = prices[-20:] if prices.size else prices
+    bb_window = prices[-20:]
     if bb_window.size:
         mean = float(np.mean(bb_window))
         std = float(np.std(bb_window))
