@@ -205,6 +205,7 @@ class UnifiedEvaluation:
             "unified_signal": unified_signal,
             "unified_confidence": round(unified_confidence, 3),
             "component_scores": normalized_scores,
+            "normalized_scores": normalized_scores,  # Alias for backward compatibility
             "model_agreement": {
                 "signals": model_signals,
                 "agreement_ratio": round(agreement_ratio, 3),
