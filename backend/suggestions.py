@@ -308,7 +308,7 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
             "conviction": conviction,
             "conviction_label": _conviction_label(conviction),
             "score": score,
-            "confidence": round(confidence if confidence is not None else 0, 4),
+            "confidence": round(confidence, 4) if confidence is not None else None,
             "strategy": strategy_info,
             "entry": {
                 "primary_strike": primary_strike,

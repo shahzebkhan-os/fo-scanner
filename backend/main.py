@@ -108,6 +108,9 @@ def _maybe_reset_daily():
         _reset_daily_sets()
 
 
+def _timestamp_suffix() -> str:
+    """Consistent timestamp suffix for generated filenames."""
+    return datetime.now(IST).strftime("%Y%m%d_%H%M%S")
 
 
 import httpx, uvicorn
@@ -873,7 +876,7 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
     if batch_alerts_csv_rows:
         headers = "Symbol,Signal,Stock_Score,Contract,Option_Score,LTP,PCR,Vol_Spike,Reasons"
         csv_content = headers + "\n" + "\n".join(batch_alerts_csv_rows)
-        filename = f"high_confidence_alerts_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv"
+        filename = f"high_confidence_alerts_{_timestamp_suffix()}.csv"
         caption = f"🚀 *{len(batch_alerts_csv_rows)} High Confidence Trades Detected*\nSee attached CSV for details."
         asyncio.create_task(send_telegram_document(filename, csv_content, caption))
         log.info(f"Dispatched {len(batch_alerts_csv_rows)} telegram alerts via batched CSV.")
@@ -1031,8 +1034,8 @@ async def fo_suggestions():
     """
     from .analytics import STRIKE_INTERVALS
     # Use the scan endpoint internally (with cache); limit controls how many symbols are processed
-    full_scan_count = len(INDEX_SYMBOLS) + len(FO_STOCKS)
-    scan_result = await scan_all(limit=full_scan_count)
+    total_symbols = len(INDEX_SYMBOLS) + len(FO_STOCKS)
+    scan_result = await scan_all(limit=total_symbols)
     scan_data = scan_result.get("data", [])
 
     if not scan_data:
@@ -1073,7 +1076,7 @@ async def fo_suggestions():
             for s in suggestions:
                 writer.writerow(suggestion_to_row(s))
             csv_content = buffer.getvalue()
-            filename = f"suggested_trades_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv"
+            filename = f"suggested_trades_{_timestamp_suffix()}.csv"
             caption = f"📊 Latest Suggested Trades ({len(suggestions)})\nIncludes direction & confidence"
             await send_telegram_document(filename, csv_content, caption)
             telegram_dispatched = True
