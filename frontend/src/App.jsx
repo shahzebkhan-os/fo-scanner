@@ -12,12 +12,15 @@ import MLTab from "./components/MLTab";
 import SuggestionsTab from "./components/SuggestionsTab";
 import PaperTradingTab from "./components/PaperTradingTab";
 import TechnicalScoreTab from "./components/TechnicalScoreTab";
+import AccuracyTab from "./components/AccuracyTab";
+import UnifiedEvaluationTab from "./components/UnifiedEvaluationTab";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const API = "http://localhost:8000";   // same-origin; set to http://localhost:8000 for dev
 
 const TABS = [
   { id: "scanner", label: "Scanner", icon: "⚡" },
+  { id: "unified", label: "Market Eval", icon: "🎯" },
   { id: "suggestions", label: "Suggestions", icon: "💡" },
   { id: "paper", label: "Paper Trade", icon: "📝" },
   { id: "chain", label: "Chain", icon: "🔗" },
@@ -28,6 +31,7 @@ const TABS = [
   { id: "straddle", label: "Straddle", icon: "⚖" },
   { id: "ml", label: "ML/NN", icon: "🧠" },
   { id: "techscore", label: "Tech Score", icon: "📊" },
+  { id: "accuracy", label: "Accuracy", icon: "🎯" },
   { id: "backtest", label: "Backtest", icon: "🕰" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
@@ -172,7 +176,8 @@ export default function App() {
               const suggested_trade = pick ? `${pick.strike} ${pick.type}` : "";
               const trade_ltp = pick ? pick.ltp : "";
               const trade_ml_score = pick ? (r.ml_score || 0) : "";
-              const confidence = r.confidence != null ? (r.confidence * 100).toFixed(1) + "%" : "";
+              const confidence_value = r.confidence ?? suggestionMap[r.symbol]?.confidence;
+              const confidence = confidence_value != null ? (confidence_value * 100).toFixed(1) + "%" : "";
               const ls = lotSizes[r.symbol] || 0;
               const lot_value = (pick && ls) ? (pick.ltp * ls).toFixed(2) : "";
 
@@ -261,6 +266,7 @@ export default function App() {
       {/* Content */}
       <main style={{ padding: 16, maxWidth: 1400, margin: "0 auto" }}>
         <div style={{ display: tab === "scanner"   ? "block" : "none" }}><ScannerTab theme={theme} onChain={goChain} onGreeks={goGreeks} onData={setScanData} marketStatus={marketStatus} /></div>
+        <div style={{ display: tab === "unified"   ? "block" : "none" }}><UnifiedEvaluationTab darkMode={darkMode} /></div>
         <div style={{ display: tab === "suggestions" ? "block" : "none" }}><SuggestionsTab theme={theme} goChain={goChain} /></div>
         <div style={{ display: tab === "paper"   ? "block" : "none" }}><PaperTradingTab theme={theme} /></div>
         <div style={{ display: tab === "chain"     ? "block" : "none" }}><ChainTab theme={theme} symbol={chainSymbol} setSymbol={setChainSymbol} /></div>
@@ -271,6 +277,7 @@ export default function App() {
         <div style={{ display: tab === "straddle"  ? "block" : "none" }}><StraddleTab theme={theme} /></div>
         <div style={{ display: tab === "ml"        ? "block" : "none" }}><MLTab theme={theme} /></div>
         <div style={{ display: tab === "techscore" ? "block" : "none" }}><TechnicalScoreTab theme={theme} /></div>
+        <div style={{ display: tab === "accuracy"  ? "block" : "none" }}><AccuracyTab theme={theme} /></div>
         <div style={{ display: tab === "backtest"  ? "block" : "none" }}><BacktestTab theme={theme} /></div>
         <div style={{ display: tab === "settings"  ? "block" : "none" }}><SettingsTab theme={theme} /></div>
       </main>

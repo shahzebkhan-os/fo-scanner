@@ -3,8 +3,6 @@ NSE F&O Option Chain Scanner — Backend v3 (Akamai fix)
 """
 
 import os, time, asyncio, logging, random
-import pandas as pd
-import numpy as np
 from typing import Optional, List
 from datetime import datetime, time as dtime
 import json
@@ -25,6 +23,7 @@ from .suggestions import generate_suggestions
 from . import market_external
 from .signals.global_cues import GlobalCuesSignal
 from .scoring_technical import compute_technical_score
+from .unified_evaluation import get_unified_evaluator
 
 # Module-level GlobalCuesSignal singleton (stateless, safe to share)
 _global_cues_signal = GlobalCuesSignal()
@@ -89,8 +88,11 @@ _traded_today: set  = set()   # "SYMBOL-TYPE-STRIKE-DATE"
 _daily_trade_count: int = 0
 _sector_trade_count: dict = {}  # {sector: count}
 
-MAX_DAILY_AUTO_TRADES = 10
-MAX_SECTOR_TRADES     = 3
+# Auto paper trading caps (None => unlimited)
+MAX_DAILY_AUTO_TRADES = None
+MAX_SECTOR_TRADES     = None
+
+SUGGESTION_SCAN_LIMIT = len(INDEX_SYMBOLS) + len(FO_STOCKS)
 
 def _reset_daily_sets():
     """Called at the start of each new trading day."""
@@ -109,6 +111,9 @@ def _maybe_reset_daily():
         _reset_daily_sets()
 
 
+def _timestamp_suffix() -> str:
+    """Consistent timestamp suffix for generated filenames (IST timezone)."""
+    return datetime.now(IST).strftime("%Y%m%d_%H%M%S")
 
 
 import httpx, uvicorn
@@ -877,10 +882,45 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
                 _apply_global_cues_adjustment(stats, global_cues_result, signal)
                 stock_score = stats["score"]
 
-                # ── Auto paper-trade entry ──────────────────────────────────
-                _handle_auto_trade(symbol, stats, ml_prob, top_picks)
+                # ── Auto paper-trade entry  (thresholds configurable) ───────
+                if (stock_score > AUTO_SCORE_THRESHOLD
+                    and signal != "NEUTRAL"
+                    and (ml_prob is None or (signal == "BULLISH" and ml_prob > AUTO_ML_BULLISH_GATE) or (signal == "BEARISH" and ml_prob < AUTO_ML_BEARISH_GATE))
+                    and stats.get("vol_spike", 0) > 0.4
+                    and is_market_open()
+                    and is_optimal_trade_time()
+                    and _daily_trade_count < MAX_DAILY_AUTO_TRADES):
 
-                # Telegram alerts moved to separate section below
+                    # Sector concentration guard
+                    from .signals_legacy import get_sector
+                    sym_sector = get_sector(symbol)
+                    sector_ct = _sector_trade_count.get(sym_sector, 0)
+
+                    for pick in top_picks:
+                        if _daily_trade_count >= MAX_DAILY_AUTO_TRADES:
+                            break
+                        if sector_ct >= MAX_SECTOR_TRADES:
+                            log.info(f"  ⚠️ Sector cap hit for {sym_sector} — skipping {symbol}")
+                            break
+
+                        # Hard guard: BULLISH → CE only, BEARISH → PE only
+                        if signal == "BULLISH" and pick["type"] != "CE":
+                            continue
+                        if signal == "BEARISH" and pick["type"] != "PE":
+                            continue
+                
+                        trade_uid = f"{symbol}-{pick['type']}-{pick['strike']}-{datetime.now(IST).date()}"
+                        if trade_uid in _traded_today:
+                            continue
+                        _traded_today.add(trade_uid)
+                
+                        reason = f"Auto: {signal} | Score {stock_score} | PCR {stats.get('pcr')}"
+                        auto_lot_size = LOT_SIZES.get(symbol, 1)
+                        db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason, lot_size=auto_lot_size)
+                        _daily_trade_count += 1
+                        _sector_trade_count[sym_sector] = sector_ct + 1
+                        sector_ct += 1
+                        log.info(f"  📝 Auto-trade: {symbol} {pick['type']} {pick['strike']} @ ₹{pick['ltp']} (trade #{_daily_trade_count})")
                 # ── Telegram alerts  (Bug 9 fixed: separate thresholds) ───────
                 if stock_score >= 70 and signal != "NEUTRAL":
                     for pick in top_picks:
@@ -929,7 +969,7 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
     if batch_alerts_csv_rows:
         headers = "Symbol,Signal,Stock_Score,Contract,Option_Score,LTP,PCR,Vol_Spike,Reasons"
         csv_content = headers + "\n" + "\n".join(batch_alerts_csv_rows)
-        filename = f"high_confidence_alerts_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv"
+        filename = f"high_confidence_alerts_{_timestamp_suffix()}.csv"
         caption = f"🚀 *{len(batch_alerts_csv_rows)} High Confidence Trades Detected*\nSee attached CSV for details."
         asyncio.create_task(send_telegram_document(filename, csv_content, caption))
         log.info(f"Dispatched {len(batch_alerts_csv_rows)} telegram alerts via batched CSV.")
@@ -1086,9 +1126,8 @@ async def fo_suggestions():
     Returns ranked strategies with specific strikes, risk/reward, and conviction scores.
     """
     from .analytics import STRIKE_INTERVALS
-
-    # Use the scan endpoint internally (with cache)
-    scan_result = await scan_all(limit=90)
+    # Use the scan endpoint internally (with cache); limit controls how many symbols are processed
+    scan_result = await scan_all(limit=SUGGESTION_SCAN_LIMIT)
     scan_data = scan_result.get("data", [])
 
     if not scan_data:
@@ -1101,12 +1140,61 @@ async def fo_suggestions():
         }
 
     suggestions = generate_suggestions(scan_data, LOT_SIZES, STRIKE_INTERVALS)
+    telegram_dispatched = False
+
+    if suggestions:
+        try:
+            csv_headers = ["Symbol", "Signal", "Score", "Confidence", "Conviction", "Strike", "Type", "Entry", "Target", "Stop"]
+
+            def suggestion_to_row(s: dict) -> list:
+                """Flatten a suggestion dict into csv_headers order; missing numeric fields are emitted as blanks."""
+                def blank(v):
+                    return "" if v is None else v
+
+                entry = s.get("entry", {})
+                rr = s.get("risk_reward", {})
+                symbol = s.get("symbol", "")
+                signal = s.get("signal", "")
+                score = s.get("score")
+                confidence = s.get("confidence")
+                conviction = s.get("conviction")
+                strike = entry.get("primary_strike")
+                opt_type = entry.get("primary_type") or ""
+                entry_price = entry.get("entry_premium")
+                target_price = rr.get("target_price")
+                stop_price = rr.get("stop_loss_price")
+                return [
+                    symbol,
+                    signal,
+                    blank(score),
+                    blank(confidence),
+                    blank(conviction),
+                    blank(strike),
+                    opt_type,
+                    blank(entry_price),
+                    blank(target_price),
+                    blank(stop_price),
+                ]
+
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            writer.writerow(csv_headers)
+            for s in suggestions:
+                writer.writerow(suggestion_to_row(s))
+            csv_content = buffer.getvalue()
+            filename = f"suggested_trades_{_timestamp_suffix()}.csv"
+            caption = f"📊 Latest Suggested Trades ({len(suggestions)})\nIncludes direction & confidence."
+            await send_telegram_document(filename, csv_content, caption)
+            telegram_dispatched = True
+        except Exception as e:
+            log.error(f"Failed to dispatch telegram suggestions: {e}")
 
     return {
         "timestamp": datetime.now().isoformat(),
         "market_status": market_status(),
         "count": len(suggestions),
         "suggestions": suggestions,
+        "telegram_dispatched": telegram_dispatched,
     }
 
 
@@ -1661,6 +1749,175 @@ async def refresh_bulk_deals():
 
 
 
+# ── Unified Market Evaluation ─────────────────────────────────────────────────
+
+@app.get("/api/unified-evaluation")
+async def unified_evaluation(include_technical: bool = False):
+    """
+    Unified market evaluation combining all models (OI-based, technical, ML, OI velocity, global cues).
+    Returns the single best F&O option for each stock with a unified confidence score.
+
+    Args:
+        include_technical: Include technical scoring (slower, default=False)
+
+    Returns:
+        List of evaluations sorted by unified_score descending
+    """
+    try:
+        # Get scan data
+        scan_result = await scan_all(limit=SUGGESTION_SCAN_LIMIT)
+        scan_data = scan_result.get("data", [])
+
+        if not scan_data:
+            return {
+                "timestamp": datetime.now().isoformat(),
+                "market_status": market_status(),
+                "count": 0,
+                "evaluations": [],
+                "message": "No scan data available. Run a scan first.",
+            }
+
+        # Get unified evaluator
+        evaluator = get_unified_evaluator()
+
+        # Evaluate market
+        evaluations = await evaluator.evaluate_market(
+            scan_data=scan_data,
+            include_technical=include_technical,
+        )
+
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "market_status": market_status(),
+            "count": len(evaluations),
+            "evaluations": evaluations,
+            "model_weights": evaluator.WEIGHTS,
+            "description": "Unified evaluation combining OI-based, technical, ML, OI velocity, and global cues models",
+        }
+
+    except Exception as e:
+        log.error(f"Unified evaluation error: {e}", exc_info=True)
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "count": 0,
+            "evaluations": [],
+        }
+
+
+@app.get("/api/unified-evaluation/accuracy")
+async def unified_evaluation_accuracy(
+    min_unified_score: float = 70.0,
+    min_confidence: float = 0.65,
+    days_back: int = 7,
+):
+    """
+    Track accuracy of unified evaluation predictions.
+
+    Args:
+        min_unified_score: Minimum unified score threshold (default 70)
+        min_confidence: Minimum unified confidence threshold (default 0.65)
+        days_back: Number of days to look back (default 7)
+
+    Returns:
+        Accuracy statistics for unified evaluation predictions
+    """
+    try:
+        from .accuracy_tracker import AccuracyTracker
+
+        tracker = AccuracyTracker()
+
+        # Get historical data from market_snapshots table
+        conn = db._conn()
+        cursor = conn.cursor()
+
+        # Query market snapshots with unified evaluation data
+        cursor.execute("""
+            SELECT
+                symbol,
+                snapshot_time,
+                score,
+                signal,
+                confidence,
+                ml_bullish_probability,
+                regime,
+                spot_price,
+                trade_result
+            FROM market_snapshots
+            WHERE snapshot_time >= datetime('now', '-' || ? || ' days')
+            AND score >= ?
+            AND confidence >= ?
+            ORDER BY snapshot_time DESC
+        """, (days_back, min_unified_score * 0.7, min_confidence * 0.7))  # Scale thresholds for OI scores
+
+        snapshots = []
+        for row in cursor.fetchall():
+            snapshots.append({
+                "symbol": row[0],
+                "timestamp": row[1],
+                "score": row[2],
+                "signal": row[3],
+                "confidence": row[4],
+                "ml_probability": row[5],
+                "regime": row[6],
+                "spot_price": row[7],
+                "result": row[8],
+            })
+
+        conn.close()
+
+        # Calculate accuracy metrics
+        total_predictions = len(snapshots)
+        correct = sum(1 for s in snapshots if s["result"] == "WIN")
+        incorrect = sum(1 for s in snapshots if s["result"] == "LOSS")
+        pending = total_predictions - correct - incorrect
+
+        accuracy_pct = (correct / (correct + incorrect) * 100) if (correct + incorrect) > 0 else 0
+
+        # Group by signal
+        by_signal = {}
+        for s in snapshots:
+            signal = s["signal"]
+            if signal not in by_signal:
+                by_signal[signal] = {"total": 0, "correct": 0, "incorrect": 0}
+            by_signal[signal]["total"] += 1
+            if s["result"] == "WIN":
+                by_signal[signal]["correct"] += 1
+            elif s["result"] == "LOSS":
+                by_signal[signal]["incorrect"] += 1
+
+        # Calculate accuracy per signal
+        for signal, stats in by_signal.items():
+            completed = stats["correct"] + stats["incorrect"]
+            stats["accuracy"] = (stats["correct"] / completed * 100) if completed > 0 else 0
+
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "period_days": days_back,
+            "filters": {
+                "min_unified_score": min_unified_score,
+                "min_confidence": min_confidence,
+            },
+            "overall": {
+                "total_predictions": total_predictions,
+                "correct": correct,
+                "incorrect": incorrect,
+                "pending": pending,
+                "accuracy_pct": round(accuracy_pct, 2),
+            },
+            "by_signal": by_signal,
+            "recent_predictions": snapshots[:20],  # Last 20 for display
+        }
+
+    except Exception as e:
+        log.error(f"Unified evaluation accuracy error: {e}", exc_info=True)
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "overall": {"total_predictions": 0, "accuracy_pct": 0},
+        }
+
+
 # ── FII/DII Data ──────────────────────────────────────────────────────────────
 
 @app.get("/api/fii-dii")
@@ -1936,13 +2193,102 @@ async def market_sentiment(refresh: bool = False):
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Accuracy Tracking Endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+from .accuracy_tracker import get_accuracy_tracker
+
+@app.get("/api/accuracy/config")
+async def get_accuracy_config():
+    """Get current accuracy tracking configuration."""
+    tracker = get_accuracy_tracker()
+    return tracker.load_config()
+
+
+@app.post("/api/accuracy/config")
+async def update_accuracy_config(config: dict):
+    """Update accuracy tracking configuration."""
+    tracker = get_accuracy_tracker()
+    tracker.save_config(config)
+    return {"status": "success", "config": config}
+
+
+@app.post("/api/accuracy/start")
+async def start_accuracy_run(run_type: str = "LIVE", start_date: str = None, end_date: str = None):
+    """
+    Start a new accuracy tracking run.
+
+    Args:
+        run_type: 'LIVE' for real-time tracking, 'HISTORICAL' for backtesting
+        start_date: Start date for historical runs (YYYY-MM-DD)
+        end_date: End date for historical runs (YYYY-MM-DD)
+    """
+    tracker = get_accuracy_tracker()
+
+    if run_type == "HISTORICAL":
+        if not start_date or not end_date:
+            raise HTTPException(status_code=400, detail="start_date and end_date required for historical runs")
+
+        # Run historical accuracy test
+        result = tracker.run_historical_accuracy_test(start_date, end_date)
+        return result
+    else:
+        # Start live tracking run
+        run_id = tracker.start_accuracy_run(run_type="LIVE")
+        return {"status": "started", "run_id": run_id, "run_type": "LIVE"}
+
+
+@app.get("/api/accuracy/runs")
+async def get_accuracy_runs(limit: int = 50):
+    """Get list of all accuracy tracking runs."""
+    tracker = get_accuracy_tracker()
+    runs = tracker.get_all_runs(limit=limit)
+    return {"runs": runs}
+
+
+@app.get("/api/accuracy/runs/{run_id}")
+async def get_accuracy_run_detail(run_id: int):
+    """Get detailed summary of a specific accuracy run."""
+    tracker = get_accuracy_tracker()
+    summary = tracker.get_run_summary(run_id)
+
+    if not summary:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    return summary
+
+
+@app.get("/api/accuracy/runs/{run_id}/visualizations")
+async def get_accuracy_visualizations(run_id: int):
+    """Get visualization data for a specific accuracy run."""
+    tracker = get_accuracy_tracker()
+    viz_data = tracker.get_visualization_data(run_id)
+
+    if not viz_data:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    return viz_data
+
+
+@app.post("/api/accuracy/runs/{run_id}/finalize")
+async def finalize_accuracy_run(run_id: int):
+    """Finalize an accuracy run and calculate final statistics."""
+    tracker = get_accuracy_tracker()
+    tracker.finalize_accuracy_run(run_id)
+
+    # Get the updated summary
+    summary = tracker.get_run_summary(run_id)
+    return {"status": "finalized", "summary": summary}
+
+
 # ── Frontend Catch-all ────────────────────────────────────────────────────────
 
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
     if full_path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API route not found")
-    
+
     index_path = os.path.join(dist_path, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
