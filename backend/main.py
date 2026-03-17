@@ -1909,13 +1909,102 @@ async def market_sentiment(refresh: bool = False):
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Accuracy Tracking Endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+from .accuracy_tracker import get_accuracy_tracker
+
+@app.get("/api/accuracy/config")
+async def get_accuracy_config():
+    """Get current accuracy tracking configuration."""
+    tracker = get_accuracy_tracker()
+    return tracker.load_config()
+
+
+@app.post("/api/accuracy/config")
+async def update_accuracy_config(config: dict):
+    """Update accuracy tracking configuration."""
+    tracker = get_accuracy_tracker()
+    tracker.save_config(config)
+    return {"status": "success", "config": config}
+
+
+@app.post("/api/accuracy/start")
+async def start_accuracy_run(run_type: str = "LIVE", start_date: str = None, end_date: str = None):
+    """
+    Start a new accuracy tracking run.
+
+    Args:
+        run_type: 'LIVE' for real-time tracking, 'HISTORICAL' for backtesting
+        start_date: Start date for historical runs (YYYY-MM-DD)
+        end_date: End date for historical runs (YYYY-MM-DD)
+    """
+    tracker = get_accuracy_tracker()
+
+    if run_type == "HISTORICAL":
+        if not start_date or not end_date:
+            raise HTTPException(status_code=400, detail="start_date and end_date required for historical runs")
+
+        # Run historical accuracy test
+        result = tracker.run_historical_accuracy_test(start_date, end_date)
+        return result
+    else:
+        # Start live tracking run
+        run_id = tracker.start_accuracy_run(run_type="LIVE")
+        return {"status": "started", "run_id": run_id, "run_type": "LIVE"}
+
+
+@app.get("/api/accuracy/runs")
+async def get_accuracy_runs(limit: int = 50):
+    """Get list of all accuracy tracking runs."""
+    tracker = get_accuracy_tracker()
+    runs = tracker.get_all_runs(limit=limit)
+    return {"runs": runs}
+
+
+@app.get("/api/accuracy/runs/{run_id}")
+async def get_accuracy_run_detail(run_id: int):
+    """Get detailed summary of a specific accuracy run."""
+    tracker = get_accuracy_tracker()
+    summary = tracker.get_run_summary(run_id)
+
+    if not summary:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    return summary
+
+
+@app.get("/api/accuracy/runs/{run_id}/visualizations")
+async def get_accuracy_visualizations(run_id: int):
+    """Get visualization data for a specific accuracy run."""
+    tracker = get_accuracy_tracker()
+    viz_data = tracker.get_visualization_data(run_id)
+
+    if not viz_data:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    return viz_data
+
+
+@app.post("/api/accuracy/runs/{run_id}/finalize")
+async def finalize_accuracy_run(run_id: int):
+    """Finalize an accuracy run and calculate final statistics."""
+    tracker = get_accuracy_tracker()
+    tracker.finalize_accuracy_run(run_id)
+
+    # Get the updated summary
+    summary = tracker.get_run_summary(run_id)
+    return {"status": "finalized", "summary": summary}
+
+
 # ── Frontend Catch-all ────────────────────────────────────────────────────────
 
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
     if full_path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API route not found")
-    
+
     index_path = os.path.join(dist_path, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)

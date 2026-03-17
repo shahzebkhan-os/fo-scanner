@@ -12,6 +12,7 @@ import MLTab from "./components/MLTab";
 import SuggestionsTab from "./components/SuggestionsTab";
 import PaperTradingTab from "./components/PaperTradingTab";
 import TechnicalScoreTab from "./components/TechnicalScoreTab";
+import AccuracyTab from "./components/AccuracyTab";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const API = "http://localhost:8000";   // same-origin; set to http://localhost:8000 for dev
@@ -28,6 +29,7 @@ const TABS = [
   { id: "straddle", label: "Straddle", icon: "⚖" },
   { id: "ml", label: "ML/NN", icon: "🧠" },
   { id: "techscore", label: "Tech Score", icon: "📊" },
+  { id: "accuracy", label: "Accuracy", icon: "🎯" },
   { id: "backtest", label: "Backtest", icon: "🕰" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
@@ -272,6 +274,7 @@ export default function App() {
         <div style={{ display: tab === "straddle"  ? "block" : "none" }}><StraddleTab theme={theme} /></div>
         <div style={{ display: tab === "ml"        ? "block" : "none" }}><MLTab theme={theme} /></div>
         <div style={{ display: tab === "techscore" ? "block" : "none" }}><TechnicalScoreTab theme={theme} /></div>
+        <div style={{ display: tab === "accuracy"  ? "block" : "none" }}><AccuracyTab theme={theme} /></div>
         <div style={{ display: tab === "backtest"  ? "block" : "none" }}><BacktestTab theme={theme} /></div>
         <div style={{ display: tab === "settings"  ? "block" : "none" }}><SettingsTab theme={theme} /></div>
       </main>
