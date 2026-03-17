@@ -325,8 +325,9 @@ class TestEventCalendar:
         """Test F&O ban list check (most critical)"""
         calendar = EventCalendar()
 
-        # Mock a banned symbol
+        # Mock a banned symbol and set last update to now to avoid refresh
         calendar._fo_ban_list = {"TESTSTOCK"}
+        calendar._fo_ban_last_update = datetime.now()
 
         is_banned = await calendar.is_fo_banned("TESTSTOCK")
         assert is_banned
@@ -352,6 +353,8 @@ class TestEventCalendar:
         )
 
         calendar._corporate_events["RELIANCE"] = [test_event]
+        calendar._corporate_events_last_update = datetime.now()
+        calendar._fo_ban_last_update = datetime.now()
 
         result = await calendar.check_events("RELIANCE")
 
@@ -376,6 +379,8 @@ class TestEventCalendar:
         )
 
         calendar._corporate_events["TCS"] = [test_event]
+        calendar._corporate_events_last_update = datetime.now()
+        calendar._fo_ban_last_update = datetime.now()
 
         result = await calendar.check_events("TCS")
 

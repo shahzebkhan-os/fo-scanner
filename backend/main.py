@@ -2012,7 +2012,7 @@ async def unified_evaluation_export(include_technical: bool = False):
             html_parts.append(f'<td style="font-weight: bold; padding: 4px;">{symbol}</td>')
 
             # Unified Score (with color)
-            html_parts.append(f'<td style="color: {score_color}; font-weight: bold; padding: 4px; text-align: center;">{unified_score:.1f}</td>')
+            html_parts.append(f'<td style="color: {score_color}; font-weight: bold; padding: 4px; text-align: center;">{(unified_score or 0):.1f}</td>')
 
             # Signal (with color)
             html_parts.append(f'<td style="color: {signal_color}; font-weight: bold; padding: 4px; text-align: center;">{unified_signal}</td>')
@@ -2024,19 +2024,19 @@ async def unified_evaluation_export(include_technical: bool = False):
             # Option details
             html_parts.append(f'<td style="padding: 4px; text-align: center;">{best_option.get("type", "")}</td>')
             html_parts.append(f'<td style="padding: 4px; text-align: right;">{best_option.get("strike", "")}</td>')
-            html_parts.append(f'<td style="padding: 4px; text-align: right;">₹{best_option.get("ltp", 0):.2f}</td>')
-            html_parts.append(f'<td style="padding: 4px; text-align: right;">{best_option.get("iv", 0):.1f}%</td>')
-            html_parts.append(f'<td style="padding: 4px; text-align: right;">{best_option.get("delta", 0):.3f}</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">₹{(best_option.get("ltp") or 0):.2f}</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">{(best_option.get("iv") or 0):.1f}%</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">{(best_option.get("delta") or 0):.3f}</td>')
 
             # Risk-reward metrics
             if risk_reward:
-                html_parts.append(f'<td style="padding: 4px; text-align: right; background-color: #dcfce7;">₹{risk_reward.get("target_price", 0):.2f}</td>')
-                html_parts.append(f'<td style="padding: 4px; text-align: right; background-color: #fee2e2;">₹{risk_reward.get("stoploss_price", 0):.2f}</td>')
+                html_parts.append(f'<td style="padding: 4px; text-align: right; background-color: #dcfce7;">₹{(risk_reward.get("target_price") or 0):.2f}</td>')
+                html_parts.append(f'<td style="padding: 4px; text-align: right; background-color: #fee2e2;">₹{(risk_reward.get("stoploss_price") or 0):.2f}</td>')
                 html_parts.append(f'<td style="padding: 4px; text-align: right; font-weight: bold;">{risk_reward.get("lot_size", 0)}</td>')
-                html_parts.append(f'<td style="padding: 4px; text-align: right;">₹{risk_reward.get("capital_required", 0):,.0f}</td>')
-                html_parts.append(f'<td style="padding: 4px; text-align: right; color: #16a34a;">₹{risk_reward.get("potential_profit", 0):,.0f}</td>')
-                html_parts.append(f'<td style="padding: 4px; text-align: right; color: #dc2626;">₹{risk_reward.get("potential_loss", 0):,.0f}</td>')
-                rr_ratio = risk_reward.get("risk_reward_ratio", 0)
+                html_parts.append(f'<td style="padding: 4px; text-align: right;">₹{(risk_reward.get("capital_required") or 0):,.0f}</td>')
+                html_parts.append(f'<td style="padding: 4px; text-align: right; color: #16a34a;">₹{(risk_reward.get("potential_profit") or 0):,.0f}</td>')
+                html_parts.append(f'<td style="padding: 4px; text-align: right; color: #dc2626;">₹{(risk_reward.get("potential_loss") or 0):,.0f}</td>')
+                rr_ratio = risk_reward.get("risk_reward_ratio") or 0
                 rr_color = "#16a34a" if rr_ratio >= 1.5 else "#f59e0b" if rr_ratio >= 1.0 else "#dc2626"
                 html_parts.append(f'<td style="padding: 4px; text-align: center; color: {rr_color}; font-weight: bold;">{rr_ratio:.2f}</td>')
             else:
@@ -2044,8 +2044,8 @@ async def unified_evaluation_export(include_technical: bool = False):
 
             # Market metrics
             html_parts.append(f'<td style="padding: 4px; text-align: center;">{eval_data.get("regime", "")}</td>')
-            html_parts.append(f'<td style="padding: 4px; text-align: right;">{eval_data.get("iv_rank", 0):.1f}</td>')
-            html_parts.append(f'<td style="padding: 4px; text-align: right;">{eval_data.get("pcr", 0):.2f}</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">{(eval_data.get("iv_rank") or 0):.1f}</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">{(eval_data.get("pcr") or 0):.2f}</td>')
             html_parts.append(f'<td style="padding: 4px; text-align: right;">{eval_data.get("days_to_expiry", 0)}</td>')
 
             html_parts.append('</tr>')
@@ -2432,6 +2432,28 @@ async def finalize_accuracy_run(run_id: int):
     # Get the updated summary
     summary = tracker.get_run_summary(run_id)
     return {"status": "finalized", "summary": summary}
+
+
+@app.get("/api/accuracy/today-trades")
+async def get_today_accuracy_trades():
+    """Get all accuracy trades from today."""
+    return {"trades": db.get_all_today_accuracy_trades()}
+
+
+@app.get("/api/accuracy/history-snapshots")
+async def get_accuracy_history_snapshots():
+    """Get the latest accuracy snapshot."""
+    snap = db.get_latest_accuracy_snapshot()
+    if not snap:
+        return {"error": "No snapshots found today", "trades": []}
+    return snap
+
+
+@app.get("/api/accuracy/trade/{trade_id}/history")
+async def get_accuracy_trade_price_history(trade_id: int, limit: int = 50):
+    """Get price history for a specific accuracy trade."""
+    history = db.get_accuracy_trade_history(trade_id)
+    return {"history": history[:limit]}
 
 
 # ── Frontend Catch-all ────────────────────────────────────────────────────────

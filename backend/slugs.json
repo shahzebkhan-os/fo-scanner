@@ -51,7 +51,6 @@
   "BEL": "bharat-electronics-ltd-share-price",
   "DLF": "dlf-ltd-share-price",
   "HAL": "hindustan-aeronautics-ltd-share-price",
-  "IRCTC": "indian-railway-catering-tourism-corporation-ltd-share-price",
   "TATAPOWER": "tata-power-company-ltd-share-price",
   "TATACONSUM": "tata-consumer-products-ltd-share-price",
   "TRENT": "trent-ltd-share-price",
@@ -83,7 +82,6 @@
   "GODREJPROP": "godrej-properties-ltd-share-price",
   "PETRONET": "petronet-lng-ltd-share-price",
   "RBLBANK": "rbl-bank-ltd-share-price",
-  "TATACOMM": "tata-communications-ltd-share-price",
   "INDHOTEL": "indian-hotels-company-ltd-share-price",
   "PAGEIND": "page-industries-ltd-share-price"
 }

@@ -222,6 +222,7 @@ def init_db():
             signal                  TEXT,
             score                   INTEGER DEFAULT 0,
             confidence              REAL DEFAULT 0,
+            ml_bullish_probability  REAL DEFAULT 0,
             regime                  TEXT,
             top_pick_type           TEXT,
             top_pick_strike         REAL DEFAULT 0,
@@ -278,6 +279,7 @@ def init_db():
             ("uoa_detected", "INTEGER DEFAULT 0"),
             ("uoa_strike", "INTEGER"),
             ("uoa_side", "TEXT"),
+            ("ml_bullish_probability", "REAL DEFAULT 0"),
         ]:
             try:
                 c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {defn}")

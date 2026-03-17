@@ -14,8 +14,10 @@ It produces a single best F&O suggestion per stock with a unified confidence sco
 from __future__ import annotations
 
 import logging
+import asyncio
+import numpy as np
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +44,8 @@ class UnifiedEvaluation:
     def __init__(self):
         self.last_evaluation_time = None
         self.cached_evaluations = {}
+        self._technical_cache = {}  # {symbol: (TechnicalScore, timestamp)}
+        self._technical_cache_ttl_minutes = 30
 
     def compute_unified_score(
         self,
@@ -360,11 +364,11 @@ class UnifiedEvaluation:
             },
             "normalized_scores": unified["component_scores"],
             "model_agreement": unified["model_agreement"],
-            "regime": scan_result.get("regime"),
-            "iv_rank": scan_result.get("iv_rank"),
-            "pcr": scan_result.get("pcr"),
-            "spot_price": scan_result.get("ltp"),
-            "days_to_expiry": scan_result.get("days_to_expiry"),
+            "regime": scan_result.get("regime") or "NEUTRAL",
+            "iv_rank": scan_result.get("iv_rank") or 0.0,
+            "pcr": scan_result.get("pcr") or 1.0,
+            "spot_price": scan_result.get("ltp") or 0.0,
+            "days_to_expiry": scan_result.get("days_to_expiry") or 0,
             "signal_reasons": scan_result.get("signal_reasons", []),
         }
 
@@ -425,6 +429,24 @@ class UnifiedEvaluation:
 
         for stock in scan_data:
             symbol = stock.get("symbol")
+            if not symbol:
+                continue
+
+            # Check technical cache first if enabled
+            technical_result = None
+            if include_technical:
+                now = datetime.now()
+                cached_tech, ts = self._technical_cache.get(symbol, (None, None))
+                if cached_tech and (now - ts).total_seconds() < self._technical_cache_ttl_minutes * 60:
+                    technical_result = cached_tech
+                else:
+                    try:
+                        tech_obj = await self._fetch_and_compute_technical(symbol)
+                        if tech_obj:
+                            technical_result = tech_obj.to_dict()
+                            self._technical_cache[symbol] = (technical_result, now)
+                    except Exception as e:
+                        log.warning(f"Failed to compute technical score for {symbol}: {e}")
 
             # GATE 1: F&O Ban Check (CRITICAL - runs first)
             if apply_filters:
@@ -443,14 +465,7 @@ class UnifiedEvaluation:
                     })
                     continue
 
-            # Get technical score if requested
-            technical_result = None
-            if include_technical:
-                try:
-                    from .scoring_technical import compute_technical_score
-                    technical_result = await compute_technical_score(symbol)
-                except Exception as e:
-                    log.warning(f"Failed to compute technical score for {symbol}: {e}")
+            # (Technical result fetched above via cache/helper)
 
             # Select best option with unified scoring
             evaluation = self.select_best_fo_option(stock, technical_result)
@@ -477,6 +492,55 @@ class UnifiedEvaluation:
         self.last_evaluation_time = datetime.now()
 
         return results
+
+    async def _fetch_and_compute_technical(self, symbol: str):
+        """Fetch price data and compute technical score for a symbol."""
+        try:
+            import yfinance as yf
+            from .constants import YFINANCE_TICKER_MAP
+            from .scoring_technical import compute_technical_score
+
+            ticker = YFINANCE_TICKER_MAP.get(symbol, f"{symbol}.NS")
+            
+            # Fetch 15m bars for 5 days (consistent with /api/score-technical)
+            df = await asyncio.to_thread(
+                lambda: yf.download(ticker, period="5d", interval="15m", progress=False)
+            )
+
+            if df is None or df.empty:
+                return None
+
+            # Flatten columns if MultiIndex
+            if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
+                df.columns = df.columns.get_level_values(0)
+
+            def _to_list(series_or_df):
+                if hasattr(series_or_df, "tolist"):
+                    return series_or_df.tolist()
+                if hasattr(series_or_df, "iloc"):
+                    return series_or_df.iloc[:, 0].tolist()
+                return list(series_or_df)
+
+            closes = _to_list(df["Close"].dropna())
+            highs = _to_list(df["High"].dropna())
+            lows = _to_list(df["Low"].dropna())
+            volumes = _to_list(df["Volume"].dropna())
+
+            def _flatten(lst):
+                if lst and isinstance(lst[0], (list, tuple, np.ndarray)):
+                    return [x[0] if hasattr(x, "__len__") and len(x) > 0 else x for x in lst]
+                return lst
+
+            closes = _flatten(closes)
+            highs = _flatten(highs)
+            lows = _flatten(lows)
+            volumes = _flatten(volumes)
+
+            return compute_technical_score(closes, highs, lows, volumes)
+
+        except Exception as e:
+            log.warning(f"Technical fetch failed for {symbol}: {e}")
+            return None
 
     async def _apply_filter_gates(
         self,

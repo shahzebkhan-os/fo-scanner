@@ -762,6 +762,7 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
                 "signal": signal,
                 "score": score,
                 "confidence": confidence,
+                "ml_bullish_probability": 0.5, # Neutral default for historical EOD
                 "regime": regime,
                 "top_pick_type": top_type,
                 "top_pick_strike": top_str,

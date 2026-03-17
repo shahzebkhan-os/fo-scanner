@@ -93,7 +93,7 @@ class EventFilterResult:
                 }
                 for e in self.events
             ],
-            "action": self.action.value if self.action else None,
+            "action": self.action.value if getattr(self, "action", None) else None,
             "confidence_adjustment": self.confidence_adjustment,
             "blocked": self.blocked,
             "message": self.message,
@@ -110,11 +110,11 @@ class EventCalendar:
     def __init__(self):
         # In-memory caches
         self._fo_ban_list: set[str] = set()
-        self._fo_ban_last_update: Optional[datetime] = None
+        self._fo_ban_last_update = datetime(2000, 1, 1)
         self._corporate_events: Dict[str, List[EventInfo]] = defaultdict(list)
-        self._corporate_events_last_update: Optional[datetime] = None
+        self._corporate_events_last_update = datetime(2000, 1, 1)
         self._macro_events: List[EventInfo] = []
-        self._macro_events_last_update: Optional[datetime] = None
+        self._macro_events_last_update = datetime(2000, 1, 1)
 
         # Cache TTLs
         self.FO_BAN_TTL_MINUTES = 30
@@ -270,10 +270,7 @@ class EventCalendar:
         """Refresh F&O ban list cache if stale."""
         now = datetime.now()
 
-        if (
-            self._fo_ban_last_update is None
-            or (now - self._fo_ban_last_update).total_seconds() > self.FO_BAN_TTL_MINUTES * 60
-        ):
+        if (now - self._fo_ban_last_update).total_seconds() > self.FO_BAN_TTL_MINUTES * 60:
             await self._fetch_fo_ban_list()
 
     async def _refresh_events_if_needed(self):
@@ -281,17 +278,11 @@ class EventCalendar:
         now = datetime.now()
 
         # Corporate events (daily refresh)
-        if (
-            self._corporate_events_last_update is None
-            or (now - self._corporate_events_last_update).total_seconds() > self.CORPORATE_TTL_HOURS * 3600
-        ):
+        if (now - self._corporate_events_last_update).total_seconds() > self.CORPORATE_TTL_HOURS * 3600:
             await self._fetch_corporate_events()
 
         # Macro events (weekly refresh)
-        if (
-            self._macro_events_last_update is None
-            or (now - self._macro_events_last_update).total_seconds() > self.MACRO_TTL_DAYS * 86400
-        ):
+        if (now - self._macro_events_last_update).total_seconds() > self.MACRO_TTL_DAYS * 86400:
             await self._fetch_macro_events()
 
     async def _fetch_fo_ban_list(self):
@@ -313,8 +304,14 @@ class EventCalendar:
 
                 # Now fetch the ban list
                 response = await client.get(url, headers=NSE_HEADERS)
-                response.raise_for_status()
+                
+                if response.status_code == 404:
+                    log.info("F&O ban list is currently empty (404 Not Found)")
+                    self._fo_ban_list = set()
+                    self._fo_ban_last_update = datetime.now()
+                    return
 
+                response.raise_for_status()
                 data = response.json()
                 securities = data.get("secban", [])
 
@@ -353,14 +350,20 @@ class EventCalendar:
             url = f"{NSE_BASE}/api/corporates-corporateActions?index=equities&from_date={from_date}&to_date={to_date}"
 
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                # Visit main page first
-                await client.get(f"{NSE_BASE}/market-data/corporate-actions", headers=NSE_HEADERS)
+                # Visit landing page first for cookies - using the correct one for corporate actions
+                landing_url = f"{NSE_BASE}/companies-listing/corporate-filings-actions"
+                await client.get(landing_url, headers=NSE_HEADERS)
 
                 # Fetch actions
                 response = await client.get(url, headers=NSE_HEADERS)
                 response.raise_for_status()
 
-                data = response.json()
+                try:
+                    data = response.json()
+                except Exception as json_err:
+                    log.error(f"Failed to decode corporate actions JSON: {json_err}. Raw content starts with: {response.text[:100]}")
+                    return
+
                 actions = data if isinstance(data, list) else []
 
                 # Parse events

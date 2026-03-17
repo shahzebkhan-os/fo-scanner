@@ -20,9 +20,67 @@ const COLORS = {
   cyan: "#06b6d4"
 };
 
+function DailyTradeCard({ trade, theme }) {
+  const pnl = trade.current_price && trade.entry_price 
+    ? ((trade.current_price - trade.entry_price) / trade.entry_price) * 100 
+    : 0;
+  
+  const isProfit = pnl >= 0;
+
+  return (
+    <div style={{
+      padding: 16,
+      background: theme.card,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center"
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <span style={{ fontWeight: 700, fontSize: 16, color: theme.text }}>{trade.symbol}</span>
+          <span style={{ 
+            fontSize: 10, 
+            padding: "2px 6px", 
+            borderRadius: 4,
+            fontWeight: 700,
+            background: trade.signal === "BULLISH" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)",
+            color: trade.signal === "BULLISH" ? COLORS.success : COLORS.danger
+          }}>
+            {trade.signal}
+          </span>
+          <span style={{ color: theme.muted, fontSize: 12, fontWeight: 500 }}>
+            {trade.strike} {trade.option_type || "CE"}
+          </span>
+        </div>
+        <div style={{ fontSize: 11, color: theme.muted }}>
+          Captured: <b>{trade.snapshot_time ? new Date(trade.snapshot_time.replace(" ", "T")).toLocaleTimeString() : "—"}</b> | Score: <b>{trade.score}</b>
+        </div>
+      </div>
+
+      <div style={{ textAlign: "right", minWidth: 140 }}>
+        <div style={{ fontSize: 10, color: theme.muted, fontWeight: 700, textTransform: "uppercase", marginBottom: 2 }}>Current P&L</div>
+        <div style={{ 
+          fontSize: 22, 
+          fontWeight: 800, 
+          color: isProfit ? COLORS.success : COLORS.danger 
+        }}>
+          {isProfit ? "+" : ""}{pnl.toFixed(2)}%
+        </div>
+        <div style={{ fontSize: 11, color: theme.muted, fontWeight: 500 }}>
+          ₹{trade.entry_price?.toFixed(2)} → <span style={{ color: theme.text }}>₹{trade.current_price?.toFixed(2)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AccuracyTab({ theme }) {
   const [view, setView] = useState("runs");  // runs, newRun, runDetail
+  const [viewMode, setViewMode] = useState("DAILY"); // DAILY or MODEL
   const [runs, setRuns] = useState([]);
+  const [dailyTrades, setDailyTrades] = useState([]);
   const [selectedRun, setSelectedRun] = useState(null);
   const [runDetail, setRunDetail] = useState(null);
   const [visualizations, setVisualizations] = useState(null);
@@ -36,9 +94,24 @@ export default function AccuracyTab({ theme }) {
   const [endDate, setEndDate] = useState("");
 
   useEffect(() => {
-    loadRuns();
+    if (viewMode === "MODEL") loadRuns();
+    if (viewMode === "DAILY") loadDailyTrades();
     loadConfig();
-  }, []);
+  }, [viewMode]);
+
+  const loadDailyTrades = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch(`${API}/api/accuracy/today-trades`);
+      const data = await response.json();
+      setDailyTrades(data.trades || []);
+    } catch (err) {
+      console.error("Failed to load daily trades:", err);
+      setError("Failed to load daily tracking data");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const loadRuns = async () => {
     try {
@@ -138,10 +211,158 @@ export default function AccuracyTab({ theme }) {
     }
   };
 
+  const renderDailySuggestions = () => (
+    <div style={{ padding: 20 }}>
+      {/* View Toggle */}
+      <div style={{ 
+        display: "flex", 
+        gap: 12, 
+        marginBottom: 24,
+        background: theme.bg,
+        padding: 4,
+        borderRadius: 8,
+        width: "fit-content"
+      }}>
+        <button
+          onClick={() => setViewMode("DAILY")}
+          style={{
+            padding: "6px 16px",
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: "pointer",
+            border: "none",
+            background: viewMode === "DAILY" ? theme.card : "transparent",
+            color: viewMode === "DAILY" ? COLORS.primary : theme.muted,
+            boxShadow: viewMode === "DAILY" ? "0 2px 8px rgba(0,0,0,0.1)" : "none",
+            transition: "all 0.2s"
+          }}
+        >
+          Daily Signal Tracking
+        </button>
+        <button
+          onClick={() => setViewMode("MODEL")}
+          style={{
+            padding: "6px 16px",
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: "pointer",
+            border: "none",
+            background: viewMode === "MODEL" ? theme.card : "transparent",
+            color: viewMode === "MODEL" ? COLORS.primary : theme.muted,
+            boxShadow: viewMode === "MODEL" ? "0 2px 8px rgba(0,0,0,0.1)" : "none",
+            transition: "all 0.2s"
+          }}
+        >
+          Model Performance Runs
+        </button>
+      </div>
+
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: 20
+      }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>Real-time Signal Accuracy</h2>
+          <div style={{ fontSize: 12, color: theme.muted, marginTop: 4 }}>
+            Today's top-ranked signals and their intraday premium movement
+          </div>
+        </div>
+        <button
+          onClick={loadDailyTrades}
+          disabled={loading}
+          style={{
+            padding: "8px 16px",
+            background: "transparent",
+            color: COLORS.primary,
+            border: `1px solid ${COLORS.primary}`,
+            borderRadius: 6,
+            cursor: "pointer",
+            fontSize: 13,
+            fontWeight: 600
+          }}
+        >
+          {loading ? "⟳ Refreshing..." : "Refresh Data"}
+        </button>
+      </div>
+
+      {dailyTrades.length === 0 ? (
+        <div style={{
+          padding: 60,
+          textAlign: "center",
+          background: theme.card,
+          borderRadius: 12,
+          border: `1px solid ${theme.border}`
+        }}>
+          <div style={{ fontSize: 40, marginBottom: 16 }}>📊</div>
+          <h3 style={{ margin: "0 0 8px 0" }}>No Data Yet</h3>
+          <p style={{ color: theme.muted, margin: 0, fontSize: 14 }}>
+            Intraday tracking snapshots are captured every 15 minutes during market hours.
+          </p>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 12 }}>
+          {dailyTrades.map((trade) => (
+            <DailyTradeCard key={trade.id} trade={trade} theme={theme} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   // ── Render: Runs List ──────────────────────────────────────────────────────
 
   const renderRunsList = () => (
     <div style={{ padding: 20 }}>
+      {/* View Toggle */}
+      <div style={{ 
+        display: "flex", 
+        gap: 12, 
+        marginBottom: 24,
+        background: theme.bg,
+        padding: 4,
+        borderRadius: 8,
+        width: "fit-content"
+      }}>
+        <button
+          onClick={() => setViewMode("DAILY")}
+          style={{
+            padding: "6px 16px",
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: "pointer",
+            border: "none",
+            background: viewMode === "DAILY" ? theme.card : "transparent",
+            color: viewMode === "DAILY" ? COLORS.primary : theme.muted,
+            boxShadow: viewMode === "DAILY" ? "0 2px 8px rgba(0,0,0,0.1)" : "none",
+            transition: "all 0.2s"
+          }}
+        >
+          Daily Signal Tracking
+        </button>
+        <button
+          onClick={() => setViewMode("MODEL")}
+          style={{
+            padding: "6px 16px",
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: "pointer",
+            border: "none",
+            background: viewMode === "MODEL" ? theme.card : "transparent",
+            color: viewMode === "MODEL" ? COLORS.primary : theme.muted,
+            boxShadow: viewMode === "MODEL" ? "0 2px 8px rgba(0,0,0,0.1)" : "none",
+            transition: "all 0.2s"
+          }}
+        >
+          Model Performance Runs
+        </button>
+      </div>
+
       <div style={{
         display: "flex",
         justifyContent: "space-between",
@@ -918,7 +1139,9 @@ export default function AccuracyTab({ theme }) {
     );
   }
 
-  if (view === "runs") return renderRunsList();
+  if (view === "runs") {
+    return viewMode === "DAILY" ? renderDailySuggestions() : renderRunsList();
+  }
   if (view === "newRun") return renderNewRunForm();
   if (view === "runDetail") return renderRunDetail();
   if (view === "config") return renderConfigEditor();

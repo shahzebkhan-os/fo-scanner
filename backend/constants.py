@@ -7,12 +7,12 @@ FO_STOCKS = [
     "HINDALCO","COALINDIA","VEDL","JSWSTEEL","SAIL","APOLLOHOSP",
     "PIDILITIND","SIEMENS","HAVELLS","VOLTAS",
     # ── Additional F&O stocks ──
-    "BHARTIARTL","BANKBARODA","BEL","DLF","HAL","IRCTC","TATAPOWER",
+    "BHARTIARTL","BANKBARODA","BEL","DLF","HAL","TATAPOWER",
     "TATACONSUM","TRENT","PNB","CANBK","SBILIFE","SBICARD","PFC","RECLTD",
     "BIOCON","LUPIN","JUBLFOOD","LICHSGFIN","MOTHERSON","CHOLAFIN",
     "MUTHOOTFIN","FEDERALBNK","UPL","POLYCAB","SRF","DABUR","GODREJCP",
     "BANDHANBNK","IDFCFIRSTB","INDUSTOWER","NAUKRI","BHARATFORG","COFORGE",
-    "GODREJPROP","PETRONET","RBLBANK","TATACOMM","INDHOTEL","PAGEIND",
+    "GODREJPROP","PETRONET","RBLBANK","INDHOTEL","PAGEIND",
 ]
 INDEX_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
 
@@ -29,20 +29,20 @@ LOT_SIZES = {
     "APOLLOHOSP": 125, "PIDILITIND": 500, "SIEMENS": 150, "HAVELLS": 500, "VOLTAS": 375,
     # ── Additional F&O stocks ──
     "BHARTIARTL": 475, "BANKBARODA": 2925, "BEL": 1950, "DLF": 825, "HAL": 150,
-    "IRCTC": 575, "TATAPOWER": 1350, "TATACONSUM": 500, "TRENT": 75, "PNB": 4000,
+    "TATAPOWER": 1350, "TATACONSUM": 500, "TRENT": 75, "PNB": 4000,
     "CANBK": 4500, "SBILIFE": 375, "SBICARD": 400, "PFC": 1400, "RECLTD": 1500,
     "BIOCON": 1800, "LUPIN": 425, "JUBLFOOD": 1250, "LICHSGFIN": 775, "MOTHERSON": 3200,
     "CHOLAFIN": 375, "MUTHOOTFIN": 250, "FEDERALBNK": 5000, "UPL": 1300, "POLYCAB": 100,
     "SRF": 125, "DABUR": 1250, "GODREJCP": 500, "BANDHANBNK": 2400, "IDFCFIRSTB": 5000,
     "INDUSTOWER": 1600, "NAUKRI": 75, "BHARATFORG": 500, "COFORGE": 75, "GODREJPROP": 225,
-    "PETRONET": 3000, "RBLBANK": 2800, "TATACOMM": 250, "INDHOTEL": 700, "PAGEIND": 15,
+    "PETRONET": 3000, "RBLBANK": 2800, "INDHOTEL": 700, "PAGEIND": 15,
 }
 
 NSE_HEADERS = {
     "User-Agent":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Accept":           "application/json, text/plain, */*",
     "Accept-Language":  "en-US,en;q=0.9",
-    "Accept-Encoding":  "gzip, deflate, br",
+    "Accept-Encoding":  "gzip, deflate",
     "Referer":          "https://www.nseindia.com/option-chain",
     "X-Requested-With": "XMLHttpRequest",
     "sec-ch-ua":        '"Chromium";v="122","Not(A:Brand";v="24","Google Chrome";v="122"',
@@ -110,7 +110,6 @@ SLUG_MAP = {
   "BEL": "bharat-electronics-ltd-share-price",
   "DLF": "dlf-ltd-share-price",
   "HAL": "hindustan-aeronautics-ltd-share-price",
-  "IRCTC": "indian-railway-catering-tourism-corporation-ltd-share-price",
   "TATAPOWER": "tata-power-company-ltd-share-price",
   "TATACONSUM": "tata-consumer-products-ltd-share-price",
   "TRENT": "trent-ltd-share-price",
@@ -142,7 +141,6 @@ SLUG_MAP = {
   "GODREJPROP": "godrej-properties-ltd-share-price",
   "PETRONET": "petronet-lng-ltd-share-price",
   "RBLBANK": "rbl-bank-ltd-share-price",
-  "TATACOMM": "tata-communications-ltd-share-price",
   "INDHOTEL": "indian-hotels-co-ltd-share-price",
   "PAGEIND": "page-industries-ltd-share-price"
 }
