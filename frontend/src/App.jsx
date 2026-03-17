@@ -172,8 +172,8 @@ export default function App() {
               const suggested_trade = pick ? `${pick.strike} ${pick.type}` : "";
               const trade_ltp = pick ? pick.ltp : "";
               const trade_ml_score = pick ? (r.ml_score || 0) : "";
-              const confidenceValue = r.confidence ?? suggestionMap[r.symbol]?.confidence;
-              const confidence = confidenceValue != null ? (confidenceValue * 100).toFixed(1) + "%" : "";
+              const confidence_value = r.confidence ?? suggestionMap[r.symbol]?.confidence;
+              const confidence = confidence_value != null ? (confidence_value * 100).toFixed(1) + "%" : "";
               const ls = lotSizes[r.symbol] || 0;
               const lot_value = (pick && ls) ? (pick.ltp * ls).toFixed(2) : "";
 

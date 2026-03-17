@@ -2,7 +2,7 @@
 NSE F&O Option Chain Scanner — Backend v3 (Akamai fix)
 """
 
-import os, time, asyncio, logging, random
+import os, time, asyncio, logging, random, csv, io
 from typing import Optional, List
 from datetime import datetime, time as dtime
 import json
@@ -1031,10 +1031,10 @@ async def fo_suggestions():
     Returns ranked strategies with specific strikes, risk/reward, and conviction scores.
     """
     from .analytics import STRIKE_INTERVALS
-    all_symbols = INDEX_SYMBOLS + FO_STOCKS
+    unique_symbols = list(dict.fromkeys(INDEX_SYMBOLS + FO_STOCKS))
 
     # Use the scan endpoint internally (with cache)
-    scan_result = await scan_all(limit=len(all_symbols))
+    scan_result = await scan_all(limit=len(unique_symbols))
     scan_data = scan_result.get("data", [])
 
     if not scan_data:
@@ -1051,17 +1051,25 @@ async def fo_suggestions():
 
     if suggestions:
         try:
-            headers = "Symbol,Signal,Score,Confidence,Conviction,Strike,Type,Entry,Target,Stop"
-            rows = []
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            writer.writerow(["Symbol", "Signal", "Score", "Confidence", "Conviction", "Strike", "Type", "Entry", "Target", "Stop"])
             for s in suggestions:
                 entry = s.get("entry", {})
                 rr = s.get("risk_reward", {})
-                rows.append(
-                    f"{s.get('symbol','')},{s.get('signal','')},{s.get('score','')},{s.get('confidence','')},{s.get('conviction','')},"
-                    f"{entry.get('primary_strike','')},{entry.get('primary_type','')},{entry.get('entry_premium','')},"
-                    f"{rr.get('target_price','')},{rr.get('stop_loss_price','')}"
-                )
-            csv_content = headers + "\n" + "\n".join(rows)
+                writer.writerow([
+                    s.get("symbol", ""),
+                    s.get("signal", ""),
+                    s.get("score", ""),
+                    s.get("confidence", ""),
+                    s.get("conviction", ""),
+                    entry.get("primary_strike", ""),
+                    entry.get("primary_type", ""),
+                    entry.get("entry_premium", ""),
+                    rr.get("target_price", ""),
+                    rr.get("stop_loss_price", ""),
+                ])
+            csv_content = buffer.getvalue()
             filename = f"suggested_trades_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv"
             caption = f"📊 Latest Suggested Trades ({len(suggestions)})\nIncludes direction & confidence"
             asyncio.create_task(send_telegram_document(filename, csv_content, caption))
