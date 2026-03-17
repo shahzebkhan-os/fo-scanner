@@ -150,8 +150,9 @@ SLUG_MAP = {
 INDSTOCKS_BASE = "https://stocks.indmoney.com"
 NSE_BASE = "https://www.nseindia.com"
 
-MAX_DAILY_AUTO_TRADES = 10
-MAX_SECTOR_TRADES = 3
+# Auto paper trading caps (None => unlimited)
+MAX_DAILY_AUTO_TRADES = None
+MAX_SECTOR_TRADES = None
 
 # NSE symbol → Yahoo Finance ticker overrides (used by technical scoring)
 YFINANCE_TICKER_MAP = {

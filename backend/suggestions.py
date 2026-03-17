@@ -230,12 +230,6 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
         max_pain = stock.get("max_pain")
         oi_walls = stock.get("oi_walls", {})
 
-        # Only suggest if score >= 60 and we have a directional signal or high-IV neutral
-        if score < 60:
-            continue
-        if signal == "NEUTRAL" and iv_rank < 55:
-            continue
-
         strategy_info = _strategy_for_signal(signal, regime, iv_rank, pcr)
 
         lot_size = lot_sizes.get(symbol, 50)
@@ -311,9 +305,11 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
         suggestion = {
             "symbol": symbol,
             "signal": signal,
+            "direction": signal,
             "conviction": conviction,
             "conviction_label": _conviction_label(conviction),
             "score": score,
+            "confidence": round(confidence or 0, 4),
             "strategy": strategy_info,
             "entry": {
                 "primary_strike": primary_strike,
@@ -358,5 +354,5 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
     # Sort by conviction descending
     suggestions.sort(key=lambda x: x["conviction"], reverse=True)
 
-    # Return top 10 suggestions
-    return suggestions[:10]
+    # Return all suggestions (excel/telegram need full coverage)
+    return suggestions

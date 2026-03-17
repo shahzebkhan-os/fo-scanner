@@ -428,8 +428,8 @@ Centralizes all static configuration:
 | `SLUG_MAP` | Symbol → INDmoney URL slug mapping |
 | `INDSTOCKS_BASE` | IndStocks API base URL |
 | `NSE_BASE` | NSE website base URL |
-| `MAX_DAILY_AUTO_TRADES` | 10 max auto-trades per day |
-| `MAX_SECTOR_TRADES` | 3 max trades per sector per day |
+| `MAX_DAILY_AUTO_TRADES` | Unlimited (no daily cap) |
+| `MAX_SECTOR_TRADES` | Unlimited (no sector cap) |
 
 ---
 
