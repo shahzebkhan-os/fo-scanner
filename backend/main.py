@@ -1031,10 +1031,8 @@ async def fo_suggestions():
     Returns ranked strategies with specific strikes, risk/reward, and conviction scores.
     """
     from .analytics import STRIKE_INTERVALS
-    unique_symbols = list(dict.fromkeys(INDEX_SYMBOLS + FO_STOCKS))
-
     # Use the scan endpoint internally (with cache)
-    scan_result = await scan_all(limit=len(unique_symbols))
+    scan_result = await scan_all(limit=len(INDEX_SYMBOLS) + len(FO_STOCKS))
     scan_data = scan_result.get("data", [])
 
     if not scan_data:
