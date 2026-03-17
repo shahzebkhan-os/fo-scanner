@@ -1918,6 +1918,158 @@ async def unified_evaluation_accuracy(
         }
 
 
+@app.get("/api/unified-evaluation/export")
+async def unified_evaluation_export(include_technical: bool = False):
+    """
+    Export unified market evaluation data as Excel with color-coded formatting.
+    Returns HTML table format that can be opened in Excel.
+
+    Args:
+        include_technical: Include technical scoring (slower, default=False)
+
+    Returns:
+        Excel-formatted HTML table with color-coded cells
+    """
+    try:
+        # Get scan data
+        scan_result = await scan_all(limit=SUGGESTION_SCAN_LIMIT)
+        scan_data = scan_result.get("data", [])
+
+        if not scan_data:
+            return {"error": "No scan data available. Run a scan first."}
+
+        # Get unified evaluator
+        evaluator = get_unified_evaluator()
+
+        # Evaluate market
+        evaluations = await evaluator.evaluate_market(
+            scan_data=scan_data,
+            include_technical=include_technical,
+        )
+
+        if not evaluations:
+            return {"error": "No evaluations available"}
+
+        # Build Excel HTML table
+        html_parts = []
+
+        # Add header with metadata
+        html_parts.append('<table border="1" cellspacing="0" cellpadding="4" style="font-family: Arial, sans-serif; font-size: 11px;">')
+        html_parts.append('<tr>')
+        html_parts.append('<th colspan="20" style="background-color: #2563eb; color: white; font-size: 14px; padding: 10px;">Unified Market Evaluation Export</th>')
+        html_parts.append('</tr>')
+        html_parts.append('<tr>')
+        html_parts.append(f'<th colspan="20" style="background-color: #f1f5f9; font-size: 10px; padding: 5px;">Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | Model Weights: OI={evaluator.WEIGHTS["oi_based"]}, Tech={evaluator.WEIGHTS["technical"]}, ML={evaluator.WEIGHTS["ml_ensemble"]}, OI-Vel={evaluator.WEIGHTS["oi_velocity"]}, Global={evaluator.WEIGHTS["global_cues"]}</th>')
+        html_parts.append('</tr>')
+
+        # Add column headers
+        headers = [
+            "Symbol", "Unified Score", "Signal", "Confidence",
+            "Option Type", "Strike", "LTP", "IV", "Delta",
+            "Target Price", "Stop Loss", "Lot Size",
+            "Capital Required", "Potential Profit", "Potential Loss", "R:R Ratio",
+            "Regime", "IV Rank", "PCR", "Days to Expiry"
+        ]
+        html_parts.append('<tr>')
+        for header in headers:
+            html_parts.append(f'<th style="background-color: #475569; color: white; padding: 6px; font-weight: bold;">{header}</th>')
+        html_parts.append('</tr>')
+
+        # Add data rows with color coding
+        for eval_data in evaluations:
+            symbol = eval_data.get("symbol", "")
+            unified_score = eval_data.get("unified_score", 0)
+            unified_signal = eval_data.get("unified_signal", "NEUTRAL")
+            unified_confidence = eval_data.get("unified_confidence", 0)
+
+            best_option = eval_data.get("best_option", {})
+            risk_reward = eval_data.get("risk_reward", {})
+
+            # Determine row background color based on signal
+            if unified_signal == "BULLISH":
+                row_bg = "#dcfce7"  # Light green
+                signal_color = "#16a34a"  # Dark green
+            elif unified_signal == "BEARISH":
+                row_bg = "#fee2e2"  # Light red
+                signal_color = "#dc2626"  # Dark red
+            else:
+                row_bg = "#f1f5f9"  # Light gray
+                signal_color = "#64748b"  # Dark gray
+
+            # Determine score color
+            if unified_score >= 80:
+                score_color = "#16a34a"  # Dark green
+            elif unified_score >= 70:
+                score_color = "#2563eb"  # Blue
+            elif unified_score >= 60:
+                score_color = "#f59e0b"  # Orange
+            else:
+                score_color = "#dc2626"  # Red
+
+            html_parts.append(f'<tr style="background-color: {row_bg};">')
+
+            # Symbol
+            html_parts.append(f'<td style="font-weight: bold; padding: 4px;">{symbol}</td>')
+
+            # Unified Score (with color)
+            html_parts.append(f'<td style="color: {score_color}; font-weight: bold; padding: 4px; text-align: center;">{unified_score:.1f}</td>')
+
+            # Signal (with color)
+            html_parts.append(f'<td style="color: {signal_color}; font-weight: bold; padding: 4px; text-align: center;">{unified_signal}</td>')
+
+            # Confidence
+            conf_label = "VERY HIGH" if unified_confidence >= 0.85 else "HIGH" if unified_confidence >= 0.75 else "MODERATE" if unified_confidence >= 0.65 else "LOW"
+            html_parts.append(f'<td style="padding: 4px; text-align: center;">{conf_label}</td>')
+
+            # Option details
+            html_parts.append(f'<td style="padding: 4px; text-align: center;">{best_option.get("type", "")}</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">{best_option.get("strike", "")}</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">₹{best_option.get("ltp", 0):.2f}</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">{best_option.get("iv", 0):.1f}%</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">{best_option.get("delta", 0):.3f}</td>')
+
+            # Risk-reward metrics
+            if risk_reward:
+                html_parts.append(f'<td style="padding: 4px; text-align: right; background-color: #dcfce7;">₹{risk_reward.get("target_price", 0):.2f}</td>')
+                html_parts.append(f'<td style="padding: 4px; text-align: right; background-color: #fee2e2;">₹{risk_reward.get("stoploss_price", 0):.2f}</td>')
+                html_parts.append(f'<td style="padding: 4px; text-align: right; font-weight: bold;">{risk_reward.get("lot_size", 0)}</td>')
+                html_parts.append(f'<td style="padding: 4px; text-align: right;">₹{risk_reward.get("capital_required", 0):,.0f}</td>')
+                html_parts.append(f'<td style="padding: 4px; text-align: right; color: #16a34a;">₹{risk_reward.get("potential_profit", 0):,.0f}</td>')
+                html_parts.append(f'<td style="padding: 4px; text-align: right; color: #dc2626;">₹{risk_reward.get("potential_loss", 0):,.0f}</td>')
+                rr_ratio = risk_reward.get("risk_reward_ratio", 0)
+                rr_color = "#16a34a" if rr_ratio >= 1.5 else "#f59e0b" if rr_ratio >= 1.0 else "#dc2626"
+                html_parts.append(f'<td style="padding: 4px; text-align: center; color: {rr_color}; font-weight: bold;">{rr_ratio:.2f}</td>')
+            else:
+                html_parts.append('<td colspan="6" style="padding: 4px; text-align: center; color: #94a3b8;">N/A</td>')
+
+            # Market metrics
+            html_parts.append(f'<td style="padding: 4px; text-align: center;">{eval_data.get("regime", "")}</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">{eval_data.get("iv_rank", 0):.1f}</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">{eval_data.get("pcr", 0):.2f}</td>')
+            html_parts.append(f'<td style="padding: 4px; text-align: right;">{eval_data.get("days_to_expiry", 0)}</td>')
+
+            html_parts.append('</tr>')
+
+        html_parts.append('</table>')
+
+        # Join all parts
+        html_table = ''.join(html_parts)
+
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "count": len(evaluations),
+            "html": html_table,
+            "filename": f"unified_evaluation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xls"
+        }
+
+    except Exception as e:
+        log.error(f"Unified evaluation export error: {e}", exc_info=True)
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }
+
+
 # ── FII/DII Data ──────────────────────────────────────────────────────────────
 
 @app.get("/api/fii-dii")
