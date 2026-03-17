@@ -202,7 +202,7 @@ python -c "from backend.db import init_db; init_db()"
 python backend/backtest_runner.py
 
 # 3. Process new historical data (with validation)
-python backend/historical_loader.py full --start 2024-01-01 --end 2024-03-01
+python backend/historical_loader.py full --start 2023-01-01 --end 2025-12-31
 ```
 
 All improvements are backward compatible and activate automatically!

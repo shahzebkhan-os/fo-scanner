@@ -151,7 +151,7 @@ def download_spot_prices(symbols: list, start_date_str: str, end_date_str: str, 
         "NIFTY":      ["^NSEI"],
         "BANKNIFTY":  ["^NSEBANK"],
         "FINNIFTY":   ["NIFTY_FIN_SERVICE.NS", "^CNXFIN"],
-        "TATAMOTORS": ["TATAMOTORS.NS", "TATAMTRDVR.NS", "TATAMOTORS.BO", "TTM"],
+        "TATAMOTORS": ["TMPV.NS", "TATAMOTORS.NS", "TATAMTRDVR.NS", "TATAMOTORS.BO", "TTM"],
         "MM":         ["M&M.NS", "M&M.BO", "MM.NS"],
     }
 
@@ -471,6 +471,7 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
         Accuracy suffers near expiry without exact tick data.
     """
     snapshots = []
+    prev_spot_map = {}  # Track previous spot for spot_change_pct
 
     # Needs to be sorted chronologically for DTE tracking
     raw_df = raw_df.sort_values(by="trade_date")
@@ -482,8 +483,9 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
     for row in raw_df[["trade_date", "symbol", "strike", "opt_type", "ltp"]].itertuples(index=False):
         price_lookup[(row.trade_date, row.symbol, row.strike, row.opt_type)] = row.ltp
 
-    grouped_days = raw_df.groupby(["trade_date", "symbol"])
-    total_len = len(grouped_days)
+    # Group by symbol first, then trade_date to maintain prev_spot_map context across dates
+    grouped_syms = raw_df.groupby(["symbol", "trade_date"])
+    total_len = len(grouped_syms)
 
     logger.info(f"Reconstructing {total_len} snapshots with progress tracking...")
 
@@ -492,11 +494,23 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
 
     # Use tqdm for better progress visualization
     with tqdm(total=total_len, desc="Processing snapshots", unit="snapshot") as pbar:
-        for i, ((tdate, sym), day_df) in enumerate(grouped_days):
+        for i, ((sym, tdate), day_df) in enumerate(grouped_syms):
             pbar.set_postfix(symbol=sym, date=tdate)
 
             spot_history = spot_prices.get(sym, {})
             spot = spot_history.get(tdate, 0)
+
+            # HEURISTIC: Fix yfinance adjusted prices (e.g. BAJFINANCE 650 -> 6500)
+            # If the spot is ~10x smaller than the strike range, scale it up.
+            if spot > 0 and not day_df.empty:
+                avg_strike = day_df["strike"].median()
+                if avg_strike > 1000 and spot < avg_strike / 5:
+                    spot *= 10.0
+                elif avg_strike > 5000 and spot < avg_strike / 5:
+                    # Some might need even more scaling if multiple splits/dividends
+                    # but usually it's a factor of 10 or similar.
+                    # Best approach: find the strike that minimizes distance to spot*10
+                    pass
 
             # We need a spot price. Without it we cannot calculate metrics.
             if spot == 0:
@@ -515,6 +529,25 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
 
             atm_strike = nearest_atm(spot, sym)
 
+            # Look for LTP with a small search window if exact ATM is untraded
+            def get_traded_ltp(center_strike, opt_type, chain_df):
+                f_row = chain_df[(chain_df["strike"] == center_strike) & (chain_df["opt_type"] == opt_type)]
+                if not f_row.empty and f_row["ltp"].values[0] > 0:
+                    return f_row["ltp"].values[0]
+                # Search nearby strikes
+                nearby = chain_df[chain_df["opt_type"] == opt_type].copy()
+                nearby["dist"] = (nearby["strike"] - center_strike).abs()
+                nearby = nearby[nearby["ltp"] > 0].sort_values("dist")
+                return nearby["ltp"].values[0] if not nearby.empty else 0
+
+            atm_ce_ltp = get_traded_ltp(atm_strike, "CE", chain)
+            atm_pe_ltp = get_traded_ltp(atm_strike, "PE", chain)
+
+            # Spot change pct
+            prev_spot = prev_spot_map.get(sym, spot)
+            spot_change_pct = ((spot - prev_spot) / prev_spot * 100) if prev_spot > 0 else 0
+            prev_spot_map[sym] = spot
+
             # 1. Chain Aggregates
             total_ce_oi = chain[chain["opt_type"] == "CE"]["open_interest"].sum()
             total_pe_oi = chain[chain["opt_type"] == "PE"]["open_interest"].sum()
@@ -523,12 +556,6 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
             total_ce_vol = chain[chain["opt_type"] == "CE"]["volume"].sum()
             total_pe_vol = chain[chain["opt_type"] == "PE"]["volume"].sum()
             pcr_vol = total_pe_vol / max(1, total_ce_vol)
-
-            atm_row_ce = chain[(chain["strike"] == atm_strike) & (chain["opt_type"] == "CE")]
-            atm_row_pe = chain[(chain["strike"] == atm_strike) & (chain["opt_type"] == "PE")]
-
-            atm_ce_ltp = atm_row_ce["ltp"].values[0] if not atm_row_ce.empty else 0
-            atm_pe_ltp = atm_row_pe["ltp"].values[0] if not atm_row_pe.empty else 0
 
             # Max pain - Optimized vectorized calculation (5-10x faster)
             strikes = sorted(chain["strike"].unique())
@@ -660,21 +687,35 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
             else:
                 regime = "NEUTRAL"
 
-            # Simple signal from PCR + skew
-            if pcr_oi > 1.3 and iv_skew > 2:
+            # Align with analytics.py: negative skew (PE < CE IV) is BULLISH, positive skew is BEARISH
+            if pcr_oi > 1.3 and iv_skew < -1.0:
                 signal = "BULLISH"
-            elif pcr_oi < 0.7 and iv_skew < -2:
+            elif pcr_oi < 0.7 and iv_skew > 1.0:
                 signal = "BEARISH"
+            elif is_uoa and vel_conf > 0.4:
+                # Institutional UOA detected - let it drive the signal
+                signal = "BULLISH" if uoa_side == "CE" else "BEARISH"
             else:
                 signal = "NEUTRAL"
             
-            score = min(100, int(50 + (pcr_oi - 1.0) * 30))
+            # Score logic: aligned with analytics.py compute_stock_score_v2 refinement
+            score = 50
+            if signal == "BULLISH":
+                score = min(95, int(50 + (pcr_oi - 1.0) * 20 + (100 - iv_rank)/5 + (vel_conf * 20)))
+            elif signal == "BEARISH":
+                score = min(95, int(50 + (1.0 - pcr_oi) * 20 + (iv_rank/5) + (vel_conf * 20)))
+            
             confidence = min(0.95, oi_conc if dte > 2 else 0.5)
 
-            # Top pick: simple ATM pick
+            # Top pick: use UOA strike if available, otherwise ATM
             top_type = "CE" if signal == "BULLISH" else ("PE" if signal == "BEARISH" else None)
-            top_str = atm_strike
-            top_pr = atm_ce_ltp if top_type == "CE" else (atm_pe_ltp if top_type == "PE" else 0)
+            top_str = uoa_strike if (is_uoa and uoa_side == top_type) else atm_strike
+            
+            if top_type:
+                # Find LTP for the selected top_str
+                top_pr = get_traded_ltp(top_str, top_type, chain)
+            else:
+                top_pr = 0
             oi_concentration_ratio = (top_ce_conc + top_pe_conc) / 2.0
 
             # NEXT DAY OUTCOME LABELLING
@@ -703,7 +744,7 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
                 "symbol": sym,
                 "snapshot_time": f"{tdate} 15:30:00",
                 "spot_price": spot,
-                "spot_change_pct": 0,
+                "spot_change_pct": round(spot_change_pct, 4),
                 "total_ce_oi": total_ce_oi,
                 "total_pe_oi": total_pe_oi,
                 "pcr_oi": pcr_oi,
@@ -730,7 +771,7 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
                 "iv_rank": round(iv_rank, 1),
                 "max_pain_strike": max_pain,
                 "oi_concentration_ratio": round(oi_concentration_ratio, 4),
-                "net_delta_flow": 0,
+                "net_delta_flow": round((0.5 * total_ce_vol - 0.5 * total_pe_vol), 2),
                 "oi_velocity_score": round(raw_vel_score, 4),
                 "oi_velocity_conf": round(vel_conf, 4),
                 "uoa_detected": int(is_uoa),
@@ -739,7 +780,7 @@ def reconstruct_features(raw_df: pd.DataFrame, spot_prices: dict) -> pd.DataFram
                 "outcome_1h": None, "outcome_eod": spot, "outcome_next": out_next,
                 "pick_ltp_1h": None, "pick_ltp_eod": top_pr,
                 "pick_pnl_pct_1h": None, "pick_pnl_pct_eod": 0,
-                "pick_pnl_pct_next": pick_pnl_next,
+                "pick_pnl_pct_next": round(pick_pnl_next, 2),
                 "trade_result": trade_res,
                 "data_source": "EOD_HISTORICAL"
             }

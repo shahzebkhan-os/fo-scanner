@@ -236,18 +236,18 @@ def _load_training_data(db_path: str = None) -> tuple:
 
     # ── Label construction ────────────────────────────────────────────────
     # Primary: use trade_result when available (direct profitability signal).
-    df["label"] = np.nan
+    df = df.assign(label=np.nan)
     df.loc[df["trade_result"] == "WIN", "label"] = 1.0
     df.loc[df["trade_result"] == "LOSS", "label"] = 0.0
 
     # Fallback: next-bar spot direction for rows without a clear trade result.
-    df["next_spot"] = df.groupby("symbol")["spot_price"].shift(-1)
+    df = df.assign(next_spot=df.groupby("symbol")["spot_price"].shift(-1))
     spot_label = (df["next_spot"] > df["spot_price"]).astype(float)
     fallback_mask = df["label"].isna() & df["next_spot"].notna()
     df.loc[fallback_mask, "label"] = spot_label[fallback_mask]
 
     df = df.dropna(subset=["label"])
-    df["label"] = df["label"].astype(np.int32)
+    df.loc[:, "label"] = df["label"].astype(np.int32)
 
     # ── Regime encoding ────────────────────────────────────────────────────
     df["regime_encoded"] = (

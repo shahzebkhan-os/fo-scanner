@@ -146,6 +146,7 @@ def _load_sequence_data(db_path: str = None):
                  ELSE 0 END                                                 AS max_pain_dist_pct,
             regime,
             spot_price,
+            COALESCE(trade_result, '')                                      AS trade_result,
             symbol,
             snapshot_time
         FROM market_snapshots
@@ -203,16 +204,16 @@ def _load_sequence_data(db_path: str = None):
         df.loc[idx, "pcr_velocity"] = pcr_vel.replace([np.inf, -np.inf], 0).fillna(0)
 
     # ── Label construction (mirrors ml_model.py) ──────────────────────────
-    df["label"] = np.nan
-    df.loc[df.get("trade_result", pd.Series(dtype=str)) == "WIN", "label"] = 1.0
-    df.loc[df.get("trade_result", pd.Series(dtype=str)) == "LOSS", "label"] = 0.0
+    df = df.assign(label=np.nan)
+    df.loc[df["trade_result"] == "WIN", "label"] = 1.0
+    df.loc[df["trade_result"] == "LOSS", "label"] = 0.0
 
-    df["next_spot"] = df.groupby("symbol")["spot_price"].shift(-1)
+    df = df.assign(next_spot=df.groupby("symbol")["spot_price"].shift(-1))
     spot_label = (df["next_spot"] > df["spot_price"]).astype(float)
     fallback_mask = df["label"].isna() & df["next_spot"].notna()
     df.loc[fallback_mask, "label"] = spot_label[fallback_mask]
     df = df.dropna(subset=["label"])
-    df["label"] = df["label"].astype(int)
+    df.loc[:, "label"] = df["label"].astype(np.int32)
 
     df["regime_encoded"] = (
         df["regime"]
