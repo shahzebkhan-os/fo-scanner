@@ -445,7 +445,7 @@ export default function PaperTradingTab({ theme }) {
                 fontSize: 9, padding: "2px 6px", borderRadius: 4,
                 background: "rgba(99,102,241,.08)", color: "#6366f1",
               }}>
-                Today: {config.daily_trades_today}/{config.max_daily_trades || "∞"}
+                Today: {config.daily_trades_today}/{config.max_daily_trades ?? "∞"}
               </span>
             )}
           </div>
@@ -789,11 +789,11 @@ export default function PaperTradingTab({ theme }) {
             </div>
             <div style={{ padding: 8, borderRadius: 6, background: "rgba(245,158,11,.05)" }}>
               <div style={{ color: theme.muted, marginBottom: 2 }}>Max Daily Trades</div>
-              <div style={{ fontWeight: 700, color: theme.text }}>{config.max_daily_trades || "—"}</div>
+              <div style={{ fontWeight: 700, color: theme.text }}>{config.max_daily_trades ?? "∞"}</div>
             </div>
             <div style={{ padding: 8, borderRadius: 6, background: "rgba(99,102,241,.05)" }}>
               <div style={{ color: theme.muted, marginBottom: 2 }}>Max Sector Trades</div>
-              <div style={{ fontWeight: 700, color: theme.text }}>{config.max_sector_trades || "—"}</div>
+              <div style={{ fontWeight: 700, color: theme.text }}>{config.max_sector_trades ?? "∞"}</div>
             </div>
             <div style={{ padding: 8, borderRadius: 6, background: "rgba(139,92,246,.05)" }}>
               <div style={{ color: theme.muted, marginBottom: 2 }}>Trades Today</div>
