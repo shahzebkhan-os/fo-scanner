@@ -1056,11 +1056,14 @@ async def fo_suggestions():
             csv_headers = ["Symbol", "Signal", "Score", "Confidence", "Conviction", "Strike", "Type", "Entry", "Target", "Stop"]
 
             def suggestion_to_row(s: dict) -> list:
-                """Flatten a suggestion dict into the csv_headers order: [Symbol, Signal, Score, Confidence, Conviction, Strike, Type, Entry, Target, Stop]."""
+                """Flatten a suggestion dict into csv_headers order; missing numeric fields are emitted as blanks."""
+                def blank(v):
+                    return "" if v is None else v
+
                 entry = s.get("entry", {})
                 rr = s.get("risk_reward", {})
-                symbol = s.get("symbol") or ""
-                signal = s.get("signal") or ""
+                symbol = s.get("symbol", "")
+                signal = s.get("signal", "")
                 score = s.get("score")
                 confidence = s.get("confidence")
                 conviction = s.get("conviction")
@@ -1072,14 +1075,14 @@ async def fo_suggestions():
                 return [
                     symbol,
                     signal,
-                    score,
-                    confidence,
-                    conviction,
-                    strike,
+                    blank(score),
+                    blank(confidence),
+                    blank(conviction),
+                    blank(strike),
                     opt_type,
-                    entry_price,
-                    target_price,
-                    stop_price,
+                    blank(entry_price),
+                    blank(target_price),
+                    blank(stop_price),
                 ]
 
             buffer = io.StringIO()
@@ -1089,7 +1092,7 @@ async def fo_suggestions():
                 writer.writerow(suggestion_to_row(s))
             csv_content = buffer.getvalue()
             filename = f"suggested_trades_{_timestamp_suffix()}.csv"
-            caption = f"📊 Latest Suggested Trades ({len(suggestions)})\nIncludes direction & confidence"
+            caption = f"📊 Latest Suggested Trades ({len(suggestions)})\nIncludes direction & confidence."
             await send_telegram_document(filename, csv_content, caption)
             telegram_dispatched = True
         except Exception as e:
