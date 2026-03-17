@@ -23,6 +23,7 @@ from .suggestions import generate_suggestions
 from . import market_external
 from .signals.global_cues import GlobalCuesSignal
 from .scoring_technical import compute_technical_score
+from .unified_evaluation import get_unified_evaluator
 
 # Module-level GlobalCuesSignal singleton (stateless, safe to share)
 _global_cues_signal = GlobalCuesSignal()
@@ -1656,6 +1657,175 @@ async def refresh_bulk_deals():
     deals = await Signals.fetch_bulk_deals()
     return {"status": "ok", "fetched": len(deals)}
 
+
+
+# ── Unified Market Evaluation ─────────────────────────────────────────────────
+
+@app.get("/api/unified-evaluation")
+async def unified_evaluation(include_technical: bool = False):
+    """
+    Unified market evaluation combining all models (OI-based, technical, ML, OI velocity, global cues).
+    Returns the single best F&O option for each stock with a unified confidence score.
+
+    Args:
+        include_technical: Include technical scoring (slower, default=False)
+
+    Returns:
+        List of evaluations sorted by unified_score descending
+    """
+    try:
+        # Get scan data
+        scan_result = await scan_all(limit=SUGGESTION_SCAN_LIMIT)
+        scan_data = scan_result.get("data", [])
+
+        if not scan_data:
+            return {
+                "timestamp": datetime.now().isoformat(),
+                "market_status": market_status(),
+                "count": 0,
+                "evaluations": [],
+                "message": "No scan data available. Run a scan first.",
+            }
+
+        # Get unified evaluator
+        evaluator = get_unified_evaluator()
+
+        # Evaluate market
+        evaluations = await evaluator.evaluate_market(
+            scan_data=scan_data,
+            include_technical=include_technical,
+        )
+
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "market_status": market_status(),
+            "count": len(evaluations),
+            "evaluations": evaluations,
+            "model_weights": evaluator.WEIGHTS,
+            "description": "Unified evaluation combining OI-based, technical, ML, OI velocity, and global cues models",
+        }
+
+    except Exception as e:
+        log.error(f"Unified evaluation error: {e}", exc_info=True)
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "count": 0,
+            "evaluations": [],
+        }
+
+
+@app.get("/api/unified-evaluation/accuracy")
+async def unified_evaluation_accuracy(
+    min_unified_score: float = 70.0,
+    min_confidence: float = 0.65,
+    days_back: int = 7,
+):
+    """
+    Track accuracy of unified evaluation predictions.
+
+    Args:
+        min_unified_score: Minimum unified score threshold (default 70)
+        min_confidence: Minimum unified confidence threshold (default 0.65)
+        days_back: Number of days to look back (default 7)
+
+    Returns:
+        Accuracy statistics for unified evaluation predictions
+    """
+    try:
+        from .accuracy_tracker import AccuracyTracker
+
+        tracker = AccuracyTracker()
+
+        # Get historical data from market_snapshots table
+        conn = db._conn()
+        cursor = conn.cursor()
+
+        # Query market snapshots with unified evaluation data
+        cursor.execute("""
+            SELECT
+                symbol,
+                snapshot_time,
+                score,
+                signal,
+                confidence,
+                ml_bullish_probability,
+                regime,
+                spot_price,
+                trade_result
+            FROM market_snapshots
+            WHERE snapshot_time >= datetime('now', '-' || ? || ' days')
+            AND score >= ?
+            AND confidence >= ?
+            ORDER BY snapshot_time DESC
+        """, (days_back, min_unified_score * 0.7, min_confidence * 0.7))  # Scale thresholds for OI scores
+
+        snapshots = []
+        for row in cursor.fetchall():
+            snapshots.append({
+                "symbol": row[0],
+                "timestamp": row[1],
+                "score": row[2],
+                "signal": row[3],
+                "confidence": row[4],
+                "ml_probability": row[5],
+                "regime": row[6],
+                "spot_price": row[7],
+                "result": row[8],
+            })
+
+        conn.close()
+
+        # Calculate accuracy metrics
+        total_predictions = len(snapshots)
+        correct = sum(1 for s in snapshots if s["result"] == "WIN")
+        incorrect = sum(1 for s in snapshots if s["result"] == "LOSS")
+        pending = total_predictions - correct - incorrect
+
+        accuracy_pct = (correct / (correct + incorrect) * 100) if (correct + incorrect) > 0 else 0
+
+        # Group by signal
+        by_signal = {}
+        for s in snapshots:
+            signal = s["signal"]
+            if signal not in by_signal:
+                by_signal[signal] = {"total": 0, "correct": 0, "incorrect": 0}
+            by_signal[signal]["total"] += 1
+            if s["result"] == "WIN":
+                by_signal[signal]["correct"] += 1
+            elif s["result"] == "LOSS":
+                by_signal[signal]["incorrect"] += 1
+
+        # Calculate accuracy per signal
+        for signal, stats in by_signal.items():
+            completed = stats["correct"] + stats["incorrect"]
+            stats["accuracy"] = (stats["correct"] / completed * 100) if completed > 0 else 0
+
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "period_days": days_back,
+            "filters": {
+                "min_unified_score": min_unified_score,
+                "min_confidence": min_confidence,
+            },
+            "overall": {
+                "total_predictions": total_predictions,
+                "correct": correct,
+                "incorrect": incorrect,
+                "pending": pending,
+                "accuracy_pct": round(accuracy_pct, 2),
+            },
+            "by_signal": by_signal,
+            "recent_predictions": snapshots[:20],  # Last 20 for display
+        }
+
+    except Exception as e:
+        log.error(f"Unified evaluation accuracy error: {e}", exc_info=True)
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "overall": {"total_predictions": 0, "accuracy_pct": 0},
+        }
 
 
 # ── FII/DII Data ──────────────────────────────────────────────────────────────
