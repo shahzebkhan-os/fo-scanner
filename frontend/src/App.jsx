@@ -266,7 +266,7 @@ export default function App() {
       {/* Content */}
       <main style={{ padding: 16, maxWidth: 1400, margin: "0 auto" }}>
         <div style={{ display: tab === "scanner"   ? "block" : "none" }}><ScannerTab theme={theme} onChain={goChain} onGreeks={goGreeks} onData={setScanData} marketStatus={marketStatus} /></div>
-        <div style={{ display: tab === "unified"   ? "block" : "none" }}><UnifiedEvaluationTab darkMode={darkMode} /></div>
+        <div style={{ display: tab === "unified"   ? "block" : "none" }}><UnifiedEvaluationTab darkMode={dark} /></div>
         <div style={{ display: tab === "suggestions" ? "block" : "none" }}><SuggestionsTab theme={theme} goChain={goChain} /></div>
         <div style={{ display: tab === "paper"   ? "block" : "none" }}><PaperTradingTab theme={theme} /></div>
         <div style={{ display: tab === "chain"     ? "block" : "none" }}><ChainTab theme={theme} symbol={chainSymbol} setSymbol={setChainSymbol} /></div>
