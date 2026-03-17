@@ -384,13 +384,23 @@ class UnifiedEvaluation:
         self,
         scan_data: List[Dict],
         include_technical: bool = True,
+        apply_filters: bool = True,
     ) -> List[Dict]:
         """
         Evaluate entire market and return best F&O option per stock with unified scoring.
 
+        Now includes 5 filter gates for improved win rate:
+        1. F&O Ban Check (Gate 1)
+        2. Time of Day Filter (Gate 2)
+        3. Market Regime Override (Gate 3)
+        4. Event Blackout (Gate 4)
+        5. Signal Quality (Gate 5)
+        6. Signal Persistence (Gate 6)
+
         Args:
             scan_data: List of scan results from /api/scan
             include_technical: Whether to include technical scoring (slower)
+            apply_filters: Whether to apply the 5 filter gates (default True)
 
         Returns:
             List of unified evaluation results, sorted by unified_score descending
@@ -398,8 +408,39 @@ class UnifiedEvaluation:
 
         results = []
 
+        # Import filter modules
+        if apply_filters:
+            from .filters.signal_quality import get_signal_quality_filter
+            from .filters.time_of_day import get_time_of_day_filter
+            from .filters.regime_override import get_regime_override_filter
+            from .filters.event_calendar import get_event_calendar
+            from .filters.signal_persistence import get_signal_persistence_cache
+
+            quality_filter = get_signal_quality_filter()
+            time_filter = get_time_of_day_filter()
+            regime_filter = get_regime_override_filter()
+            event_calendar = get_event_calendar()
+            persistence_cache = get_signal_persistence_cache()
+
         for stock in scan_data:
             symbol = stock.get("symbol")
+
+            # GATE 1: F&O Ban Check (CRITICAL - runs first)
+            if apply_filters:
+                is_banned = await event_calendar.is_fo_banned(symbol)
+                if is_banned:
+                    log.info(f"{symbol} on F&O ban list - skipping")
+                    # Add to results as blocked for transparency
+                    results.append({
+                        "symbol": symbol,
+                        "unified_score": 0,
+                        "unified_signal": "BLOCKED",
+                        "unified_confidence": 0,
+                        "blocked": True,
+                        "blocked_reason": "F&O Ban List",
+                        "fo_ban": True,
+                    })
+                    continue
 
             # Get technical score if requested
             technical_result = None
@@ -413,8 +454,21 @@ class UnifiedEvaluation:
             # Select best option with unified scoring
             evaluation = self.select_best_fo_option(stock, technical_result)
 
-            if evaluation:
-                results.append(evaluation)
+            if not evaluation:
+                continue
+
+            # Apply filter gates if enabled
+            if apply_filters:
+                evaluation = await self._apply_filter_gates(
+                    evaluation=evaluation,
+                    quality_filter=quality_filter,
+                    time_filter=time_filter,
+                    regime_filter=regime_filter,
+                    event_calendar=event_calendar,
+                    persistence_cache=persistence_cache,
+                )
+
+            results.append(evaluation)
 
         # Sort by unified score descending
         results.sort(key=lambda x: x["unified_score"], reverse=True)
@@ -422,6 +476,155 @@ class UnifiedEvaluation:
         self.last_evaluation_time = datetime.now()
 
         return results
+
+    async def _apply_filter_gates(
+        self,
+        evaluation: Dict,
+        quality_filter,
+        time_filter,
+        regime_filter,
+        event_calendar,
+        persistence_cache,
+    ) -> Dict:
+        """
+        Apply all 6 filter gates to an evaluation result.
+
+        Gates are applied in order:
+        1. F&O Ban (already checked in evaluate_market)
+        2. Time of Day
+        3. Market Regime Override
+        4. Event Blackout
+        5. Signal Quality
+        6. Signal Persistence
+
+        Args:
+            evaluation: Unified evaluation result dict
+            quality_filter: SignalQualityFilter instance
+            time_filter: TimeOfDayFilter instance
+            regime_filter: RegimeOverrideFilter instance
+            event_calendar: EventCalendar instance
+            persistence_cache: SignalPersistenceCache instance
+
+        Returns:
+            Updated evaluation dict with filter results
+        """
+        symbol = evaluation.get("symbol")
+        unified_score = evaluation.get("unified_score")
+        unified_signal = evaluation.get("unified_signal")
+        unified_confidence = evaluation.get("unified_confidence")
+        best_option = evaluation.get("best_option", {})
+        option_delta = best_option.get("delta")
+        days_to_expiry = evaluation.get("days_to_expiry")
+        regime = evaluation.get("regime")
+        spot_price = evaluation.get("spot_price")
+
+        # Track if signal passes all gates
+        blocked = False
+        blocked_reasons = []
+
+        # GATE 2: Time of Day Filter
+        time_result = None
+        quality_tag = None  # Will be set by Gate 5
+
+        # We'll check time filter after quality filter since it needs quality_tag
+        # For now, get current window info
+        current_time_info = time_filter.get_current_filter(
+            unified_score=unified_score,
+            option_delta=option_delta,
+        )
+
+        # GATE 3: Market Regime Override
+        regime_result = regime_filter.apply_override(
+            regime=regime or "UNKNOWN",
+            signal_direction=unified_signal,
+            option_delta=option_delta,
+            days_to_expiry=days_to_expiry,
+            spot_price=spot_price,
+        )
+
+        if not regime_result.allowed:
+            blocked = True
+            blocked_reasons.append(regime_result.reason)
+
+        # Apply confidence adjustment from regime
+        unified_confidence = min(0.99, max(0.01, unified_confidence + regime_result.confidence_adjustment))
+
+        # GATE 4: Event Blackout
+        event_result = await event_calendar.check_events(symbol)
+
+        if event_result.blocked:
+            blocked = True
+            blocked_reasons.append(event_result.message)
+
+        # Apply confidence adjustment from events
+        unified_confidence = min(0.99, max(0.01, unified_confidence + event_result.confidence_adjustment))
+
+        # GATE 5: Signal Quality
+        risk_reward = evaluation.get("risk_reward", {})
+        model_agreement = evaluation.get("model_agreement", {})
+
+        quality_result = quality_filter.evaluate(
+            unified_score=unified_score,
+            model_agreement_ratio=model_agreement.get("agreement_ratio", 0),
+            unified_confidence=unified_confidence,
+            risk_reward_ratio=risk_reward.get("risk_reward_ratio"),
+            option_volume=best_option.get("volume"),
+            option_avg_volume=best_option.get("avg_volume_20d"),
+            iv_rank=evaluation.get("iv_rank"),
+        )
+
+        quality_tag = quality_result.tag.value
+
+        # BLOCKED or MARGINAL signals are not shown by default
+        if quality_tag in ["BLOCKED", "MARGINAL"]:
+            blocked = True
+            blocked_reasons.append(f"Quality: {quality_tag} ({quality_result.conditions_passed}/{quality_result.total_conditions} conditions passed)")
+
+        # Now check time filter with quality tag
+        time_allowed, time_reason = time_filter.check_signal(
+            quality_tag=quality_tag,
+            unified_score=unified_score,
+            option_delta=option_delta,
+        )
+
+        if not time_allowed:
+            blocked = True
+            blocked_reasons.append(time_reason)
+
+        # GATE 6: Signal Persistence
+        persistence_result = persistence_cache.update_history(
+            symbol=symbol,
+            unified_score=unified_score,
+            signal_direction=unified_signal,
+            quality_tag=quality_tag,
+            unified_confidence=unified_confidence,
+        )
+
+        if not persistence_result.is_actionable:
+            # Building signals are shown but marked as not actionable
+            pass  # Don't block, just mark
+
+        # Update evaluation with filter results
+        evaluation.update({
+            # Original confidence before adjustments
+            "unified_confidence_original": evaluation.get("unified_confidence"),
+            # Updated confidence after regime/event adjustments
+            "unified_confidence": round(unified_confidence, 3),
+            # Filter results
+            "quality_filter": quality_result.to_dict(),
+            "time_filter": current_time_info.to_dict(),
+            "regime_override": regime_result.to_dict(),
+            "event_flag": event_result.to_dict(),
+            "persistence": persistence_result.to_dict(),
+            # Blocking status
+            "blocked": blocked,
+            "blocked_reasons": blocked_reasons,
+            # Quick access fields
+            "quality_tag": quality_tag,
+            "is_actionable": not blocked and persistence_result.is_actionable,
+        })
+
+        return evaluation
 
 
 # Singleton instance
