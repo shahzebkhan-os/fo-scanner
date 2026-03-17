@@ -787,14 +787,13 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
                 stock_score = stats["score"]
 
                 # ── Auto paper-trade entry  (thresholds configurable) ───────
-                limit_reached = MAX_DAILY_AUTO_TRADES is not None and _daily_trade_count >= MAX_DAILY_AUTO_TRADES
                 if (stock_score > AUTO_SCORE_THRESHOLD
                     and signal != "NEUTRAL"
                     and (ml_prob is None or (signal == "BULLISH" and ml_prob > AUTO_ML_BULLISH_GATE) or (signal == "BEARISH" and ml_prob < AUTO_ML_BEARISH_GATE))
                     and stats.get("vol_spike", 0) > 0.4
                     and is_market_open()
                     and is_optimal_trade_time()
-                    and not limit_reached):
+                    and (MAX_DAILY_AUTO_TRADES is None or _daily_trade_count < MAX_DAILY_AUTO_TRADES)):
 
                     # Sector concentration guard (disabled when MAX_SECTOR_TRADES is None)
                     from .signals_legacy import get_sector
@@ -1070,7 +1069,7 @@ async def fo_suggestions():
             csv_content = buffer.getvalue()
             filename = f"suggested_trades_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv"
             caption = f"📊 Latest Suggested Trades ({len(suggestions)})\nIncludes direction & confidence"
-            asyncio.create_task(send_telegram_document(filename, csv_content, caption))
+            await send_telegram_document(filename, csv_content, caption)
             telegram_dispatched = True
         except Exception as e:
             log.error(f"Failed to dispatch telegram suggestions: {e}")

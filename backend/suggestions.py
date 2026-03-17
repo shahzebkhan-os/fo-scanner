@@ -305,7 +305,6 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
         suggestion = {
             "symbol": symbol,
             "signal": signal,
-            "direction": signal,
             "conviction": conviction,
             "conviction_label": _conviction_label(conviction),
             "score": score,
