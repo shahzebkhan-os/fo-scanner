@@ -1030,8 +1030,9 @@ async def fo_suggestions():
     Returns ranked strategies with specific strikes, risk/reward, and conviction scores.
     """
     from .analytics import STRIKE_INTERVALS
-    # Use the scan endpoint internally (with cache)
-    scan_result = await scan_all(limit=len(INDEX_SYMBOLS) + len(FO_STOCKS))
+    # Use the scan endpoint internally (with cache); limit controls how many symbols are processed
+    full_scan_count = len(INDEX_SYMBOLS) + len(FO_STOCKS)
+    scan_result = await scan_all(limit=full_scan_count)
     scan_data = scan_result.get("data", [])
 
     if not scan_data:
@@ -1048,13 +1049,12 @@ async def fo_suggestions():
 
     if suggestions:
         try:
-            buffer = io.StringIO()
-            writer = csv.writer(buffer)
-            writer.writerow(["Symbol", "Signal", "Score", "Confidence", "Conviction", "Strike", "Type", "Entry", "Target", "Stop"])
-            for s in suggestions:
+            csv_headers = ["Symbol", "Signal", "Score", "Confidence", "Conviction", "Strike", "Type", "Entry", "Target", "Stop"]
+
+            def suggestion_to_row(s: dict) -> list:
                 entry = s.get("entry", {})
                 rr = s.get("risk_reward", {})
-                writer.writerow([
+                return [
                     s.get("symbol", ""),
                     s.get("signal", ""),
                     s.get("score", ""),
@@ -1065,7 +1065,13 @@ async def fo_suggestions():
                     entry.get("entry_premium", ""),
                     rr.get("target_price", ""),
                     rr.get("stop_loss_price", ""),
-                ])
+                ]
+
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            writer.writerow(csv_headers)
+            for s in suggestions:
+                writer.writerow(suggestion_to_row(s))
             csv_content = buffer.getvalue()
             filename = f"suggested_trades_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.csv"
             caption = f"📊 Latest Suggested Trades ({len(suggestions)})\nIncludes direction & confidence"
