@@ -91,6 +91,8 @@ _sector_trade_count: dict = {}  # {sector: count}
 MAX_DAILY_AUTO_TRADES = None
 MAX_SECTOR_TRADES     = None
 
+TOTAL_SYMBOL_COUNT = len(INDEX_SYMBOLS) + len(FO_STOCKS)
+
 def _reset_daily_sets():
     """Called at the start of each new trading day."""
     global _traded_today, _daily_trade_count, _sector_trade_count
@@ -109,7 +111,7 @@ def _maybe_reset_daily():
 
 
 def _timestamp_suffix() -> str:
-    """Consistent timestamp suffix for generated filenames."""
+    """Consistent timestamp suffix for generated filenames (IST timezone)."""
     return datetime.now(IST).strftime("%Y%m%d_%H%M%S")
 
 
@@ -1034,8 +1036,7 @@ async def fo_suggestions():
     """
     from .analytics import STRIKE_INTERVALS
     # Use the scan endpoint internally (with cache); limit controls how many symbols are processed
-    total_symbols = len(INDEX_SYMBOLS) + len(FO_STOCKS)
-    scan_result = await scan_all(limit=total_symbols)
+    scan_result = await scan_all(limit=TOTAL_SYMBOL_COUNT)
     scan_data = scan_result.get("data", [])
 
     if not scan_data:
@@ -1055,6 +1056,7 @@ async def fo_suggestions():
             csv_headers = ["Symbol", "Signal", "Score", "Confidence", "Conviction", "Strike", "Type", "Entry", "Target", "Stop"]
 
             def suggestion_to_row(s: dict) -> list:
+                """Flatten a suggestion dict into the csv_headers order."""
                 entry = s.get("entry", {})
                 rr = s.get("risk_reward", {})
                 return [
