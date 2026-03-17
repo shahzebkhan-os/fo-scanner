@@ -24,9 +24,13 @@ from . import market_external
 from .signals.global_cues import GlobalCuesSignal
 from .scoring_technical import compute_technical_score
 from .unified_evaluation import get_unified_evaluator
+from .constants import FO_STOCKS, INDEX_SYMBOLS, LOT_SIZES, SLUG_MAP, YFINANCE_TICKER_MAP
 
 # Module-level GlobalCuesSignal singleton (stateless, safe to share)
 _global_cues_signal = GlobalCuesSignal()
+
+# IST timezone used throughout the module
+IST = ZoneInfo("Asia/Kolkata")
 
 
 def _apply_global_cues_adjustment(stats: dict, gc_result, signal: str) -> dict:
@@ -181,12 +185,8 @@ NSE_HEADERS = {
     "Pragma":           "no-cache",
 }
 
-from .constants import FO_STOCKS, INDEX_SYMBOLS, LOT_SIZES, SLUG_MAP, YFINANCE_TICKER_MAP
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
-
-IST = ZoneInfo("Asia/Kolkata")
 
 
 def _load_auto_trade_config():
