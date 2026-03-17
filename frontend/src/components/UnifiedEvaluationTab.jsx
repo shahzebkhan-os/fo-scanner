@@ -51,6 +51,30 @@ const UnifiedEvaluationTab = ({ darkMode }) => {
     }
   };
 
+  const exportToExcel = async () => {
+    try {
+      const res = await fetch(`${API}/api/unified-evaluation/export?include_technical=${includeTechnical}`);
+      const data = await res.json();
+
+      if (data.error) {
+        alert(`Export failed: ${data.error}`);
+        return;
+      }
+
+      // Create blob from HTML and download
+      const blob = new Blob([data.html], { type: "application/vnd.ms-excel" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = data.filename || "unified_evaluation_export.xls";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to export:", err);
+      alert("Export failed. Please try again.");
+    }
+  };
+
   useEffect(() => {
     fetchEvaluations();
     fetchAccuracy();
@@ -318,6 +342,50 @@ const UnifiedEvaluationTab = ({ darkMode }) => {
             </div>
           </div>
         )}
+
+        {/* Risk-Reward Metrics */}
+        {stock.risk_reward && (
+          <div style={{ marginTop: "15px", padding: "15px", background: bg, borderRadius: "6px", border: `2px solid ${border}` }}>
+            <div style={{ color: mutedText, fontSize: "11px", marginBottom: "10px", fontWeight: "600" }}>RISK-REWARD ANALYSIS</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "15px", marginBottom: "10px" }}>
+              <div style={{ padding: "10px", background: "#dcfce7", borderRadius: "4px" }}>
+                <div style={{ color: "#16a34a", fontSize: "10px", marginBottom: "4px" }}>TARGET PRICE</div>
+                <div style={{ color: "#15803d", fontSize: "16px", fontWeight: "700" }}>₹{stock.risk_reward.target_price}</div>
+                <div style={{ color: "#16a34a", fontSize: "9px" }}>+{stock.risk_reward.target_pct}%</div>
+              </div>
+              <div style={{ padding: "10px", background: "#fee2e2", borderRadius: "4px" }}>
+                <div style={{ color: "#dc2626", fontSize: "10px", marginBottom: "4px" }}>STOP LOSS</div>
+                <div style={{ color: "#b91c1c", fontSize: "16px", fontWeight: "700" }}>₹{stock.risk_reward.stoploss_price}</div>
+                <div style={{ color: "#dc2626", fontSize: "9px" }}>-{stock.risk_reward.stoploss_pct}%</div>
+              </div>
+              <div style={{ padding: "10px", background: "#e0e7ff", borderRadius: "4px" }}>
+                <div style={{ color: "#4f46e5", fontSize: "10px", marginBottom: "4px" }}>RISK:REWARD</div>
+                <div style={{ color: "#3730a3", fontSize: "16px", fontWeight: "700" }}>1:{stock.risk_reward.risk_reward_ratio}</div>
+                <div style={{ color: "#4f46e5", fontSize: "9px" }}>
+                  {stock.risk_reward.risk_reward_ratio >= 1.5 ? "Excellent" : stock.risk_reward.risk_reward_ratio >= 1.0 ? "Good" : "Poor"}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "10px", fontSize: "11px" }}>
+              <div>
+                <div style={{ color: mutedText, fontSize: "10px" }}>Lot Size</div>
+                <div style={{ color: text, fontWeight: "600" }}>{stock.risk_reward.lot_size}</div>
+              </div>
+              <div>
+                <div style={{ color: mutedText, fontSize: "10px" }}>Capital Required</div>
+                <div style={{ color: text, fontWeight: "600" }}>₹{stock.risk_reward.capital_required.toLocaleString()}</div>
+              </div>
+              <div>
+                <div style={{ color: "#16a34a", fontSize: "10px" }}>Potential Profit</div>
+                <div style={{ color: "#16a34a", fontWeight: "600" }}>₹{stock.risk_reward.potential_profit.toLocaleString()}</div>
+              </div>
+              <div>
+                <div style={{ color: "#dc2626", fontSize: "10px" }}>Potential Loss</div>
+                <div style={{ color: "#dc2626", fontWeight: "600" }}>₹{stock.risk_reward.potential_loss.toLocaleString()}</div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -342,6 +410,23 @@ const UnifiedEvaluationTab = ({ darkMode }) => {
             />
             Include Technical (slower)
           </label>
+          <button
+            onClick={exportToExcel}
+            disabled={loading || evaluations.length === 0}
+            style={{
+              padding: "8px 16px",
+              background: "#10b981",
+              color: "white",
+              border: "none",
+              borderRadius: "6px",
+              cursor: (loading || evaluations.length === 0) ? "not-allowed" : "pointer",
+              fontSize: "14px",
+              fontWeight: "600",
+              opacity: (loading || evaluations.length === 0) ? 0.5 : 1,
+            }}
+          >
+            📊 Export to Excel
+          </button>
           <button
             onClick={fetchEvaluations}
             disabled={loading}
