@@ -323,6 +323,7 @@ def add_trade(symbol, opt_type, strike, entry_price, reason="", lot_size=0):
             VALUES (?,?,?,?,?,?)
         """, (symbol, opt_type, float(strike), float(entry_price), reason, lot_size))
         trade_id = cur.lastrowid
+    logger.info(f"✅ Auto-trade SUCCESS: Recorded {symbol} {opt_type} at {strike} (ID: {trade_id})")
     try:
         record_trade_price(trade_id, entry_price)
     except Exception as e:

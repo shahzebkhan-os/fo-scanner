@@ -3,6 +3,8 @@ NSE F&O Option Chain Scanner — Backend v3 (Akamai fix)
 """
 
 import os, time, asyncio, logging, random
+import pandas as pd
+import numpy as np
 from typing import Optional, List
 from datetime import datetime, time as dtime
 import json
@@ -131,6 +133,7 @@ NSE_BASE        = "https://www.nseindia.com"
 AUTO_SCORE_THRESHOLD = int(os.getenv("AUTO_TRADE_SCORE_THRESHOLD", "80"))
 AUTO_ML_BULLISH_GATE = float(os.getenv("AUTO_TRADE_ML_BULLISH", "0.60"))
 AUTO_ML_BEARISH_GATE = float(os.getenv("AUTO_TRADE_ML_BEARISH", "0.40"))
+AUTO_VOL_SPIKE_THRESHOLD = float(os.getenv("AUTO_TRADE_VOL_SPIKE", "0.10"))
 
 async def send_telegram_alert(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
@@ -183,10 +186,11 @@ IST = ZoneInfo("Asia/Kolkata")
 
 def _load_auto_trade_config():
     """Reload persisted auto-trade thresholds after DB init."""
-    global AUTO_SCORE_THRESHOLD, AUTO_ML_BULLISH_GATE, AUTO_ML_BEARISH_GATE
+    global AUTO_SCORE_THRESHOLD, AUTO_ML_BULLISH_GATE, AUTO_ML_BEARISH_GATE, AUTO_VOL_SPIKE_THRESHOLD
     stored_score = db.get_setting("auto_score_threshold", AUTO_SCORE_THRESHOLD)
     stored_bull = db.get_setting("auto_ml_bullish_gate", AUTO_ML_BULLISH_GATE)
     stored_bear = db.get_setting("auto_ml_bearish_gate", AUTO_ML_BEARISH_GATE)
+    stored_vol  = db.get_setting("auto_vol_spike_threshold", AUTO_VOL_SPIKE_THRESHOLD)
     try:
         AUTO_SCORE_THRESHOLD = int(stored_score)
     except (TypeError, ValueError):
@@ -199,6 +203,10 @@ def _load_auto_trade_config():
         AUTO_ML_BEARISH_GATE = float(stored_bear)
     except (TypeError, ValueError):
         log.warning("Invalid auto_ml_bearish_gate setting: %s", stored_bear)
+    try:
+        AUTO_VOL_SPIKE_THRESHOLD = float(stored_vol)
+    except (TypeError, ValueError):
+        log.warning("Invalid auto_vol_spike_threshold setting: %s", stored_vol)
 
 from contextlib import asynccontextmanager
 
@@ -248,8 +256,8 @@ def is_optimal_trade_time() -> bool:
     now = datetime.now(IST).time()
     if now < dtime(9, 30):       # Opening volatility
         return False
-    if dtime(12, 0) <= now < dtime(13, 0):  # Lunch lull
-        return False
+    # if dtime(12, 0) <= now < dtime(13, 0):  # Relaxed for testing: Lunch lull
+    #     return False
     if now >= dtime(15, 0):      # Last 30 mins
         return False
     return True
@@ -647,7 +655,30 @@ async def debug_slugs():
 
 @app.get("/health")
 async def health():
-    return {**market_status(), "status": "ok", "version": "4.0", "time": datetime.now().isoformat()}
+    return {**market_status(), "status": "ok", "version": "4.1", "time": datetime.now().isoformat()}
+
+@app.get("/api/debug/auto-trade")
+async def debug_auto_trade():
+    status = ml_get_status()
+    m_open = is_market_open()
+    o_time = is_optimal_trade_time()
+    return {
+        "model_status": status,
+        "market_open": m_open,
+        "optimal_time": o_time,
+        "thresholds": {
+            "score": AUTO_SCORE_THRESHOLD,
+            "ml_bullish": AUTO_ML_BULLISH_GATE,
+            "ml_bearish": AUTO_ML_BEARISH_GATE,
+            "vol_spike": AUTO_VOL_SPIKE_THRESHOLD,
+        },
+        "globals": {
+            "daily_count": _daily_trade_count,
+            "traded_today_count": len(_traded_today),
+            "sector_counts": _sector_trade_count,
+        },
+        "time_ist": datetime.now(IST).isoformat(),
+    }
 
 
 
@@ -684,6 +715,67 @@ async def debug_indstocks(token: str = Query(...)):
         )
         data = r.json().get("data", [])
         return {"raw": data[:10]}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3.5.  Auto-Trade Entry Logic
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _handle_auto_trade(symbol: str, stats: dict, ml_prob: Optional[float], top_picks: list):
+    """
+    Evaluates auto-trade entry conditions and records trades in DB.
+    Called from both /api/scan and background scheduler loops.
+    """
+    global _daily_trade_count, _sector_trade_count, _traded_today
+
+    stock_score = stats.get("score", 0)
+    signal = stats.get("signal", "NEUTRAL")
+    vol_spike = stats.get("vol_spike", 0)
+
+    # ── Auto paper-trade entry conditions ──────────────────────────────────
+    log.info(f"Auto-trade check: {symbol} score={stock_score} signal={signal} ml={ml_prob} vol={vol_spike}")
+    if (stock_score >= AUTO_SCORE_THRESHOLD
+        and signal != "NEUTRAL"
+        and (ml_prob is None or (signal == "BULLISH" and ml_prob > AUTO_ML_BULLISH_GATE) or (signal == "BEARISH" and ml_prob < AUTO_ML_BEARISH_GATE))
+        and vol_spike >= AUTO_VOL_SPIKE_THRESHOLD
+        and is_market_open()
+        and is_optimal_trade_time()
+        and _daily_trade_count < MAX_DAILY_AUTO_TRADES):
+
+        # Sector concentration guard
+        from .signals_legacy import get_sector
+        sym_sector = get_sector(symbol)
+        sector_ct = _sector_trade_count.get(sym_sector, 0)
+
+        for pick in top_picks:
+            if _daily_trade_count >= MAX_DAILY_AUTO_TRADES:
+                break
+            if sector_ct >= MAX_SECTOR_TRADES:
+                log.info(f"  ⚠️ Sector cap hit for {sym_sector} — skipping {symbol}")
+                break
+
+            # Hard guard: BULLISH → CE only, BEARISH → PE only
+            if signal == "BULLISH" and pick["type"] != "CE":
+                continue
+            if signal == "BEARISH" and pick["type"] != "PE":
+                continue
+    
+            trade_uid = f"{symbol}-{pick['type']}-{pick['strike']}-{datetime.now(IST).date()}"
+            if trade_uid in _traded_today:
+                continue
+            
+            _traded_today.add(trade_uid)
+    
+            reason = f"Auto: {signal} | Score {stock_score} | PCR {stats.get('pcr')}"
+            auto_lot_size = LOT_SIZES.get(symbol, 1)
+            
+            # Persist trade
+            db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason, lot_size=auto_lot_size)
+            
+            _daily_trade_count += 1
+            _sector_trade_count[sym_sector] = sector_ct + 1
+            sector_ct += 1
+            log.info(f"  📝 Auto-trade SUCCESS: {symbol} {pick['type']} {pick['strike']} @ ₹{pick['ltp']} (total trades today: #{_daily_trade_count})")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 4.  /api/scan endpoint  — fixed
@@ -785,45 +877,10 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
                 _apply_global_cues_adjustment(stats, global_cues_result, signal)
                 stock_score = stats["score"]
 
-                # ── Auto paper-trade entry  (thresholds configurable) ───────
-                if (stock_score > AUTO_SCORE_THRESHOLD
-                    and signal != "NEUTRAL"
-                    and (ml_prob is None or (signal == "BULLISH" and ml_prob > AUTO_ML_BULLISH_GATE) or (signal == "BEARISH" and ml_prob < AUTO_ML_BEARISH_GATE))
-                    and stats.get("vol_spike", 0) > 0.4
-                    and is_market_open()
-                    and is_optimal_trade_time()
-                    and _daily_trade_count < MAX_DAILY_AUTO_TRADES):
+                # ── Auto paper-trade entry ──────────────────────────────────
+                _handle_auto_trade(symbol, stats, ml_prob, top_picks)
 
-                    # Sector concentration guard
-                    from .signals_legacy import get_sector
-                    sym_sector = get_sector(symbol)
-                    sector_ct = _sector_trade_count.get(sym_sector, 0)
-
-                    for pick in top_picks:
-                        if _daily_trade_count >= MAX_DAILY_AUTO_TRADES:
-                            break
-                        if sector_ct >= MAX_SECTOR_TRADES:
-                            log.info(f"  ⚠️ Sector cap hit for {sym_sector} — skipping {symbol}")
-                            break
-
-                        # Hard guard: BULLISH → CE only, BEARISH → PE only
-                        if signal == "BULLISH" and pick["type"] != "CE":
-                            continue
-                        if signal == "BEARISH" and pick["type"] != "PE":
-                            continue
-                
-                        trade_uid = f"{symbol}-{pick['type']}-{pick['strike']}-{datetime.now(IST).date()}"
-                        if trade_uid in _traded_today:
-                            continue
-                        _traded_today.add(trade_uid)
-                
-                        reason = f"Auto: {signal} | Score {stock_score} | PCR {stats.get('pcr')}"
-                        auto_lot_size = LOT_SIZES.get(symbol, 1)
-                        db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason, lot_size=auto_lot_size)
-                        _daily_trade_count += 1
-                        _sector_trade_count[sym_sector] = sector_ct + 1
-                        sector_ct += 1
-                        log.info(f"  📝 Auto-trade: {symbol} {pick['type']} {pick['strike']} @ ₹{pick['ltp']} (trade #{_daily_trade_count})")
+                # Telegram alerts moved to separate section below
                 # ── Telegram alerts  (Bug 9 fixed: separate thresholds) ───────
                 if stock_score >= 70 and signal != "NEUTRAL":
                     for pick in top_picks:
@@ -1664,8 +1721,19 @@ async def _internal_scan() -> list:
                 ivr   = db.get_iv_rank(symbol)
                 exp   = recs.get("expiryDates", [""])[0]
                 stats = compute_stock_score(cj, spot, symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
+                
+                # Add ML prediction
+                stats["spot_price"] = float(spot)
+                ml_prob = ml_predict(stats, symbol=symbol)
+                stats["ml_bullish_probability"] = ml_prob
+                
+                # Check for auto-trade triggers in background
+                top_picks = stats.get("top_picks", [])
+                _handle_auto_trade(symbol, stats, ml_prob, top_picks)
+                
                 return {"symbol": symbol, "ltp": spot, **stats}
-            except:
+            except Exception as e:
+                log.error(f"  {symbol}: Background scan error: {e}")
                 return None
 
     raw = await asyncio.gather(*[process(s) for s in all_symbols])
@@ -1739,15 +1807,28 @@ async def score_technical_endpoint(symbol: str):
     if df is None or df.empty:
         raise HTTPException(status_code=404, detail=f"No price data for {symbol}")
 
-    closes = df["Close"].dropna().tolist()
-    highs = df["High"].dropna().tolist()
-    lows = df["Low"].dropna().tolist()
-    volumes = df["Volume"].dropna().tolist()
+    # Flatten columns if MultiIndex (common in newer yfinance versions for single tickers)
+    if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
+        df.columns = df.columns.get_level_values(0)
 
-    # Flatten multi-level columns that yfinance sometimes returns
+    # Ensure we get Series, not DataFrames (in case of duplicate columns or remaining MultiIndex)
+    def _to_list(series_or_df):
+        if hasattr(series_or_df, "tolist"):
+            return series_or_df.tolist()
+        # If it's still a DataFrame, take the first column
+        if hasattr(series_or_df, "iloc"):
+            return series_or_df.iloc[:, 0].tolist()
+        return list(series_or_df)
+
+    closes = _to_list(df["Close"].dropna())
+    highs = _to_list(df["High"].dropna())
+    lows = _to_list(df["Low"].dropna())
+    volumes = _to_list(df["Volume"].dropna())
+
+    # Flatten values if they are nested within another level (extra safety)
     def _flatten(lst):
-        if lst and isinstance(lst[0], (list, tuple)):
-            return [x[0] if isinstance(x, (list, tuple)) else x for x in lst]
+        if lst and isinstance(lst[0], (list, tuple, np.ndarray)):
+            return [x[0] if hasattr(x, "__len__") and len(x) > 0 else x for x in lst]
         return lst
 
     closes = _flatten(closes)
