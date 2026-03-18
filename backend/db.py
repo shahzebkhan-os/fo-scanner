@@ -46,7 +46,8 @@ def init_db():
             exit_time    TEXT,
             pnl          REAL,
             pnl_pct      REAL,
-            lot_size     INTEGER DEFAULT 0
+            lot_size     INTEGER DEFAULT 0,
+            entry_score  INTEGER DEFAULT 0
         );
 
         -- Minute-level price history per paper trade (for charts)
@@ -314,18 +315,18 @@ def record_trade_price(trade_id: Optional[int], price: float):
         )
 
 
-def add_trade(symbol, opt_type, strike, entry_price, reason="", lot_size=0):
+def add_trade(symbol, opt_type, strike, entry_price, reason="", lot_size=0, entry_score=0):
     # Prevent duplicate open trades for the same symbol/type/strike
     if has_open_trade(symbol, opt_type, strike):
         logger.info("Skipped duplicate trade: %s %s %s (already open)", symbol, opt_type, strike)
         return False
     with _conn() as c:
         cur = c.execute("""
-            INSERT INTO paper_trades (symbol, type, strike, entry_price, reason, lot_size)
-            VALUES (?,?,?,?,?,?)
-        """, (symbol, opt_type, float(strike), float(entry_price), reason, lot_size))
+            INSERT INTO paper_trades (symbol, type, strike, entry_price, reason, lot_size, entry_score)
+            VALUES (?,?,?,?,?,?,?)
+        """, (symbol, opt_type, float(strike), float(entry_price), reason, lot_size, int(entry_score)))
         trade_id = cur.lastrowid
-    logger.info(f"✅ Auto-trade SUCCESS: Recorded {symbol} {opt_type} at {strike} (ID: {trade_id})")
+    logger.info(f"✅ Auto-trade SUCCESS: Recorded {symbol} {opt_type} at {strike} (ID: {trade_id}, Score: {entry_score})")
     try:
         record_trade_price(trade_id, entry_price)
     except Exception as e:

@@ -772,10 +772,10 @@ def _handle_auto_trade(symbol: str, stats: dict, ml_prob: Optional[float], top_p
     
             reason = f"Auto: {signal} | Score {stock_score} | PCR {stats.get('pcr')}"
             auto_lot_size = LOT_SIZES.get(symbol, 1)
-            
-            # Persist trade
-            db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason, lot_size=auto_lot_size)
-            
+
+            # Persist trade with entry score
+            db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason, lot_size=auto_lot_size, entry_score=stock_score)
+
             _daily_trade_count += 1
             _sector_trade_count[sym_sector] = sector_ct + 1
             sector_ct += 1
