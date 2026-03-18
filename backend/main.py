@@ -288,7 +288,7 @@ def market_status() -> dict:
 #        Now: OTM (<₹20) uses wider SL; once +25% hit, trailing stop activates
 
 async def paper_trade_manager():
-    """Background task to manage open paper trades with adaptive SL/TP."""
+    """Background task to manage open paper trades with adaptive SL/TP and failure tracking."""
     log.info("Started Paper Trade Manager background loop.")
     while True:
         try:
@@ -297,6 +297,11 @@ async def paper_trade_manager():
             if not is_market_open():
                 await asyncio.sleep(300)    # 5 min sleep when market is closed
                 continue
+
+            # Check for stale trades (no price update for >5 minutes)
+            stale_count = db.check_trade_staleness(max_minutes=5)
+            if stale_count > 0:
+                log.warning(f"⚠️ Marked {stale_count} trades as stale (no price update for >5 min)")
 
             open_trades   = db.get_open_trades()
             tracked_picks = db.get_tracked_picks()
@@ -321,11 +326,26 @@ async def paper_trade_manager():
                 for trade in all_to_check:
                     sym   = trade["symbol"]
                     chain = chain_map.get(sym)
-                    if not chain: continue
+
+                    # Track price fetch failure
+                    if not chain:
+                        if trade["status"] == "OPEN":
+                            db.update_trade_health_failure(trade["id"])
+                            health = db.get_trade_health(trade["id"])
+                            if health and health["health_status"] == "FAILED":
+                                log.warning(f"⚠️ Trade {trade['id']} ({sym} {trade['type']} {trade['strike']}) marked as FAILED after {health['consecutive_fails']} consecutive failures - exiting")
+                                # Auto-exit failing trade at last known price
+                                current_price = trade.get("current_price") or trade.get("entry_price")
+                                db.update_trade(trade["id"], current_price,
+                                              exit_flag=True, reason="Failed Price Updates (3x)")
+                        continue
 
                     records = chain.get("records", {}).get("data", [])
                     spot    = chain.get("records", {}).get("underlyingValue")
-                    if not records or not spot: continue
+                    if not records or not spot:
+                        if trade["status"] == "OPEN":
+                            db.update_trade_health_failure(trade["id"])
+                        continue
 
                     current_price = None
                     for row in records:
@@ -336,7 +356,13 @@ async def paper_trade_manager():
                             break
 
                     if not current_price:
+                        if trade["status"] == "OPEN":
+                            db.update_trade_health_failure(trade["id"])
                         continue
+
+                    # Price fetch successful - mark health as good
+                    if trade["status"] == "OPEN":
+                        db.update_trade_health_success(trade["id"])
 
                     if trade["status"] == "TRACKED":
                         db.update_tracked_pick(trade["id"], current_price, stock_price=spot)
@@ -772,10 +798,10 @@ def _handle_auto_trade(symbol: str, stats: dict, ml_prob: Optional[float], top_p
     
             reason = f"Auto: {signal} | Score {stock_score} | PCR {stats.get('pcr')}"
             auto_lot_size = LOT_SIZES.get(symbol, 1)
-            
-            # Persist trade
-            db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason, lot_size=auto_lot_size)
-            
+
+            # Persist trade with entry score
+            db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason, lot_size=auto_lot_size, entry_score=stock_score)
+
             _daily_trade_count += 1
             _sector_trade_count[sym_sector] = sector_ct + 1
             sector_ct += 1
@@ -1339,6 +1365,45 @@ async def get_auto_trade_accuracy():
             "max_sector_trades": MAX_SECTOR_TRADES,
             "daily_trades_today": _daily_trade_count,
         },
+    }
+
+
+@app.get("/api/paper-trades/health")
+async def get_trades_health():
+    """
+    Get health status of all open trades.
+    Returns summary stats and lists of failing/stale trades.
+    """
+    summary = db.get_trade_health_summary()
+    failing_trades = db.get_failing_trades()
+    stale_trades = db.get_stale_trades()
+
+    return {
+        "summary": summary,
+        "failing_trades": failing_trades,
+        "stale_trades": stale_trades,
+        "timestamp": datetime.now(IST).isoformat(),
+    }
+
+
+@app.get("/api/paper-trades/{trade_id}/health")
+async def get_trade_health_details(trade_id: int):
+    """
+    Get detailed health information for a specific trade.
+    """
+    trade = db.get_trade(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    health = db.get_trade_health(trade_id)
+    if not health:
+        # Initialize health tracking if missing
+        db.init_trade_health(trade_id)
+        health = db.get_trade_health(trade_id)
+
+    return {
+        "trade": trade,
+        "health": health,
     }
 
 
