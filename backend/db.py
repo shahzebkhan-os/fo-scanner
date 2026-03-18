@@ -147,6 +147,17 @@ def init_db():
             reason      TEXT,
             exit_time   TEXT    DEFAULT (datetime('now'))
         );
+        -- ── New: Trade Health Tracking ──────────────────────────────────
+        CREATE TABLE IF NOT EXISTS trade_health (
+            trade_id           INTEGER PRIMARY KEY REFERENCES paper_trades(id) ON DELETE CASCADE,
+            last_price_update  TEXT    DEFAULT (datetime('now')),
+            consecutive_fails  INTEGER DEFAULT 0,
+            total_fails        INTEGER DEFAULT 0,
+            is_stale           BOOLEAN DEFAULT 0,
+            health_status      TEXT    DEFAULT 'HEALTHY'  -- HEALTHY, STALE, FAILING, FAILED
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_health_status ON trade_health(health_status);
+
         -- ── New: Accuracy Tracking Snapshots ────────────────────────────
         CREATE TABLE IF NOT EXISTS accuracy_snapshots (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -329,6 +340,7 @@ def add_trade(symbol, opt_type, strike, entry_price, reason="", lot_size=0, entr
     logger.info(f"✅ Auto-trade SUCCESS: Recorded {symbol} {opt_type} at {strike} (ID: {trade_id}, Score: {entry_score})")
     try:
         record_trade_price(trade_id, entry_price)
+        init_trade_health(trade_id)  # Initialize health tracking
     except Exception as e:
         logger.error("Failed to record initial trade price: %s", e)
     return True
@@ -517,6 +529,112 @@ def delete_all_tracked_picks():
     with _conn() as c:
         c.execute("DELETE FROM tracked_picks")
     return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Trade Health Tracking
+# ══════════════════════════════════════════════════════════════════════════════
+
+def init_trade_health(trade_id):
+    """Initialize health tracking for a new trade."""
+    with _conn() as c:
+        c.execute("""
+            INSERT OR IGNORE INTO trade_health (trade_id, last_price_update, consecutive_fails, total_fails, is_stale, health_status)
+            VALUES (?, datetime('now'), 0, 0, 0, 'HEALTHY')
+        """, (trade_id,))
+
+def update_trade_health_success(trade_id):
+    """Mark successful price update - reset consecutive failures."""
+    with _conn() as c:
+        c.execute("""
+            UPDATE trade_health
+            SET last_price_update = datetime('now'),
+                consecutive_fails = 0,
+                is_stale = 0,
+                health_status = 'HEALTHY'
+            WHERE trade_id = ?
+        """, (trade_id,))
+
+def update_trade_health_failure(trade_id):
+    """Mark failed price update - increment failure counters."""
+    with _conn() as c:
+        c.execute("""
+            UPDATE trade_health
+            SET consecutive_fails = consecutive_fails + 1,
+                total_fails = total_fails + 1,
+                health_status = CASE
+                    WHEN consecutive_fails + 1 >= 3 THEN 'FAILED'
+                    WHEN consecutive_fails + 1 >= 2 THEN 'FAILING'
+                    ELSE health_status
+                END
+            WHERE trade_id = ?
+        """, (trade_id,))
+
+def check_trade_staleness(max_minutes=5):
+    """Check for trades with stale price updates and mark them."""
+    with _conn() as c:
+        c.execute("""
+            UPDATE trade_health
+            SET is_stale = 1,
+                health_status = CASE
+                    WHEN health_status = 'HEALTHY' THEN 'STALE'
+                    ELSE health_status
+                END
+            WHERE trade_id IN (
+                SELECT pt.id
+                FROM paper_trades pt
+                JOIN trade_health th ON pt.id = th.trade_id
+                WHERE pt.status = 'OPEN'
+                AND (julianday('now') - julianday(th.last_price_update)) * 1440 > ?
+            )
+        """, (max_minutes,))
+        return c.rowcount
+
+def get_trade_health(trade_id):
+    """Get health status for a specific trade."""
+    with _conn() as c:
+        row = c.execute("SELECT * FROM trade_health WHERE trade_id = ?", (trade_id,)).fetchone()
+        return dict(row) if row else None
+
+def get_failing_trades():
+    """Get all trades with health status FAILING or FAILED."""
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT pt.*, th.*
+            FROM paper_trades pt
+            JOIN trade_health th ON pt.id = th.trade_id
+            WHERE pt.status = 'OPEN'
+            AND th.health_status IN ('FAILING', 'FAILED')
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+def get_stale_trades():
+    """Get all trades with stale price updates."""
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT pt.*, th.*
+            FROM paper_trades pt
+            JOIN trade_health th ON pt.id = th.trade_id
+            WHERE pt.status = 'OPEN'
+            AND th.is_stale = 1
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+def get_trade_health_summary():
+    """Get summary statistics of trade health."""
+    with _conn() as c:
+        summary = c.execute("""
+            SELECT
+                COUNT(*) as total_open,
+                SUM(CASE WHEN th.health_status = 'HEALTHY' THEN 1 ELSE 0 END) as healthy,
+                SUM(CASE WHEN th.health_status = 'STALE' THEN 1 ELSE 0 END) as stale,
+                SUM(CASE WHEN th.health_status = 'FAILING' THEN 1 ELSE 0 END) as failing,
+                SUM(CASE WHEN th.health_status = 'FAILED' THEN 1 ELSE 0 END) as failed
+            FROM paper_trades pt
+            LEFT JOIN trade_health th ON pt.id = th.trade_id
+            WHERE pt.status = 'OPEN'
+        """).fetchone()
+        return dict(summary) if summary else {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
