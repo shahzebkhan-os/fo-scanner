@@ -573,7 +573,7 @@ def update_trade_health_failure(trade_id):
 def check_trade_staleness(max_minutes=5):
     """Check for trades with stale price updates and mark them."""
     with _conn() as c:
-        c.execute("""
+        cursor = c.execute("""
             UPDATE trade_health
             SET is_stale = 1,
                 health_status = CASE
@@ -588,7 +588,7 @@ def check_trade_staleness(max_minutes=5):
                 AND (julianday('now') - julianday(th.last_price_update)) * 1440 > ?
             )
         """, (max_minutes,))
-        return c.rowcount
+        return cursor.rowcount
 
 def get_trade_health(trade_id):
     """Get health status for a specific trade."""
