@@ -116,12 +116,17 @@ Training progress is logged with timestamps showing:
 
 ### TFT (Temporal Fusion Transformer)
 
-**Issue Fixed**: The original implementation had a "MultiLoss not compatible with single target" error. This has been fixed by:
-- Using single-target 3-class classification instead of multi-target regression
-- Using CrossEntropyLoss instead of MultiLoss
-- Proper label normalization (0, 1, 2)
+**Current Status**: TFT training is currently disabled because the data is in tabular format (not time-series structured).
 
-**Current Status**: TFT training is attempted but falls back gracefully to zeros if it fails. The ensemble still works with LGBM, XGB, and LR.
+TFT requires:
+- `time_idx`: Sequential integer index for each observation
+- `group_ids`: Identifiers for different time series (e.g., symbol names)
+- Proper separation of static vs time-varying features
+- Data reshaped into sequences (e.g., daily observations grouped by symbol)
+
+**Fallback**: The ensemble works effectively with LGBM, XGB, and LR models when TFT is not available.
+
+**Future Enhancement**: To enable TFT, the DataCollector would need to be modified to structure data as time-series (e.g., rolling windows of daily observations per symbol).
 
 ### Hyperparameter Search Space
 
@@ -140,7 +145,7 @@ Training progress is logged with timestamps showing:
 
 ## Known Issues and Limitations
 
-1. **TFT Training**: Currently disabled due to data format requirements. Falls back to LGBM+XGB+LR ensemble.
+1. **TFT Training**: Currently disabled because data is in tabular format (not time-series structured). The ensemble works effectively with LGBM+XGB+LR models. See "TFT (Temporal Fusion Transformer)" section above for details.
 
 2. **nsefin/nsepython**: These libraries may not be available on PyPI. The DataCollector includes fallback to synthetic data for testing.
 
