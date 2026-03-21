@@ -13,3 +13,8 @@ historical_data/
 *.whl
 .idea/
 *.pt
+# BTST ML training artifacts
+btst/data/
+btst/models/
+*.pkl
+*.json
