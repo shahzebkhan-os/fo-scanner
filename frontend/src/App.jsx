@@ -10,6 +10,7 @@ import {
 } from "recharts";
 import MLTab from "./components/MLTab";
 import SuggestionsTab from "./components/SuggestionsTab";
+import FOTradeTab from "./components/FOTradeTab";
 import PaperTradingTab from "./components/PaperTradingTab";
 import TechnicalScoreTab from "./components/TechnicalScoreTab";
 import AccuracyTab from "./components/AccuracyTab";
@@ -22,6 +23,7 @@ const TABS = [
   { id: "scanner", label: "Scanner", icon: "⚡" },
   { id: "unified", label: "Market Eval", icon: "🎯" },
   { id: "suggestions", label: "Suggestions", icon: "💡" },
+  { id: "fotrade", label: "F&O Trade", icon: "🎯" },
   { id: "paper", label: "Paper Trade", icon: "📝" },
   { id: "chain", label: "Chain", icon: "🔗" },
   { id: "greeks", label: "Greeks", icon: "Δ" },
@@ -70,15 +72,15 @@ export default function App() {
   const [dark, setDark] = useState(() => localStorage.getItem("theme") !== "light");
   const [chainSymbol, setChainSymbol] = useState("NIFTY");
   const [marketStatus, setMarketStatus] = useState(null);
-  const [scanData, setScanData] = useState([]);  // lifted for CSV export
   const [lotSizes, setLotSizes] = useState({});
+  const [scanData, setScanData] = useState(null); // Changed initial state from [] to null
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
     localStorage.setItem("theme", dark ? "dark" : "light");
   }, [dark]);
 
-
+  // Pre-emptive fetch & warming
   useEffect(() => {
     apiFetch("/health").then(d => setMarketStatus(d)).catch(() => { });
     apiFetch("/api/lot-sizes").then(setLotSizes).catch(() => {});
@@ -265,9 +267,10 @@ export default function App() {
 
       {/* Content */}
       <main style={{ padding: 16, maxWidth: 1400, margin: "0 auto" }}>
-        <div style={{ display: tab === "scanner"   ? "block" : "none" }}><ScannerTab theme={theme} onChain={goChain} onGreeks={goGreeks} onData={setScanData} marketStatus={marketStatus} /></div>
+        <div style={{ display: tab === "scanner"   ? "block" : "none" }}><ScannerTab theme={theme} onChain={goChain} onGreeks={goGreeks} onData={setScanData} scanData={scanData} marketStatus={marketStatus} /></div>
         <div style={{ display: tab === "unified"   ? "block" : "none" }}><UnifiedEvaluationTab darkMode={dark} /></div>
-        <div style={{ display: tab === "suggestions" ? "block" : "none" }}><SuggestionsTab theme={theme} goChain={goChain} /></div>
+        <div style={{ display: tab === "suggestions" ? "block" : "none" }}><SuggestionsTab theme={theme} goChain={goChain} scanData={scanData} onData={setScanData} /></div>
+        <div style={{ display: tab === "fotrade" ? "block" : "none" }}><FOTradeTab theme={theme} goChain={goChain} scanData={scanData} onData={setScanData} /></div>
         <div style={{ display: tab === "paper"   ? "block" : "none" }}><PaperTradingTab theme={theme} /></div>
         <div style={{ display: tab === "chain"     ? "block" : "none" }}><ChainTab theme={theme} symbol={chainSymbol} setSymbol={setChainSymbol} /></div>
         <div style={{ display: tab === "greeks"    ? "block" : "none" }}><GreeksTab theme={theme} symbol={greeksSymbol} /></div>

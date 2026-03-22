@@ -12,75 +12,83 @@ from datetime import datetime
 from typing import Optional
 
 
-def _strategy_for_signal(signal: str, regime: str, iv_rank: float, pcr: float) -> dict:
-    """Determine the best F&O strategy based on signal, regime, IV, and PCR."""
+STRATEGY_DTE_RANGES = {
+    "long_call": (3, 30),
+    "long_put": (3, 30),
+    "bull_call_spread": (7, 45),
+    "bear_put_spread": (7, 45),
+    "bull_put_spread": (14, 45),
+    "bear_call_spread": (14, 45),
+    "short_straddle": (7, 21),
+    "strangle": (7, 21),
+    "iron_condor": (14, 45),
+}
+
+def _strategy_for_signal(signal: str, regime: str, iv_rank: float, pcr: float, dte: int) -> Optional[dict]:
+    """Determine the best F&O strategy matching signal, regime, IV, and DTE constraints."""
+    
+    candidates = []
 
     if signal == "BULLISH":
         if regime in ("PINNED", "SQUEEZE") and iv_rank > 60:
-            return {
-                "strategy": "Bull Put Spread",
-                "strategy_code": "bull_put_spread",
-                "legs": 2,
-                "risk_type": "defined",
+            candidates.append({
+                "strategy": "Bull Put Spread", "strategy_code": "bull_put_spread", "legs": 2, "risk_type": "defined",
                 "description": "Sell ATM PE, Buy OTM PE — collect premium in range-bound high-IV environment",
-            }
+            })
         if regime == "TRENDING" and iv_rank < 40:
-            return {
-                "strategy": "Buy CE",
-                "strategy_code": "long_call",
-                "legs": 1,
-                "risk_type": "defined",
+            candidates.append({
+                "strategy": "Buy CE", "strategy_code": "long_call", "legs": 1, "risk_type": "defined",
                 "description": "Buy ATM/slightly-OTM CE — directional play in low-IV trending market",
-            }
-        return {
-            "strategy": "Bull Call Spread",
-            "strategy_code": "bull_call_spread",
-            "legs": 2,
-            "risk_type": "defined",
+            })
+        candidates.append({
+            "strategy": "Bull Call Spread", "strategy_code": "bull_call_spread", "legs": 2, "risk_type": "defined",
             "description": "Buy ATM CE, Sell OTM CE — limited risk bullish play",
-        }
+        })
+        candidates.append({
+            "strategy": "Buy CE", "strategy_code": "long_call", "legs": 1, "risk_type": "defined",
+            "description": "Buy CE (Fallback) — standard directional utility",
+        })
 
-    if signal == "BEARISH":
+    elif signal == "BEARISH":
         if regime in ("PINNED", "SQUEEZE") and iv_rank > 60:
-            return {
-                "strategy": "Bear Call Spread",
-                "strategy_code": "bear_call_spread",
-                "legs": 2,
-                "risk_type": "defined",
+            candidates.append({
+                "strategy": "Bear Call Spread", "strategy_code": "bear_call_spread", "legs": 2, "risk_type": "defined",
                 "description": "Sell ATM CE, Buy OTM CE — collect premium with bearish bias",
-            }
+            })
         if regime == "TRENDING" and iv_rank < 40:
-            return {
-                "strategy": "Buy PE",
-                "strategy_code": "long_put",
-                "legs": 1,
-                "risk_type": "defined",
+            candidates.append({
+                "strategy": "Buy PE", "strategy_code": "long_put", "legs": 1, "risk_type": "defined",
                 "description": "Buy ATM/slightly-OTM PE — directional bearish play in low-IV trend",
-            }
-        return {
-            "strategy": "Bear Put Spread",
-            "strategy_code": "bear_put_spread",
-            "legs": 2,
-            "risk_type": "defined",
+            })
+        candidates.append({
+            "strategy": "Bear Put Spread", "strategy_code": "bear_put_spread", "legs": 2, "risk_type": "defined",
             "description": "Buy ATM PE, Sell OTM PE — limited risk bearish play",
-        }
+        })
+        candidates.append({
+            "strategy": "Buy PE", "strategy_code": "long_put", "legs": 1, "risk_type": "defined",
+            "description": "Buy PE (Fallback) — standard directional utility",
+        })
 
-    # NEUTRAL
-    if iv_rank > 65:
-        return {
-            "strategy": "Iron Condor",
-            "strategy_code": "iron_condor",
-            "legs": 4,
-            "risk_type": "defined",
-            "description": "Sell OTM CE+PE, Buy further OTM CE+PE — premium collection in high-IV neutral market",
-        }
-    return {
-        "strategy": "Short Straddle",
-        "strategy_code": "short_straddle",
-        "legs": 2,
-        "risk_type": "undefined",
-        "description": "Sell ATM CE+PE — theta decay play in low-IV range-bound market",
-    }
+    else:
+        # NEUTRAL
+        if iv_rank > 65:
+            candidates.append({
+                "strategy": "Iron Condor", "strategy_code": "iron_condor", "legs": 4, "risk_type": "defined",
+                "description": "Sell OTM CE+PE, Buy further OTM CE+PE — premium collection in high-IV neutral market",
+            })
+        candidates.append({
+            "strategy": "Short Straddle", "strategy_code": "short_straddle", "legs": 2, "risk_type": "undefined",
+            "description": "Sell ATM CE+PE — theta decay play in low-IV range-bound market",
+        })
+
+    # Validate candidates against DTE limits and return first valid
+    for cand in candidates:
+        code = cand["strategy_code"]
+        rng = STRATEGY_DTE_RANGES.get(code)
+        if not rng or (rng[0] <= dte <= rng[1]):
+            return cand
+
+    return None
 
 
 def _compute_risk_reward(strategy_code: str, entry_premium: float, spot: float, strike_interval: float) -> dict:
@@ -230,7 +238,10 @@ def generate_suggestions(scan_data: list, lot_sizes: dict, strike_intervals: dic
         max_pain = stock.get("max_pain")
         oi_walls = stock.get("oi_walls", {})
 
-        strategy_info = _strategy_for_signal(signal, regime, iv_rank, pcr)
+        strategy_info = _strategy_for_signal(signal, regime, iv_rank, pcr, dte)
+        if not strategy_info:
+            # Signal suppressed due to DTE violation across all fallbacks
+            continue
 
         lot_size = lot_sizes.get(symbol, 50)
         strike_interval = strike_intervals.get(symbol, 50)

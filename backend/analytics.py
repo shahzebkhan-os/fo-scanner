@@ -518,7 +518,9 @@ def compute_stock_score_v2(
     iv_rank_data: dict = None,
     prev_chain_data: dict = None,
     fii_net: float = 0.0,
-    as_of: date = None
+    as_of: date = None,
+    sector_signal: str = "NEUTRAL",
+    ml_prob: Optional[float] = None
 ) -> dict:
     
     records = chain_data.get("records", {}).get("data", [])
@@ -681,6 +683,36 @@ def compute_stock_score_v2(
     
     if direction == "BEARISH" and fii_net < 0 and symbol in ["NIFTY", "BANKNIFTY"]:
         weighted_score = max(0, weighted_score / 1.15)
+
+    # ── Sector Alignment Bonus ─────────────────────────────────────────────
+    # If the sector trend matches the stock trend, it's a higher conviction setup
+    SECTOR_BONUS = 7  # Points added for sector alignment
+    if sector_signal != "NEUTRAL":
+        if direction == sector_signal:
+            weighted_score = min(100, weighted_score + SECTOR_BONUS)
+        elif direction != "NEUTRAL":
+            # Direct contradiction (e.g. Stock Bullish but Sector Bearish)
+            weighted_score = max(0, weighted_score - (SECTOR_BONUS // 2))
+
+    # ── Volatility Normalization (IV Rank) ──────────────────────────────────
+    # In TRENDING regimes, high IV Rank can mean "overextended" (risk of reversal)
+    # In SQUEEZE regimes, high IV Rank is expected.
+    if regime == "TRENDING" and iv_rank > 80:
+        weighted_score *= 0.90  # Dampen score if potentially overbought/oversold
+    elif regime == "SQUEEZE" and iv_rank > 70:
+        weighted_score = min(100, weighted_score * 1.05) # Boost squeeze conviction
+
+    # ── ML Probability Scaling ──────────────────────────────────────────────
+    # Scale the final score by ML conviction if available
+    if ml_prob is not None:
+        # ml_prob is usually 0 to 1 (probability of BULLISH)
+        ml_conviction = 0
+        if direction == "BULLISH" and ml_prob > 0.5:
+            ml_conviction = (ml_prob - 0.5) * 20  # Max +10 bonus
+        elif direction == "BEARISH" and ml_prob < 0.5:
+            ml_conviction = (0.5 - ml_prob) * 20  # Max +10 bonus
+        
+        weighted_score = max(0, min(100, weighted_score + ml_conviction))
 
     # UOA override: if UOA detected with high confidence, boost/dampen score
     UOA_SCORE_BOOST = 8  # Points added/subtracted when institutional UOA detected

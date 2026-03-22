@@ -9,13 +9,28 @@ import json
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
+import io, csv
 from . import db
 from pydantic import BaseModel, Field
 from . import analytics as Analytics
 from . import signals_legacy as Signals
 from . import scheduler as Scheduler
-from .analytics import compute_stock_score_v2 as compute_stock_score, score_option_v2 as score_option, black_scholes_greeks, days_to_expiry
-from .signals_legacy import build_sector_heatmap, detect_uoa, screen_straddle, get_pcr_history
+from .analytics import (
+    compute_stock_score_v2 as compute_stock_score, score_option_v2 as score_option, black_scholes_greeks, days_to_expiry,
+    STRIKE_INTERVALS
+)
+from .constants import LOT_SIZES, INDEX_SYMBOLS, FO_STOCKS
+from .signals_legacy import (
+    SECTORS,
+    SYMBOL_SECTOR,
+    detect_uoa,
+    detect_straddle,
+    build_sector_heatmap,
+    get_sector,
+)
+
+from .signals.fii_dii import FiiDiiSignal
+from .signals.straddle_pricing import StraddleSignal
 from .cache import cache
 from .ml_model import predict as ml_predict, train_model as ml_train_model, get_model_status as ml_get_status, get_model_details as ml_get_details, get_symbol_predictions as ml_get_predictions
 from .historical_loader import get_backfill_progress, run_backfill_with_progress, reset_backfill_progress
@@ -144,28 +159,46 @@ AUTO_ML_BULLISH_GATE = float(os.getenv("AUTO_TRADE_ML_BULLISH", "0.60"))
 AUTO_ML_BEARISH_GATE = float(os.getenv("AUTO_TRADE_ML_BEARISH", "0.40"))
 AUTO_VOL_SPIKE_THRESHOLD = float(os.getenv("AUTO_TRADE_VOL_SPIKE", "0.10"))
 
+# Cache for sector trends to solve circular dependency in scoring
+_last_sector_heatmap: dict = {}
+_last_sector_update: datetime = datetime.min
+
+_http_client: Optional[httpx.AsyncClient] = None
+_http_lock = asyncio.Lock()
+
+async def get_http_client() -> httpx.AsyncClient:
+    """Returns a shared httpx.AsyncClient for secondary fetches."""
+    global _http_client
+    async with _http_lock:
+        if _http_client is None or _http_client.is_closed:
+            _http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(15.0, connect=5.0),
+                headers={"User-Agent": "FO-Scanner/4.0"}
+            )
+    return _http_client
+
 async def send_telegram_alert(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    async with httpx.AsyncClient() as client:
-        try:
-            await client.post(url, json=payload, timeout=5)
-        except Exception as e:
-            log.error(f"Telegram Alert Failed: {e}")
+    client = await get_http_client()
+    try:
+        await client.post(url, json=payload, timeout=5)
+    except Exception as e:
+        log.error(f"Telegram Alert Failed: {e}")
 
 async def send_telegram_document(filename: str, content: str, caption: str = ""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
     files = {"document": (filename, content.encode("utf-8"), "text/csv")}
     data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "Markdown"}
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.post(url, data=data, files=files, timeout=10)
-            if r.status_code != 200:
-                log.error(f"Telegram Document Alert Failed: {r.text}")
-        except Exception as e:
-            log.error(f"Telegram Document Alert Failed: {e}")
+    client = await get_http_client()
+    try:
+        r = await client.post(url, data=data, files=files, timeout=10)
+        if r.status_code != 200:
+            log.error(f"Telegram Document Alert Failed: {r.text}")
+    except Exception as e:
+        log.error(f"Telegram Document Alert Failed: {e}")
 
 NSE_HEADERS = {
     "User-Agent":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -234,14 +267,41 @@ async def lifespan(app: FastAPI):
     )
 
     asyncio.create_task(paper_trade_manager())
+    asyncio.create_task(_background_cache_warmer())
     await Scheduler.start_all()
     yield
     
     # Cleanup on shutdown
     await cache.close()
+    
+    # Close shared session clients
+    global _ind_client, _http_client
+    if _ind_client:
+        try: await _ind_client.close()
+        except: pass
+        _ind_client = None
+    if _http_client:
+        try: await _http_client.aclose()
+        except: pass
+        _http_client = None
+    log.info("Lifespan cleanup: Sessions and cache closed.")
 
 app = FastAPI(title="NSE F&O Scanner API", version="4.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+async def _background_cache_warmer():
+    """Keep the scan cache fresh by running a scan every 60s in the background."""
+    # Wait for app startup completion
+    await asyncio.sleep(10)
+    log.info("🔥 Background Cache Warmer active. Warming up default scan...")
+    while True:
+        try:
+            # We only warm the full list to satisfy both Scanner and Suggestions tabs
+            await scan_all(limit=SUGGESTION_SCAN_LIMIT)
+        except Exception as e:
+            log.error(f"Cache warmer error: {e}")
+        await asyncio.sleep(60)
 
 # ── Market Hours ──────────────────────────────────────────────────────────────
 
@@ -592,15 +652,14 @@ async def _fetch_nse_market_watch(symbols: list) -> dict:
     results = {}
 
     try:
-        # Use a throwaway httpx client with NSE cookies pre-seeded
-        nse_headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://www.nseindia.com/market-data/live-equity-market",
-        }
-        async with httpx.AsyncClient(timeout=10, headers=nse_headers) as client:
-            # Seed NSE cookies first
+        # Use the shared HTTP client with NSE cookies pre-seeded
+        client = await get_http_client()
+        # Seed NSE cookies first (re-seeding is fine, httpx handles cookie persistence if client is shared)
+        # Note: NSE usually expects a fresh landing page visit to get certain session cookies.
+        try:
             await client.get("https://www.nseindia.com", timeout=6)
+        except Exception as e:
+            log.warning(f"NSE cookie seeding failed: {e}")
 
             # Fetch equity market watch (FO stocks)
             fo_symbols = [s for s in symbols if s not in INDEX_MAP]
@@ -763,14 +822,15 @@ def _handle_auto_trade(symbol: str, stats: dict, ml_prob: Optional[float], top_p
     vol_spike = stats.get("vol_spike", 0)
 
     # ── Auto paper-trade entry conditions ──────────────────────────────────
-    log.info(f"Auto-trade check: {symbol} score={stock_score} signal={signal} ml={ml_prob} vol={vol_spike}")
+    global _daily_trade_count
+    limit = MAX_DAILY_AUTO_TRADES if MAX_DAILY_AUTO_TRADES is not None else 999
     if (stock_score >= AUTO_SCORE_THRESHOLD
         and signal != "NEUTRAL"
         and (ml_prob is None or (signal == "BULLISH" and ml_prob > AUTO_ML_BULLISH_GATE) or (signal == "BEARISH" and ml_prob < AUTO_ML_BEARISH_GATE))
         and vol_spike >= AUTO_VOL_SPIKE_THRESHOLD
         and is_market_open()
         and is_optimal_trade_time()
-        and _daily_trade_count < MAX_DAILY_AUTO_TRADES):
+        and _daily_trade_count < limit):
 
         # Sector concentration guard
         from .signals_legacy import get_sector
@@ -778,7 +838,7 @@ def _handle_auto_trade(symbol: str, stats: dict, ml_prob: Optional[float], top_p
         sector_ct = _sector_trade_count.get(sym_sector, 0)
 
         for pick in top_picks:
-            if _daily_trade_count >= MAX_DAILY_AUTO_TRADES:
+            if _daily_trade_count >= limit:
                 break
             if sector_ct >= MAX_SECTOR_TRADES:
                 log.info(f"  ⚠️ Sector cap hit for {sym_sector} — skipping {symbol}")
@@ -806,6 +866,136 @@ def _handle_auto_trade(symbol: str, stats: dict, ml_prob: Optional[float], top_p
             _sector_trade_count[sym_sector] = sector_ct + 1
             sector_ct += 1
             log.info(f"  📝 Auto-trade SUCCESS: {symbol} {pick['type']} {pick['strike']} @ ₹{pick['ltp']} (total trades today: #{_daily_trade_count})")
+            return True  # Indicate success
+    return False
+
+
+
+async def _manage_suggestions_exits(scan_results: list):
+    """
+    Checks open 'Auto' trades (suggestions) against latest scan signals.
+    Exits if signal reverses (e.g. Bullish trade becomes Bearish).
+    """
+    try:
+        open_trades = [t for t in db.get_open_trades() if (t.get("reason") or "").startswith("Auto:")]
+        if not open_trades or not scan_results:
+            return
+
+        # Map scan results for quick lookup
+        latest_snaps = {r["symbol"].upper(): r for r in scan_results}
+
+        for trade in open_trades:
+            symbol = trade["symbol"].upper()
+            snap = latest_snaps.get(symbol)
+            if not snap:
+                continue
+
+            current_signal = (snap.get("signal") or "NEUTRAL").upper()
+            reason = (trade.get("reason") or "").upper()
+            
+            # Simple reversal check
+            is_bullish_trade = "BULL" in reason
+            is_bearish_trade = "BEAR" in reason
+            
+            do_exit = False
+            exit_reason = ""
+            
+            if is_bullish_trade and current_signal == "BEARISH":
+                do_exit = True
+                exit_reason = "Signal Reversal (Bearish detected)"
+            elif is_bearish_trade and current_signal == "BULLISH":
+                do_exit = True
+                exit_reason = "Signal Reversal (Bullish detected)"
+                
+            if do_exit:
+                log.info(f"🚩 Auto-Trade EXIT: {symbol} {trade['type']} {trade['strike']} due to {exit_reason}")
+                # Fetch latest LTP from the snap if possible, or fallback to chain search
+                exit_price = trade.get("current_price") or trade.get("entry_price")
+                # Try to find more accurate LTP from the snap's top_pick_ltp if strikes match
+                if snap.get("top_pick_strike") == trade["strike"] and snap.get("top_pick_type") == trade["type"]:
+                    exit_price = snap.get("top_pick_ltp") or exit_price
+                
+                db.update_trade(trade["id"], exit_price, exit_flag=True, reason=f"Auto: {exit_reason}")
+                
+    except Exception as e:
+        log.error(f"Error in suggestion exit manager: {e}")
+
+
+async def _execute_suggestions_auto_trade(scan_results: list):
+
+    """
+    Evaluates scan results using the suggestion engine and triggers auto-trades
+    for high-conviction ideas.
+    """
+    if not scan_results:
+        log.info("Auto Trade: skipping - no scan results.")
+        return
+        
+    if not is_market_open():
+        log.info("Auto Trade: skipping - market closed.")
+        return
+
+    log.info(f"Auto Trade: evaluating {len(scan_results)} symbols...")
+
+    # First, managed exits for existing trades
+    await _manage_suggestions_exits(scan_results)
+
+    from .suggestions import generate_suggestions
+    suggestions = generate_suggestions(scan_results, LOT_SIZES, STRIKE_INTERVALS)
+    
+    # Only trade High (60+) conviction suggestions
+    auto_suggestions = [s for s in suggestions if s.get("conviction", 0) >= 60]
+    
+    if not auto_suggestions:
+        return
+
+    log.info(f"🎯 Evaluating {len(auto_suggestions)} high-conviction suggestions for auto-trade...")
+    
+    global _daily_trade_count
+    count = 0
+    for s in auto_suggestions:
+        # Avoid comparison with None
+        limit = MAX_DAILY_AUTO_TRADES if MAX_DAILY_AUTO_TRADES is not None else 999
+        if _daily_trade_count >= limit:
+            log.info(f"  🛑 Daily auto-trade limit reached ({_daily_trade_count}/{limit}).")
+            break
+
+        symbol = s["symbol"].upper()
+        signal = s["signal"]
+        conviction = s["conviction"]
+        entry = s["entry"]
+        strat = s["strategy"]
+        
+        # Check if already traded today
+        trade_uid = f"{symbol}-{entry['primary_type']}-{entry['primary_strike']}-{datetime.now(IST).date()}"
+        if trade_uid in _traded_today:
+            continue
+            
+        # Sector concentration check
+        from .signals_legacy import get_sector
+        sector = get_sector(symbol)
+        sec_limit = MAX_SECTOR_TRADES if MAX_SECTOR_TRADES is not None else 99
+        if _sector_trade_count.get(sector, 0) >= sec_limit:
+            log.info(f"  ⚠️ Sector cap hit for {sector} ({_sector_trade_count.get(sector)}/{sec_limit}) — skipping {symbol}")
+            continue
+
+        # Add trade
+        _traded_today.add(trade_uid)
+        reason = f"Auto: Suggestion ({s['conviction_label']}) | Conviction {conviction} | {strat['strategy']}"
+        lot = s["sizing"]["lot_size"]
+        
+        db.add_trade(
+            symbol, entry["primary_type"], entry["primary_strike"], 
+            entry["entry_premium"], reason, lot_size=lot, entry_score=conviction
+        )
+        
+        _daily_trade_count += 1
+        _sector_trade_count[sector] = _sector_trade_count.get(sector, 0) + 1
+        count += 1
+        log.info(f"  🚀 SUCCESS: Auto-traded {symbol} suggestion (#{_daily_trade_count})")
+
+    if count > 0:
+        log.info(f"✅ Suggestion auto-trade cycle complete: {count} trades placed.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -818,17 +1008,44 @@ def _handle_auto_trade(symbol: str, stats: dict, ml_prob: Optional[float], top_p
 
 @app.get("/api/scan")
 async def scan_all(limit: int = Query(90, ge=1, le=200)):
-    # Check cache first for the full scan result
+    """
+    Unified scan endpoint with caching and request coalescing.
+    If multiple requests hit this while a scan is running, they share the result.
+    """
+    # 1. Fast Cache Check
     cache_key = cache.cache_key("scan_result", "all", limit)
     cached = await cache.get(cache_key)
     if cached:
         log.info(f"=== SCAN: returning cached result ===")
         return cached
-    
-    all_symbols = INDEX_SYMBOLS + FO_STOCKS
-    log.info(f"=== SCAN: {len(all_symbols)} symbols ===")
 
-    _maybe_reset_daily()                        # Bug 6 fix: reset dedup sets on new day
+    # 2. Coalescing: Check if a scan is already running for this limit
+    global _scan_inflight_tasks
+    # Use a task check that's robust to type-hint confusion
+    inflight = _scan_inflight_tasks.get(limit)
+    if not inflight or not hasattr(inflight, "done") or inflight.done():
+        # Start a new scan task
+        _scan_inflight_tasks[limit] = asyncio.create_task(_do_full_scan(limit))
+        log.info(f"=== SCAN: Starting new scan task for limit={limit} ===")
+    else:
+        log.info(f"=== SCAN: Coalescing with existing inflight scan for limit={limit} ===")
+
+    try:
+        return await _scan_inflight_tasks[limit]
+    except Exception as e:
+        log.error(f"Inflight scan failed: {e}")
+        # If the task failed, remove it so the next request can retry
+        _scan_inflight_tasks.pop(limit, None)
+        raise
+
+_scan_inflight_tasks = {}
+
+async def _do_full_scan(limit: int) -> dict:
+    """The actual heavy lifting of scanning all symbols."""
+    all_symbols = INDEX_SYMBOLS + FO_STOCKS
+    log.info(f"=== SCAN: {len(all_symbols)} symbols (limit={limit}) ===")
+
+    _maybe_reset_daily()
 
     # ── Fetch external market data once per scan cycle (cached 30 min) ────────
     ext_data = await market_external.fetch_external_market_data()
@@ -839,8 +1056,29 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
         f"({global_cues_result.reason})"
     )
 
+    # ── Fetch FII/DII data ───────────────────────────────────────────────────
+    fii_dii_res = await fii_dii_data()
+    fii_net = 0
+    dii_net = 0
+    if "data" in fii_dii_res and isinstance(fii_dii_res["data"], list):
+        for row in fii_dii_res["data"]:
+            if row.get("category") == "FII/FPI":
+                # Convert string representation of value if needed or keep float if parsed
+                val = row.get("net", 0)
+                try: fii_net += float(val)
+                except: pass
+            elif row.get("category") == "DII":
+                val = row.get("net", 0)
+                try: dii_net += float(val)
+                except: pass
+
+    # Instantiate global FiiDiiSignal 
+    fii_engine = FiiDiiSignal()
+    fii_signal_result = fii_engine.compute(fii_net_futures=fii_net, dii_net=dii_net)
+
     ltp_map = await fetch_indstocks_ltp(all_symbols)
-    sem = asyncio.Semaphore(8)
+    # ⚡ High Concurrency: 30 symbols at once (faster load)
+    sem = asyncio.Semaphore(30)
     
     batch_alerts_csv_rows = []
 
@@ -862,14 +1100,23 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
                 # Analytics v4 args mapping
                 ivr   = db.get_iv_rank(symbol)
                 exp   = expiries[0] if expiries else ""
-                stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
+                
+                # Use cached sector signal
+                sector = get_sector(symbol)
+                sector_sig = _last_sector_heatmap.get(sector, {}).get("signal", "NEUTRAL")
+
+                stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr, sector_signal=sector_sig)
                 if not spot:
                     return None
                 
-                # Add ML prediction if model is trained
-                stats["spot_price"] = float(spot or 1)  # needed for max_pain_dist_pct feature
+                # Add ML prediction and refine
+                stats["spot_price"] = float(spot or 1)
                 ml_prob = ml_predict(stats, symbol=symbol)
                 stats["ml_bullish_probability"] = ml_prob
+                
+                if ml_prob is not None:
+                    stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr, sector_signal=sector_sig, ml_prob=ml_prob)
+                    stats["ml_bullish_probability"] = ml_prob
 
                 stock_score  = stats.get("score", 0)
                 signal       = stats.get("signal", "NEUTRAL")
@@ -898,55 +1145,46 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
                         reasons.append("⚠️ AI Divergence: Low Probability / Contrarian Bias")
                         stats["score"] = max(0, stock_score - 15)
 
-                # Update shared stats
+                # ── Straddle Signal (P1.3) ──
+                # Use detect_straddle from signals_legacy to find ATM prices
+                straddle_info = detect_straddle(records, symbol, float(spot or 1))
+                if straddle_info:
+                    straddle_engine = StraddleSignal()
+                    # Calculate implied daily move from straddle cost
+                    dte = stats.get("days_to_expiry", 30)
+                    
+                    s_res = straddle_engine.compute(
+                        spot=float(spot or 1),
+                        atm_ce_ltp=straddle_info.get("ce_ltp", 0),
+                        atm_pe_ltp=straddle_info.get("pe_ltp", 0),
+                        dte=dte
+                    )
+                    # If it detects fast decay or strong straddle edge -> boost score
+                    if s_res.score > 50:
+                        reasons.append(f"🎪 {s_res.reason} (+5 iv_edge)")
+                        stats["score"] = min(100, stats["score"] + 5)
+                        
+                # Update shared stats before adjusting for global signals
                 stats["ml_score"] = ml_score
-                stats["signal_reasons"] = reasons
-                signal = stats["signal"]
-                stock_score = stats["score"]
+                signal = stats.get("signal", "NEUTRAL")
+                stock_score = stats.get("score", 0)
 
                 # ── Global Cues Adjustment ─────────────────────────────────
                 _apply_global_cues_adjustment(stats, global_cues_result, signal)
-                stock_score = stats["score"]
-
-                # ── Auto paper-trade entry  (thresholds configurable) ───────
-                if (stock_score > AUTO_SCORE_THRESHOLD
-                    and signal != "NEUTRAL"
-                    and (ml_prob is None or (signal == "BULLISH" and ml_prob > AUTO_ML_BULLISH_GATE) or (signal == "BEARISH" and ml_prob < AUTO_ML_BEARISH_GATE))
-                    and stats.get("vol_spike", 0) > 0.4
-                    and is_market_open()
-                    and is_optimal_trade_time()
-                    and _daily_trade_count < MAX_DAILY_AUTO_TRADES):
-
-                    # Sector concentration guard
-                    from .signals_legacy import get_sector
-                    sym_sector = get_sector(symbol)
-                    sector_ct = _sector_trade_count.get(sym_sector, 0)
-
-                    for pick in top_picks:
-                        if _daily_trade_count >= MAX_DAILY_AUTO_TRADES:
-                            break
-                        if sector_ct >= MAX_SECTOR_TRADES:
-                            log.info(f"  ⚠️ Sector cap hit for {sym_sector} — skipping {symbol}")
-                            break
-
-                        # Hard guard: BULLISH → CE only, BEARISH → PE only
-                        if signal == "BULLISH" and pick["type"] != "CE":
-                            continue
-                        if signal == "BEARISH" and pick["type"] != "PE":
-                            continue
+                signal = stats.get("signal", "NEUTRAL")
                 
-                        trade_uid = f"{symbol}-{pick['type']}-{pick['strike']}-{datetime.now(IST).date()}"
-                        if trade_uid in _traded_today:
-                            continue
-                        _traded_today.add(trade_uid)
+                # ── FII/DII Signal (P1.3) ──
+                if fii_signal_result.score != 0:
+                    if signal == "BULLISH" and fii_signal_result.score < -20:
+                        reasons.append("⚠️ FII Net Short (Penalty)")
+                        stats["score"] = max(0, stats["score"] - 5)
+                    elif signal == "BEARISH" and fii_signal_result.score > 20:
+                        reasons.append("⚠️ FII Net Long (Penalty)")
+                        stats["score"] = max(0, stats["score"] - 5)
                 
-                        reason = f"Auto: {signal} | Score {stock_score} | PCR {stats.get('pcr')}"
-                        auto_lot_size = LOT_SIZES.get(symbol, 1)
-                        db.add_trade(symbol, pick["type"], pick["strike"], pick["ltp"], reason, lot_size=auto_lot_size)
-                        _daily_trade_count += 1
-                        _sector_trade_count[sym_sector] = sector_ct + 1
-                        sector_ct += 1
-                        log.info(f"  📝 Auto-trade: {symbol} {pick['type']} {pick['strike']} @ ₹{pick['ltp']} (trade #{_daily_trade_count})")
+                stats["signal_reasons"] = reasons
+                stock_score = stats.get("score", 0)
+
                 # ── Telegram alerts  (Bug 9 fixed: separate thresholds) ───────
                 if stock_score >= 70 and signal != "NEUTRAL":
                     for pick in top_picks:
@@ -1025,8 +1263,9 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
         },
     }
     
-    # Cache the result for 60 seconds
-    await cache.set(cache_key, response, ttl=cache.DEFAULT_TTLS["scan_result"])
+    # ── Cache Result ──
+    cache_key = cache.cache_key("scan_result", "all", limit)
+    await cache.set(cache_key, response, ttl=60)
     
     return response
 
@@ -1070,13 +1309,23 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
 
                     ivr = db.get_iv_rank(symbol)
                     exp = expiries[0] if expiries else ""
-                    stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
+                    
+                    # Use cached sector signal
+                    sector = get_sector(symbol)
+                    sector_sig = _last_sector_heatmap.get(sector, {}).get("signal", "NEUTRAL")
+
+                    stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr, sector_signal=sector_sig)
                     if not spot:
                         return None
 
-                    stats["spot_price"] = float(spot or 1)  # needed for max_pain_dist_pct feature
+                    stats["spot_price"] = float(spot or 1)
                     ml_prob = ml_predict(stats, symbol=symbol)
                     stats["ml_bullish_probability"] = ml_prob
+                    
+                    # Refine score with ML conviction
+                    if ml_prob is not None:
+                        stats = compute_stock_score(cj, float(spot or 1), symbol, exp, ivr, sector_signal=sector_sig, ml_prob=ml_prob)
+                        stats["ml_bullish_probability"] = ml_prob
 
                     stock_score = stats.get("score", 0)
                     signal = stats.get("signal", "NEUTRAL")
@@ -1166,62 +1415,106 @@ async def fo_suggestions():
         }
 
     suggestions = generate_suggestions(scan_data, LOT_SIZES, STRIKE_INTERVALS)
-    telegram_dispatched = False
-
-    if suggestions:
-        try:
-            csv_headers = ["Symbol", "Signal", "Score", "Confidence", "Conviction", "Strike", "Type", "Entry", "Target", "Stop"]
-
-            def suggestion_to_row(s: dict) -> list:
-                """Flatten a suggestion dict into csv_headers order; missing numeric fields are emitted as blanks."""
-                def blank(v):
-                    return "" if v is None else v
-
-                entry = s.get("entry", {})
-                rr = s.get("risk_reward", {})
-                symbol = s.get("symbol", "")
-                signal = s.get("signal", "")
-                score = s.get("score")
-                confidence = s.get("confidence")
-                conviction = s.get("conviction")
-                strike = entry.get("primary_strike")
-                opt_type = entry.get("primary_type") or ""
-                entry_price = entry.get("entry_premium")
-                target_price = rr.get("target_price")
-                stop_price = rr.get("stop_loss_price")
-                return [
-                    symbol,
-                    signal,
-                    blank(score),
-                    blank(confidence),
-                    blank(conviction),
-                    blank(strike),
-                    opt_type,
-                    blank(entry_price),
-                    blank(target_price),
-                    blank(stop_price),
-                ]
-
-            buffer = io.StringIO()
-            writer = csv.writer(buffer)
-            writer.writerow(csv_headers)
-            for s in suggestions:
-                writer.writerow(suggestion_to_row(s))
-            csv_content = buffer.getvalue()
-            filename = f"suggested_trades_{_timestamp_suffix()}.csv"
-            caption = f"📊 Latest Suggested Trades ({len(suggestions)})\nIncludes direction & confidence."
-            await send_telegram_document(filename, csv_content, caption)
-            telegram_dispatched = True
-        except Exception as e:
-            log.error(f"Failed to dispatch telegram suggestions: {e}")
 
     return {
         "timestamp": datetime.now().isoformat(),
         "market_status": market_status(),
         "count": len(suggestions),
         "suggestions": suggestions,
-        "telegram_dispatched": telegram_dispatched,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# F&O Trade Discovery — Tiered pipeline with confluence & timing filters
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/fo-trades")
+async def fo_trades_endpoint():
+    """
+    Run the tiered F&O trade discovery pipeline.
+    Applies: liquidity gate → confluence filter → DTE validation → max pain convergence → bulk deal bonus.
+    """
+    from .analytics import STRIKE_INTERVALS
+    from .fo_trades import run_pipeline
+
+    scan_result = await scan_all(limit=SUGGESTION_SCAN_LIMIT)
+    scan_data = scan_result.get("data", [])
+
+    if not scan_data:
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "market_status": market_status(),
+            "time_window": {},
+            "pipeline": {"scanned": 0, "after_liquidity": 0, "after_confluence": 0, "after_dte": 0, "final": 0},
+            "count": 0,
+            "trades": [],
+            "message": "No scan data available. Run a scan first.",
+        }
+
+    suggestions = generate_suggestions(scan_data, LOT_SIZES, STRIKE_INTERVALS)
+    result = run_pipeline(scan_data, suggestions)
+    result["market_status"] = market_status()
+
+    # ── Telegram Alert ──
+    trades = result.get("trades", [])
+    if trades:
+        try:
+            p = result.get("pipeline", {})
+            funnel_str = f"{p.get('scanned', 0)} Scanned → {p.get('after_liquidity', 0)} Liquid → {p.get('after_confluence', 0)} Confluent → {p.get('after_dte', 0)} Pattern OK → {len(trades)} Final"
+            
+            caption = f"🎯 *F&O Discovery Report*\n"
+            caption += f"📡 Pipeline: {funnel_str}\n\n"
+            caption += f"*Top High-Conviction Trades*:\n"
+            
+            for i, t in enumerate(trades[:5], 1):
+                conf = t.get("confluence", {})
+                c_str = f"{conf.get('aligned', 0)}/{conf.get('total', 5)}"
+                caption += f"{i}. {t['symbol']} ({t['signal']}) | Conv: {t['conviction']} | Conf: {c_str}\n"
+            
+            caption += f"\n📊 Full detailed analysis attached."
+            
+            # CSV generation
+            csv_headers = ["Symbol", "Signal", "Conviction", "Confluence", "Spot", "DTE", "Strategy", "Entry Strike", "Type", "Entry Price", "Target", "Stop", "Sector", "IVR"]
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            writer.writerow(csv_headers)
+            
+            def blank(v):
+                return "" if v is None else v
+
+            for t in trades:
+                conf = t.get("confluence", {})
+                c_str = f"{conf.get('aligned', 0)}/{conf.get('total', 5)}"
+                strat = t.get("strategy", {}) or {}
+                entry = t.get("entry", {}) or {}
+                rr = t.get("risk_reward", {}) or {}
+                
+                writer.writerow([
+                    t["symbol"],
+                    t["signal"],
+                    t["conviction"],
+                    c_str,
+                    t["spot"],
+                    t["dte"],
+                    strat.get("strategy", ""),
+                    entry.get("primary_strike", ""),
+                    entry.get("primary_type", ""),
+                    entry.get("entry_premium", ""),
+                    rr.get("target_price", ""),
+                    rr.get("stop_loss_price", ""),
+                    t["sector"],
+                    t["iv_rank"]
+                ])
+                
+            csv_content = buffer.getvalue()
+            filename = f"fo_discovery_{_timestamp_suffix()}.csv"
+            await send_telegram_document(filename, csv_content, caption)
+            result["telegram_dispatched"] = True
+        except Exception as e:
+            log.error(f"Failed to dispatch F&O trade telegram: {e}")
+            result["telegram_dispatched"] = False
+
+    return result
 
 
 class PaperTradeRequest(BaseModel):
@@ -1239,7 +1532,47 @@ class AutoTradeConfig(BaseModel):
     ml_bearish_gate: Optional[float] = Field(None, ge=0, le=1)
 
 
-@app.post("/api/fo-suggestions/paper-trade")
+@app.post("/api/fo-suggestions/force-auto-trade")
+async def force_suggestions_auto_trade_endpoint():
+    """
+    Manually triggers a scan and immediately auto-trades any high-conviction
+    suggestions found. This ignores the is_market_open() check for convenience.
+    """
+    log.info("⚡ Manually triggering suggestion-based auto-trade...")
+    
+    # Run scan
+    results = await _internal_scan()
+    
+    # We need a force version or just call it directly without help of asyncio task
+    # to wait for it to finish for the response.
+    
+    from .suggestions import generate_suggestions
+    suggestions = generate_suggestions(results, LOT_SIZES, STRIKE_INTERVALS)
+    auto_suggestions = [s for s in suggestions if s.get("conviction", 0) >= 60]
+    
+    count = 0
+    for s in auto_suggestions:
+        symbol = s["symbol"].upper()
+        entry = s["entry"]
+        strat = s["strategy"]
+        conviction = s["conviction"]
+        
+        # Reason prefix for these forced ones
+        reason = f"Auto: Suggestion (Forced) | Conviction {conviction} | {strat['strategy']}"
+        lot = s["sizing"]["lot_size"]
+        
+        db.add_trade(
+            symbol, entry["primary_type"], entry["primary_strike"], 
+            entry["entry_premium"], reason, lot_size=lot, entry_score=conviction
+        )
+        count += 1
+        log.info(f"  🚀 FORCED SUCCESS: Auto-traded {symbol}")
+
+    return {
+        "status": "success", 
+        "message": f"Added {count} suggestions to paper trades.",
+        "count": count
+    }
 async def suggestion_paper_trade(req: PaperTradeRequest):
     """
     Create a paper trade from a suggestion.
@@ -1260,7 +1593,9 @@ async def suggestion_paper_trade(req: PaperTradeRequest):
             "market_status": market_status(),
         }
 
-    reason = req.reason or f"Suggestion trade: {symbol} {opt_type} {req.strike}"
+    # Use consistent prefix so it shows in "Auto" section as requested by user
+    prefix = "Auto: Suggestion"
+    reason = f"{prefix} | {req.reason}" if req.reason else f"{prefix}: {symbol} {opt_type} {req.strike}"
     lot = max(1, req.lot_size)
     db.add_trade(symbol, opt_type, req.strike, req.entry_price, reason, lot_size=lot)
 
@@ -1423,7 +1758,10 @@ async def get_chain(symbol: str, expiry: str = None):
     if expiry:
         rows = [r for r in rows if r.get("expiryDate") == expiry]
 
-    chain_stats = compute_stock_score(data, spot, symbol, prev_chain_data=None, fii_net=0.0)
+    ivr = db.get_iv_rank(symbol)
+    sector = get_sector(symbol)
+    sector_sig = _last_sector_heatmap.get(sector, {}).get("signal", "NEUTRAL")
+    chain_stats = compute_stock_score(data, spot, symbol, sector_signal=sector_sig)
     top_picks = chain_stats.get("top_picks", [])
     
     ce_scores = {p["strike"]: p["score"] for p in top_picks if p["type"] == "CE"}
@@ -1708,7 +2046,11 @@ async def straddle_screener(min_iv: float = 15.0, max_pcr_delta: float = 0.3):
 
                 ivr     = db.get_iv_rank(symbol)
                 exp     = expiries[0] if expiries else ""
-                stats   = compute_stock_score(chain, spot, symbol, expiry_str=exp, iv_rank_data=ivr, prev_chain_data=None, fii_net=0.0)
+                
+                sector = get_sector(symbol)
+                sector_sig = _last_sector_heatmap.get(sector, {}).get("signal", "NEUTRAL")
+                
+                stats   = compute_stock_score(chain, spot, symbol, expiry_str=exp, iv_rank_data=ivr, sector_signal=sector_sig)
                 pcr     = stats.get("pcr", 1.0)
                 atm_iv  = stats.get("iv", 0)
 
@@ -2183,7 +2525,8 @@ if os.path.isdir(dist_path):
 async def _internal_scan() -> list:
     all_symbols = INDEX_SYMBOLS + FO_STOCKS
     ltp_map = await fetch_indstocks_ltp(all_symbols)
-    sem = asyncio.Semaphore(8)
+    # ⚡ High Concurrency: 30 symbols at once
+    sem = asyncio.Semaphore(30)
 
     async def process(symbol):
         async with sem:
@@ -2194,16 +2537,23 @@ async def _internal_scan() -> list:
                 if spot == 0: return None
                 ivr   = db.get_iv_rank(symbol)
                 exp   = recs.get("expiryDates", [""])[0]
-                stats = compute_stock_score(cj, spot, symbol, exp, ivr, prev_chain_data=None, fii_net=0.0)
                 
-                # Add ML prediction
+                # Use cached sector signal if available
+                sector = get_sector(symbol)
+                sector_sig = _last_sector_heatmap.get(sector, {}).get("signal", "NEUTRAL")
+                
+                # Initial score with sector alignment
+                stats = compute_stock_score(cj, float(spot), symbol, exp, ivr, sector_signal=sector_sig)
+                
+                # Add ML prediction and refine score
                 stats["spot_price"] = float(spot)
                 ml_prob = ml_predict(stats, symbol=symbol)
                 stats["ml_bullish_probability"] = ml_prob
                 
-                # Check for auto-trade triggers in background
-                top_picks = stats.get("top_picks", [])
-                _handle_auto_trade(symbol, stats, ml_prob, top_picks)
+                # Refine score with ML conviction (re-call or manual)
+                if ml_prob is not None:
+                    stats = compute_stock_score(cj, spot, symbol, exp, ivr, sector_signal=sector_sig, ml_prob=ml_prob)
+                    stats["ml_bullish_probability"] = ml_prob # preserve it
                 
                 return {"symbol": symbol, "ltp": spot, **stats}
             except Exception as e:
@@ -2211,7 +2561,18 @@ async def _internal_scan() -> list:
                 return None
 
     raw = await asyncio.gather(*[process(s) for s in all_symbols])
-    return [r for r in raw if r]
+    results = [r for r in raw if r]
+    
+    # Update sector cache for next scan
+    global _last_sector_heatmap, _last_sector_update
+    _last_sector_heatmap = build_sector_heatmap(results)
+    _last_sector_update = datetime.now()
+    
+    # ── Execute Suggestion-Based Auto-Trades ─────────────────
+    if is_market_open():
+        asyncio.create_task(_execute_suggestions_auto_trade(results))
+
+    return results
 
 
 

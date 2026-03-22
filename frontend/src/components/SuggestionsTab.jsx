@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 
-const REFRESH_INTERVAL_MS = 120000; // 2 minutes
+const REFRESH_INTERVAL_MS = 60000; // 1 minute
 
 async function apiFetch(path, options = {}) {
   const API = "";
@@ -301,6 +301,8 @@ export default function SuggestionsTab({ theme, goChain }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [countdown, setCountdown] = useState(60);
 
   const fetchSuggestions = useCallback(async () => {
     setLoading(true);
@@ -309,6 +311,7 @@ export default function SuggestionsTab({ theme, goChain }) {
       const result = await apiFetch("/api/fo-suggestions");
       setData(result);
       setLastRefresh(new Date().toLocaleTimeString());
+      setCountdown(60); // Reset countdown on success
     } catch (e) {
       setError(e.message);
     } finally {
@@ -316,10 +319,24 @@ export default function SuggestionsTab({ theme, goChain }) {
     }
   }, []);
 
+  // Handle auto-refresh interval and countdown
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const id = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) {
+          fetchSuggestions();
+          return 60;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [autoRefresh, fetchSuggestions]);
+
+  // Initial fetch
   useEffect(() => {
     fetchSuggestions();
-    const id = setInterval(fetchSuggestions, REFRESH_INTERVAL_MS);
-    return () => clearInterval(id);
   }, [fetchSuggestions]);
 
   if (loading && !data) return <Loader theme={theme} />;
@@ -337,9 +354,9 @@ export default function SuggestionsTab({ theme, goChain }) {
       {/* Header */}
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "center",
-        marginBottom: 16, flexWrap: "wrap", gap: 8
+        marginBottom: 16, flexWrap: "wrap", gap: 12
       }}>
-        <div>
+        <div style={{ flex: 1, minWidth: 200 }}>
           <h2 style={{ margin: 0, fontSize: 18, display: "flex", alignItems: "center", gap: 8 }}>
             💡 Best F&O Trade Suggestions
           </h2>
@@ -347,17 +364,45 @@ export default function SuggestionsTab({ theme, goChain }) {
             AI-powered ranked trade ideas with strategies, risk/reward & conviction scores
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {lastRefresh && <span style={{ fontSize: 10, color: theme.muted }}>Updated: {lastRefresh}</span>}
-          <button
-            onClick={fetchSuggestions}
-            disabled={loading}
-            style={{
-              padding: "6px 14px", borderRadius: 6, fontSize: 11, fontWeight: 700,
-              background: loading ? theme.border : "#6366f1",
-              color: "#fff", border: "none", cursor: loading ? "wait" : "pointer"
-            }}
-          >{loading ? "⟳" : "Refresh"}</button>
+        
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          {/* Refresh Controls */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", color: theme.text }}>
+              <input 
+                type="checkbox" 
+                checked={autoRefresh} 
+                onChange={(e) => setAutoRefresh(e.target.checked)}
+                style={{ cursor: "pointer" }}
+              />
+              Auto-refresh
+            </label>
+            {autoRefresh && (
+              <span style={{ color: theme.muted, minWidth: 85 }}>
+                in <b style={{ color: "#6366f1" }}>{countdown}s</b>
+              </span>
+            )}
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+            <button
+              onClick={fetchSuggestions}
+              disabled={loading}
+              style={{
+                padding: "6px 14px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+                background: loading ? theme.border : "#6366f1",
+                color: "#fff", border: "none", cursor: loading ? "wait" : "pointer",
+                transition: "opacity 0.2s"
+              }}
+            >
+              {loading ? "⟳ Updating..." : "Refresh Now"}
+            </button>
+            {lastRefresh && (
+              <span style={{ fontSize: 9, color: theme.muted, marginTop: 4 }}>
+                Last sync: {lastRefresh}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 

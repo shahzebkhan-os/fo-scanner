@@ -584,7 +584,7 @@ export default function PaperTradingTab({ theme }) {
             📝 Paper Trading
           </h2>
           <div style={{ fontSize: 11, color: theme.muted, marginTop: 2 }}>
-            Auto paper trades when confidence &gt; 80 · Managed with adaptive SL/TP · Tracked for better exit
+            Auto paper trades & suggestions · Managed with adaptive SL/TP · Tracked for better exit
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -870,7 +870,7 @@ export default function PaperTradingTab({ theme }) {
             }}
             onMouseEnter={(e) => e.currentTarget.style.transform = "scale(1.05)"}
             onMouseLeave={(e) => e.currentTarget.style.transform = "scale(1)"}>ALL</button>
-            {intervals.slice(0, 5).map(interval => {
+            {intervals.reverse().map(interval => {
               const time = new Date(interval).toLocaleTimeString("en-IN", {
                 timeZone: IST_TZ,
                 hour: "2-digit",

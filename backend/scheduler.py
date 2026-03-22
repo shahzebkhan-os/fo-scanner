@@ -530,11 +530,11 @@ async def ml_retrain_loop():
 
 async def auto_trade_loop():
     """
-    Background loop that triggers a full scan every 5 minutes.
+    Background loop that triggers a full scan every 15 minutes.
     Since _internal_scan is now wired to _handle_auto_trade,
     this drives the background auto-paper-trading.
     """
-    log.info("Auto Trade background loop started (5 min interval).")
+    log.info("Auto Trade background loop started (15 min interval).")
     while True:
         try:
             if _is_market_open_fn and _is_market_open_fn():
@@ -544,10 +544,10 @@ async def auto_trade_loop():
                     await _scan_all_symbols_fn()
                     log.info("Auto Trade: Background scan cycle completed.")
             
-            await asyncio.sleep(300)  # 5 minutes
+            await asyncio.sleep(900)  # 15 minutes
         except Exception as e:
             log.error(f"Auto trade loop error: {e}")
-            await asyncio.sleep(300)
+            await asyncio.sleep(900)
 
 
 async def start_all():
@@ -557,7 +557,7 @@ async def start_all():
     asyncio.create_task(pre_market_report_loop())
     asyncio.create_task(bulk_deals_loop())
     asyncio.create_task(db_cleanup_loop())
-    asyncio.create_task(auto_tpsl_loop())
+    # asyncio.create_task(auto_tpsl_loop()) # Redundant with paper_trade_manager in main.py
     asyncio.create_task(accuracy_sampler_loop())
     asyncio.create_task(accuracy_price_updater_loop())
     asyncio.create_task(ml_retrain_loop())

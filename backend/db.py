@@ -298,6 +298,12 @@ def init_db():
             except Exception:
                 pass  # Column already exists — safe
 
+    # Migration: Add entry_score to paper_trades
+    with _conn() as c:
+        try:
+            c.execute("ALTER TABLE paper_trades ADD COLUMN entry_score INTEGER DEFAULT 0")
+        except:
+            pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Paper Trades
@@ -815,6 +821,29 @@ def get_oi_heatmap(symbol: str, snap_date: str = None) -> list:
             ORDER BY strike ASC, snap_time ASC
         """, (symbol, snap_date)).fetchall()
     return [dict(r) for r in rows]
+
+def get_daily_oi_totals(symbol: str, days: int = 3) -> dict:
+    """
+    Returns the total CE and PE Open Interest at the end of each day for the last N days.
+    """
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT snap_date, snap_time, opt_type, SUM(oi) as total_oi
+            FROM oi_history
+            WHERE symbol=? AND snap_date >= date('now', ? || ' days')
+            GROUP BY snap_date, snap_time, opt_type
+            ORDER BY snap_date ASC, snap_time ASC
+        """, (symbol, f"-{days}")).fetchall()
+        
+    daily = {}
+    for r in rows:
+        d = r["snap_date"]
+        # Since rows are ordered by snap_time ASC, the last loops will retain the EOD snapshot
+        if d not in daily:
+            daily[d] = {"CE": 0, "PE": 0}
+        daily[d][r["opt_type"]] = r["total_oi"]
+        
+    return daily
 
 def get_volume_baseline(symbol: str, strike: float, opt_type: str, days: int = 5) -> float:
     """
