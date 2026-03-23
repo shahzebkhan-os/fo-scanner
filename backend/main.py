@@ -2624,6 +2624,48 @@ async def ml_predictions_endpoint():
 # Technical Indicator Scoring (Experimental — for comparison only)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _compute_timeframe_consensus(tf_results: dict) -> dict:
+    """Analyze cross-timeframe directional agreement.
+
+    Args:
+        tf_results: Dict with keys '5m', '15m', '30m' containing TechnicalScore dicts
+
+    Returns:
+        Consensus analysis with alignment metrics
+    """
+    from collections import Counter
+
+    directions = {tf: res.get("direction", "NEUTRAL") for tf, res in tf_results.items()}
+
+    # Count occurrences
+    dir_counts = Counter(directions.values())
+
+    # Majority direction
+    majority_direction = dir_counts.most_common(1)[0][0]
+    majority_count = dir_counts[majority_direction]
+
+    # Check if all agree
+    all_agree = len(set(directions.values())) == 1
+
+    # Consensus strength (what % of timeframes agree)
+    consensus_strength = majority_count / len(directions)
+
+    # Identify aligned timeframes
+    timeframes_aligned = [tf for tf, d in directions.items() if d == majority_direction]
+
+    # Divergence warning: all three different
+    divergence_warning = len(set(directions.values())) == 3
+
+    return {
+        "all_agree": all_agree,
+        "majority_direction": majority_direction,
+        "consensus_strength": consensus_strength,
+        "timeframes_aligned": timeframes_aligned,
+        "divergence_warning": divergence_warning,
+        "detail": directions
+    }
+
+
 @app.get("/api/score-technical/{symbol}")
 async def score_technical_endpoint(symbol: str):
     """Return the experimental technical-indicator score for *symbol*.
@@ -2696,6 +2738,13 @@ async def score_technical_endpoint(symbol: str):
     res_15m = compute_technical_score(c15, h15, l15, v15)
     res_30m = compute_technical_score(c30, h30, l30, v30)
 
+    # Compute timeframe consensus
+    timeframe_consensus = _compute_timeframe_consensus({
+        "5m": res_5m.to_dict(),
+        "15m": res_15m.to_dict(),
+        "30m": res_30m.to_dict()
+    })
+
     # Also compute the existing OI-based score for comparison if chain data is available
     existing_score = None
     try:
@@ -2720,6 +2769,7 @@ async def score_technical_endpoint(symbol: str):
             "15m": res_15m.to_dict(),
             "30m": res_30m.to_dict(),
         },
+        "timeframe_consensus": timeframe_consensus,
         "existing_score": existing_score,
         "bars_used": len(c5),
     }

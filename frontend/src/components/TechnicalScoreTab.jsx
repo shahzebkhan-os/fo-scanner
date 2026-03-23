@@ -5,6 +5,19 @@ import {
   PolarRadiusAxis, Radar
 } from "recharts";
 
+// Add CSS for direction pulse animation
+const styleElement = document.createElement('style');
+styleElement.textContent = `
+  @keyframes directionPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.95; transform: scale(1.01); }
+  }
+`;
+if (!document.head.querySelector('style[data-tech-score-animations]')) {
+  styleElement.setAttribute('data-tech-score-animations', 'true');
+  document.head.appendChild(styleElement);
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 async function apiFetch(path) {
   const r = await fetch(path);
@@ -149,6 +162,216 @@ function IndicatorCard({ name, data, subScore, theme }) {
         ))}
       </div>
       <div style={{ fontSize: 10, color: theme.muted, marginTop: 6 }}>{meta.desc}</div>
+    </Card>
+  );
+}
+
+// ── Directional Banner (Hero Element) ───────────────────────────────────────
+function DirectionalBanner({ tech, theme }) {
+  if (!tech) return null;
+
+  const direction = tech.direction;
+  const strength = tech.direction_strength;
+  const edge = tech.directional_edge || 0;
+  const agreement = tech.agreement_pct || 0;
+
+  const isStrong = strength === "STRONG";
+  const isWeak = strength === "WEAK";
+  const isSideways = strength === "SIDEWAYS";
+  const isBullish = direction === "BULLISH";
+  const isBearish = direction === "BEARISH";
+
+  const baseColor = isBullish ? "#22c55e" : isBearish ? "#ef4444" : "#94a3b8";
+  const bgColor = isBullish
+    ? (isStrong ? "rgba(34,197,94,0.15)" : "rgba(34,197,94,0.08)")
+    : isBearish
+    ? (isStrong ? "rgba(239,68,68,0.15)" : "rgba(239,68,68,0.08)")
+    : "rgba(148,163,184,0.05)";
+
+  const arrowIcon = isBullish ? "▲▲▲" : isBearish ? "▼▼▼" : "◆◆◆";
+  const emoji = isBullish ? "🚀" : isBearish ? "📉" : isStrong ? "➡️" : "〰️";
+
+  const message = isStrong
+    ? (isBullish ? "Strong Uptrend Detected" : isBearish ? "Strong Downtrend Detected" : "Strong Sideways Action")
+    : isWeak
+    ? (isBullish ? "Weak Bullish Bias" : isBearish ? "Weak Bearish Bias" : "Weak Direction")
+    : "Consolidating / No Clear Direction";
+
+  return (
+    <div style={{
+      background: bgColor,
+      border: `3px solid ${baseColor}`,
+      borderRadius: 12,
+      padding: "24px",
+      marginBottom: 20,
+      textAlign: "center",
+      animation: isStrong ? "directionPulse 2s ease-in-out infinite" : "none",
+      boxShadow: isStrong ? `0 0 20px ${baseColor}30` : "none"
+    }}>
+      <div style={{
+        fontSize: 48,
+        fontWeight: 900,
+        color: baseColor,
+        letterSpacing: 4,
+        marginBottom: 12,
+        textShadow: isStrong ? `0 0 10px ${baseColor}60` : "none"
+      }}>
+        {arrowIcon}
+      </div>
+      <div style={{ fontSize: 40, fontWeight: 900, color: baseColor, marginBottom: 8, letterSpacing: 1 }}>
+        {direction} {emoji}
+      </div>
+      <div style={{ fontSize: 18, fontWeight: 700, color: theme.text, marginBottom: 16, opacity: 0.9 }}>
+        {message}
+      </div>
+      <div style={{ display: "flex", justifyContent: "center", gap: 24, fontSize: 14, flexWrap: "wrap" }}>
+        <div>
+          <span style={{ color: theme.muted }}>Directional Edge: </span>
+          <b style={{ color: baseColor }}>{(edge * 100).toFixed(1)}%</b>
+        </div>
+        <div>
+          <span style={{ color: theme.muted }}>Agreement: </span>
+          <b style={{ color: baseColor }}>{(agreement * 100).toFixed(0)}%</b>
+        </div>
+        <div>
+          <span style={{ color: theme.muted }}>Strength: </span>
+          <b style={{ color: baseColor }}>{strength}</b>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Timeframe Consensus ──────────────────────────────────────────────────────
+function TimeframeConsensus({ consensus, theme }) {
+  if (!consensus) return null;
+
+  const allAgree = consensus.all_agree;
+  const strength = consensus.consensus_strength;
+  const majorityDir = consensus.majority_direction;
+
+  const bgColor = allAgree
+    ? "rgba(34,197,94,0.1)"
+    : strength >= 0.66
+    ? "rgba(251,146,60,0.1)"
+    : "rgba(239,68,68,0.1)";
+
+  const borderColor = allAgree ? "#22c55e" : strength >= 0.66 ? "#f59e0b" : "#ef4444";
+  const icon = allAgree ? "✓✓✓" : strength >= 0.66 ? "⚠" : "✗";
+  const signalColor = majorityDir === "BULLISH" ? "#22c55e" : majorityDir === "BEARISH" ? "#ef4444" : "#94a3b8";
+
+  return (
+    <Card theme={theme} style={{ background: bgColor, border: `2px solid ${borderColor}`, padding: 16 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 12 }}>
+        TIMEFRAME CONSENSUS
+      </div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, marginBottom: 12 }}>
+        <div style={{ fontSize: 28, fontWeight: 800 }}>{icon}</div>
+        <div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: signalColor }}>{majorityDir}</div>
+          <div style={{ fontSize: 11, color: theme.muted }}>
+            <b>{(strength * 100).toFixed(0)}%</b> agreement
+          </div>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 12 }}>
+        {["5m", "15m", "30m"].map(tf => {
+          const aligned = consensus.timeframes_aligned.includes(tf);
+          const tfDir = consensus.detail[tf];
+          const tfColor = tfDir === "BULLISH" ? "#22c55e" : tfDir === "BEARISH" ? "#ef4444" : "#94a3b8";
+          return (
+            <div key={tf} style={{
+              padding: "6px 12px", borderRadius: 6,
+              background: aligned ? tfColor : theme.border,
+              color: aligned ? "#fff" : theme.muted,
+              fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", gap: 4
+            }}>
+              {tf} {aligned && <span>✓</span>}
+            </div>
+          );
+        })}
+      </div>
+      {consensus.divergence_warning && (
+        <div style={{
+          padding: 8, background: "rgba(239,68,68,0.1)", borderRadius: 6,
+          fontSize: 11, color: "#ef4444", fontWeight: 600, textAlign: "center",
+          border: "1px solid rgba(239,68,68,0.3)"
+        }}>
+          ⚠ WARNING: All timeframes show different directions - wait for alignment
+        </div>
+      )}
+      {allAgree && (
+        <div style={{
+          padding: 8, background: "rgba(34,197,94,0.1)", borderRadius: 6,
+          fontSize: 11, color: "#22c55e", fontWeight: 600, textAlign: "center",
+          border: "1px solid rgba(34,197,94,0.3)"
+        }}>
+          ✓✓✓ All timeframes aligned - high conviction setup
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Trend Strength Meter ─────────────────────────────────────────────────────
+function TrendStrengthMeter({ adx, plusDI, minusDI, theme }) {
+  if (!adx) return null;
+
+  const level = adx < 15 ? "NO TREND" : adx < 25 ? "EMERGING" : adx < 40 ? "STRONG" : adx < 60 ? "VERY STRONG" : "EXTREME";
+  const color = adx < 15 ? "#94a3b8" : adx < 25 ? "#f59e0b" : adx < 40 ? "#22c55e" : adx < 60 ? "#10b981" : "#059669";
+  const barPct = Math.min(100, (adx / 60) * 100);
+
+  const advice = adx < 15
+    ? "⚠ Avoid directional trades - market is choppy"
+    : adx < 25
+    ? "📊 Trend developing - watch for continuation"
+    : adx < 40
+    ? "✓ Good trending environment - trade with confidence"
+    : "✓✓ Exceptional trend strength - ride the move";
+
+  const bullishDI = plusDI > minusDI;
+  const diSpread = Math.abs(plusDI - minusDI);
+
+  return (
+    <Card theme={theme} style={{ padding: 16 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 12 }}>
+        TREND STRENGTH (ADX)
+      </div>
+      <div style={{
+        fontSize: 48, fontWeight: 900, color: color, marginBottom: 12, textAlign: "center",
+        textShadow: adx >= 40 ? `0 0 10px ${color}40` : "none"
+      }}>
+        {adx.toFixed(0)}
+      </div>
+      <div style={{
+        height: 14, background: theme.border, borderRadius: 7, overflow: "hidden",
+        marginBottom: 12, position: "relative"
+      }}>
+        <div style={{
+          height: "100%", background: `linear-gradient(to right, ${color}, ${color}dd)`,
+          width: `${barPct}%`, transition: "width 0.8s ease",
+          boxShadow: adx >= 40 ? `0 0 8px ${color}60` : "none"
+        }} />
+        <div style={{ position: "absolute", left: "25%", top: 0, bottom: 0, width: 2, background: "rgba(0,0,0,0.2)" }} />
+        <div style={{ position: "absolute", left: "41.67%", top: 0, bottom: 0, width: 2, background: "rgba(0,0,0,0.2)" }} />
+      </div>
+      <div style={{ fontSize: 16, fontWeight: 800, color: color, textAlign: "center", marginBottom: 12, letterSpacing: 1 }}>
+        {level}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12, fontSize: 12 }}>
+        <div style={{ color: "#22c55e", fontWeight: bullishDI ? 700 : 600, opacity: bullishDI ? 1 : 0.6 }}>
+          +DI: {plusDI.toFixed(1)}{bullishDI && diSpread > 10 && " ↑"}
+        </div>
+        <div style={{ color: "#ef4444", fontWeight: !bullishDI ? 700 : 600, opacity: !bullishDI ? 1 : 0.6 }}>
+          -DI: {minusDI.toFixed(1)}{!bullishDI && diSpread > 10 && " ↓"}
+        </div>
+      </div>
+      <div style={{
+        fontSize: 11, color: theme.text, textAlign: "center", padding: 10,
+        background: theme.bg, borderRadius: 6, lineHeight: 1.4, border: `1px solid ${theme.border}`
+      }}>
+        {advice}
+      </div>
     </Card>
   );
 }
@@ -475,20 +698,55 @@ export default function TechnicalScoreTab({ theme, scanData }) {
       {result && tech && (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
 
-          {/* Top row: Score Gauge + Comparison + Summary */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+          {/* HERO: Directional Banner */}
+          <DirectionalBanner tech={tech} theme={theme} />
 
-            {/* Score Gauge */}
-            <Card theme={theme} style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 }}>
-              <div style={{ fontSize: 11, color: theme.muted, marginBottom: 8, fontWeight: 600 }}>TECHNICAL SCORE</div>
-              <ScoreGauge score={tech.score} direction={tech.direction} confidence={tech.confidence} theme={theme} />
-              <div style={{ fontSize: 10, color: theme.muted, marginTop: 10 }}>
-                {result.bars_used} price bars analysed
+          {/* Row 1: Key metrics + Trend Strength + Timeframe Consensus */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+
+            {/* Score gauge (compact) */}
+            <Card theme={theme} style={{ textAlign: "center", padding: 16 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 8 }}>
+                COMPOSITE SCORE
+              </div>
+              <div style={{ fontSize: 42, fontWeight: 900, color: signalColor(tech.direction) }}>
+                {tech.score}
+              </div>
+              <div style={{ fontSize: 11, color: theme.muted }}>/ 100</div>
+            </Card>
+
+            {/* Confidence */}
+            <Card theme={theme} style={{ textAlign: "center", padding: 16 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 8 }}>
+                CONFIDENCE
+              </div>
+              <div style={{ fontSize: 42, fontWeight: 900, color: signalColor(tech.direction) }}>
+                {fmt(tech.confidence * 100, 0)}%
+              </div>
+              <div style={{ fontSize: 11, color: theme.muted }}>
+                {tech.confidence >= 0.7 ? "High" : tech.confidence >= 0.5 ? "Medium" : "Low"}
               </div>
             </Card>
 
-            {/* Comparison */}
-            <Card theme={theme} style={{ padding: 24 }}>
+            {/* Trend Strength */}
+            <TrendStrengthMeter
+              adx={tech.indicators.adx?.adx}
+              plusDI={tech.indicators.adx?.plus_di}
+              minusDI={tech.indicators.adx?.minus_di}
+              theme={theme}
+            />
+
+            {/* Timeframe Consensus */}
+            {result.timeframe_consensus && (
+              <TimeframeConsensus
+                consensus={result.timeframe_consensus}
+                theme={theme}
+              />
+            )}
+          </div>
+
+          {/* Row 2: Model Comparison */}
+          <Card theme={theme} style={{ padding: 24, marginBottom: 16 }}>
               <div style={{ fontSize: 11, color: theme.muted, marginBottom: 12, fontWeight: 600 }}>MODEL COMPARISON</div>
               {blendedScore !== null && (
                 <div style={{ marginBottom: 10, padding: "6px 10px", borderRadius: 6, background: "rgba(99,102,241,.08)", fontSize: 12 }}>
