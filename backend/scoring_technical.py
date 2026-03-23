@@ -33,7 +33,10 @@ class TechnicalScore:
 
     score: int  # 0-100
     direction: str  # BULLISH / BEARISH / NEUTRAL
-    confidence: float  # 0.0-1.0
+    direction_strength: str = "UNKNOWN"  # STRONG / WEAK / SIDEWAYS
+    directional_edge: float = 0.0  # Net weighted directional bias (-1.0 to +1.0)
+    agreement_pct: float = 0.0  # % of weight committed to direction (0.0 to 1.0)
+    confidence: float = 0.0  # 0.0-1.0
     indicators: Dict[str, dict] = field(default_factory=dict)
     sub_scores: Dict[str, float] = field(default_factory=dict)
     reasons: List[str] = field(default_factory=list)
@@ -42,6 +45,9 @@ class TechnicalScore:
         return {
             "score": self.score,
             "direction": self.direction,
+            "direction_strength": self.direction_strength,
+            "directional_edge": round(self.directional_edge, 4),
+            "agreement_pct": round(self.agreement_pct, 4),
             "confidence": round(self.confidence, 4),
             "indicators": self.indicators,
             "sub_scores": {k: round(v, 4) for k, v in self.sub_scores.items()},
@@ -54,7 +60,9 @@ class TechnicalScore:
 # ──────────────────────────────────────────────────────────────────────────────
 
 DIRECTION_THRESHOLD = 0.05          # min |raw_score| to count as directional
-MIN_INDICATOR_AGREEMENT = 4         # minimum indicators in same direction
+MIN_INDICATOR_AGREEMENT = 4         # minimum indicators in same direction (legacy, not used in weighted)
+STRONG_DIRECTION_THRESHOLD = 0.15   # 15% weighted edge = STRONG direction
+WEAK_DIRECTION_THRESHOLD = 0.05     # 5% weighted edge = WEAK direction
 BASE_CONFIDENCE = 0.3               # baseline confidence before agreement
 AGREEMENT_WEIGHT = 0.5              # scaling for indicator agreement ratio
 STRONG_TREND_ADX = 25               # ADX above this boosts confidence
@@ -80,6 +88,65 @@ WEIGHTS: Dict[str, float] = {
     "volume": 0.10,
     "vwap": 0.05,
 }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Direction determination logic
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _determine_direction_weighted(
+    raw_scores: Dict[str, float],
+    weights: Dict[str, float]
+) -> tuple:
+    """Determine direction using weighted consensus instead of simple voting.
+
+    This addresses the issue where all indicators get equal votes despite having
+    different weights (e.g., MACD=20% vs VWAP=5%).
+
+    Returns:
+        (direction, strength, agreement_pct, net_edge)
+        - direction: "BULLISH", "BEARISH", or "NEUTRAL"
+        - strength: "STRONG", "WEAK", or "SIDEWAYS"
+        - agreement_pct: Total weighted commitment to direction (0.0-1.0)
+        - net_edge: Net directional bias (-1.0 to +1.0)
+    """
+    # Calculate weighted contributions for bullish and bearish signals
+    weighted_bull = sum(
+        max(0, raw_scores[k]) * weights[k]
+        for k in weights
+        if raw_scores.get(k, 0) > DIRECTION_THRESHOLD
+    )
+
+    weighted_bear = sum(
+        abs(min(0, raw_scores[k])) * weights[k]
+        for k in weights
+        if raw_scores.get(k, 0) < -DIRECTION_THRESHOLD
+    )
+
+    # Net directional edge (range: -1.0 to +1.0)
+    net_edge = weighted_bull - weighted_bear
+
+    # Total committed weight (how much is directional vs neutral)
+    total_committed = weighted_bull + weighted_bear
+
+    # Determine direction and strength based on net edge
+    if net_edge > STRONG_DIRECTION_THRESHOLD:
+        direction = "BULLISH"
+        strength = "STRONG"
+    elif net_edge > WEAK_DIRECTION_THRESHOLD:
+        direction = "BULLISH"
+        strength = "WEAK"
+    elif net_edge < -STRONG_DIRECTION_THRESHOLD:
+        direction = "BEARISH"
+        strength = "STRONG"
+    elif net_edge < -WEAK_DIRECTION_THRESHOLD:
+        direction = "BEARISH"
+        strength = "WEAK"
+    else:
+        direction = "NEUTRAL"
+        strength = "SIDEWAYS"
+
+    return direction, strength, total_committed, net_edge
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -212,16 +279,10 @@ def compute_technical_score(
     if vwap_reason:
         reasons.append(vwap_reason)
 
-    # ── Determine direction by majority vote ─────────────────────────────
-    bull_count = sum(1 for s in raw_scores.values() if s > DIRECTION_THRESHOLD)
-    bear_count = sum(1 for s in raw_scores.values() if s < -DIRECTION_THRESHOLD)
-
-    if bull_count >= MIN_INDICATOR_AGREEMENT and bull_count > bear_count:
-        direction = "BULLISH"
-    elif bear_count >= MIN_INDICATOR_AGREEMENT and bear_count > bull_count:
-        direction = "BEARISH"
-    else:
-        direction = "NEUTRAL"
+    # ── Determine direction using weighted consensus ─────────────────────
+    direction, direction_strength, agreement_pct, net_edge = _determine_direction_weighted(
+        raw_scores, WEIGHTS
+    )
 
     # ── Direction-aware sub-scores (0-100) ───────────────────────────────
     sub_scores: Dict[str, float] = {}
@@ -238,10 +299,8 @@ def compute_technical_score(
     final_score = int(max(0, min(100, weighted)))
 
     # ── Confidence ───────────────────────────────────────────────────────
-    total_indicators = len(raw_scores)
-    aligned = max(bull_count, bear_count)
-    agreement = aligned / total_indicators if total_indicators else 0
-    confidence = BASE_CONFIDENCE + agreement * AGREEMENT_WEIGHT
+    # Base confidence + agreement boost + ADX boost
+    confidence = BASE_CONFIDENCE + agreement_pct * AGREEMENT_WEIGHT
     # Boost confidence when ADX shows strong trend
     if adx_val > STRONG_TREND_ADX:
         confidence += ADX_CONFIDENCE_BOOST
@@ -250,6 +309,9 @@ def compute_technical_score(
     return TechnicalScore(
         score=final_score,
         direction=direction,
+        direction_strength=direction_strength,
+        directional_edge=net_edge,
+        agreement_pct=agreement_pct,
         confidence=confidence,
         indicators=indicators,
         sub_scores=sub_scores,
