@@ -173,18 +173,37 @@ function TradeCard({ trade, theme, goChain }) {
     }
   }
 
+  const isBullish = trade.signal === "BULLISH";
+  const isBearish = trade.signal === "BEARISH";
+  const cardBg = isBullish
+    ? "linear-gradient(to right, rgba(34,197,94,0.08), transparent)"
+    : isBearish
+      ? "linear-gradient(to right, rgba(239,68,68,0.08), transparent)"
+      : theme.card;
+
   return (
     <Card theme={theme} style={{
-      borderLeft: `4px solid ${signalColor(trade.signal)}`,
-      marginBottom: 14,
+      borderLeft: `6px solid ${signalColor(trade.signal)}`,
+      background: cardBg,
+      marginBottom: 16,
       animation: "fadeIn 0.3s ease",
+      boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
     }}>
       {/* Header row */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div style={{ flex: 1 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-            <span style={{ fontSize: 17, fontWeight: 700 }}>{trade.symbol}</span>
-            <Badge label={trade.signal} color={signalColor(trade.signal)} bg={signalBg(trade.signal)} />
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 20, fontWeight: 800, color: theme.text }}>
+              {isBullish ? "📈" : isBearish ? "📉" : ""} {trade.symbol}
+            </span>
+            <span style={{
+              padding: "4px 12px", borderRadius: 8, fontSize: 13, fontWeight: 800, letterSpacing: 0.5,
+              color: signalColor(trade.signal), background: signalBg(trade.signal),
+              border: `1px solid ${signalColor(trade.signal)}`,
+              boxShadow: `0 0 10px ${signalBg(trade.signal)}`
+            }}>
+              {isBullish ? "↑ BULLISH" : isBearish ? "↓ BEARISH" : trade.signal}
+            </span>
             {strat.strategy && <Badge label={strat.strategy} color="#6366f1" bg="rgba(99,102,241,.12)" />}
             {trade.bulk_aligned && (
               <Badge label="📦 Bulk Deal" color="#f59e0b" bg="rgba(245,158,11,.12)" />
@@ -384,11 +403,11 @@ export default function FOTradeTab({ theme, goChain }) {
           <div style={{ fontSize: 9, color: theme.muted }}>Trades Found</div>
         </Card>
         <Card theme={theme} style={{ textAlign: "center", padding: 10 }}>
-          <div style={{ fontSize: 22, fontWeight: 700, color: "#22c55e" }}>{bullish}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: "#22c55e" }}>📈 {bullish}</div>
           <div style={{ fontSize: 9, color: theme.muted }}>Bullish</div>
         </Card>
         <Card theme={theme} style={{ textAlign: "center", padding: 10 }}>
-          <div style={{ fontSize: 22, fontWeight: 700, color: "#ef4444" }}>{bearish}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: "#ef4444" }}>📉 {bearish}</div>
           <div style={{ fontSize: 9, color: theme.muted }}>Bearish</div>
         </Card>
         <Card theme={theme} style={{ textAlign: "center", padding: 10 }}>

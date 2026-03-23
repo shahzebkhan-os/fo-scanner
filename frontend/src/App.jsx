@@ -279,7 +279,7 @@ export default function App() {
         <div style={{ display: tab === "uoa"       ? "block" : "none" }}><UOATab theme={theme} onChain={goChain} /></div>
         <div style={{ display: tab === "straddle"  ? "block" : "none" }}><StraddleTab theme={theme} /></div>
         <div style={{ display: tab === "ml"        ? "block" : "none" }}><MLTab theme={theme} /></div>
-        <div style={{ display: tab === "techscore" ? "block" : "none" }}><TechnicalScoreTab theme={theme} /></div>
+        <div style={{ display: tab === "techscore" ? "block" : "none" }}><TechnicalScoreTab theme={theme} scanData={scanData} /></div>
         <div style={{ display: tab === "accuracy"  ? "block" : "none" }}><AccuracyTab theme={theme} /></div>
         <div style={{ display: tab === "backtest"  ? "block" : "none" }}><BacktestTab theme={theme} /></div>
         <div style={{ display: tab === "settings"  ? "block" : "none" }}><SettingsTab theme={theme} /></div>

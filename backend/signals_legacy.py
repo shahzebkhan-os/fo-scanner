@@ -139,7 +139,17 @@ def screen_straddle(
     atm_ce = atm_pe = None
     otm_ce = otm_pe = None   # for strangle: 1 interval OTM each side
 
-    for row in records:
+    if isinstance(records, dict):
+        if "strikePrice" in records:
+            records = [records]
+        else:
+            records = list(records.values())
+    elif isinstance(records, str):
+        return None
+    
+    valid_records = [r for r in records if isinstance(r, dict)]
+    
+    for row in valid_records:
         strike = row.get("strikePrice", 0)
         if strike == atm:
             atm_ce = row.get("CE", {}) or {}

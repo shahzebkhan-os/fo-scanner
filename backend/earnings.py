@@ -22,16 +22,16 @@ def _get_mock_earnings_dates() -> dict:
 
 MOCK_EARNINGS = _get_mock_earnings_dates()
 
-def get_days_to_earnings(symbol: str) -> int:
-    """Return days to earnings. If none found or past, returns 999."""
+def get_days_to_earnings(symbol: str) -> dict:
+    """Return days to earnings. If none found or past, returns dict with penalty info."""
     date_str = MOCK_EARNINGS.get(symbol)
     if not date_str:
-        return 999
+        return {'type': 'UNKNOWN_EVENT', 'days_away': 999, 'data_missing': True}
     
     try:
         e_date = datetime.fromisoformat(date_str).date()
         today = datetime.now(IST).date()
         diff = (e_date - today).days
-        return diff if diff >= 0 else 999
+        return {'type': 'EARNINGS', 'days_away': diff if diff >= 0 else 999, 'data_missing': False}
     except ValueError:
-        return 999
+        return {'type': 'UNKNOWN_EVENT', 'days_away': 999, 'data_missing': True}

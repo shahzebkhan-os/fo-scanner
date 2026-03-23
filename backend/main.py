@@ -24,9 +24,10 @@ from .signals_legacy import (
     SECTORS,
     SYMBOL_SECTOR,
     detect_uoa,
-    detect_straddle,
+    screen_straddle,
     build_sector_heatmap,
     get_sector,
+    get_pcr_history,
 )
 
 from .signals.fii_dii import FiiDiiSignal
@@ -1146,8 +1147,8 @@ async def _do_full_scan(limit: int) -> dict:
                         stats["score"] = max(0, stock_score - 15)
 
                 # ── Straddle Signal (P1.3) ──
-                # Use detect_straddle from signals_legacy to find ATM prices
-                straddle_info = detect_straddle(records, symbol, float(spot or 1))
+                # Use screen_straddle from signals_legacy to find ATM prices and straddle setups
+                straddle_info = screen_straddle(records.get("data", []), symbol, float(spot or 1), exp, stats.get("pcr", 1.0), ivr.get("current_iv", 0))
                 if straddle_info:
                     straddle_engine = StraddleSignal()
                     # Calculate implied daily move from straddle cost
@@ -1174,13 +1175,23 @@ async def _do_full_scan(limit: int) -> dict:
                 signal = stats.get("signal", "NEUTRAL")
                 
                 # ── FII/DII Signal (P1.3) ──
-                if fii_signal_result.score != 0:
-                    if signal == "BULLISH" and fii_signal_result.score < -20:
-                        reasons.append("⚠️ FII Net Short (Penalty)")
-                        stats["score"] = max(0, stats["score"] - 5)
-                    elif signal == "BEARISH" and fii_signal_result.score > 20:
-                        reasons.append("⚠️ FII Net Long (Penalty)")
-                        stats["score"] = max(0, stats["score"] - 5)
+                # The raw score is [-1.0, 1.0], scale to [-100, 100]
+                fii_scaled = fii_signal_result.score * 100
+                if fii_scaled != 0:
+                    if signal == "BULLISH":
+                        if fii_scaled <= -50:
+                            reasons.append("⚠️ FII Heavily Net Short (-12)")
+                            stats["score"] = max(0, stats["score"] - 12)
+                        elif fii_scaled < 0:
+                            reasons.append("⚠️ FII Mildly Net Short (-6)")
+                            stats["score"] = max(0, stats["score"] - 6)
+                    elif signal == "BEARISH":
+                        if fii_scaled >= 50:
+                            reasons.append("⚠️ FII Heavily Net Long (-12)")
+                            stats["score"] = max(0, stats["score"] - 12)
+                        elif fii_scaled > 0:
+                            reasons.append("⚠️ FII Mildly Net Long (-6)")
+                            stats["score"] = max(0, stats["score"] - 6)
                 
                 stats["signal_reasons"] = reasons
                 stock_score = stats.get("score", 0)
@@ -1221,6 +1232,8 @@ async def _do_full_scan(limit: int) -> dict:
                 return {"symbol": symbol, "error": str(e), "stale": True}
             except Exception as e:
                 log.error(f"  {symbol}: {e}")
+                import traceback
+                traceback.print_exc()
                 return None
 
     raw    = await asyncio.gather(*[process(s) for s in all_symbols[:limit]])
@@ -2626,15 +2639,17 @@ async def score_technical_endpoint(symbol: str):
 
     try:
         import yfinance as yf
+        import numpy as np
     except ImportError:
-        raise HTTPException(status_code=500, detail="yfinance is not installed")
+        raise HTTPException(status_code=500, detail="yfinance or numpy is not installed")
 
     # Map NSE symbols to yfinance tickers
     ticker = YFINANCE_TICKER_MAP.get(symbol, f"{symbol}.NS")
 
     try:
+        import pandas as pd
         df = await asyncio.to_thread(
-            lambda: yf.download(ticker, period="5d", interval="15m", progress=False)
+            lambda: yf.download(ticker, period="5d", interval="5m", progress=False)
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to fetch price data: {exc}")
@@ -2646,6 +2661,12 @@ async def score_technical_endpoint(symbol: str):
     if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
         df.columns = df.columns.get_level_values(0)
 
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+
+    df_15m = df.resample('15min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
+    df_30m = df.resample('30min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
+
     # Ensure we get Series, not DataFrames (in case of duplicate columns or remaining MultiIndex)
     def _to_list(series_or_df):
         if hasattr(series_or_df, "tolist"):
@@ -2655,23 +2676,25 @@ async def score_technical_endpoint(symbol: str):
             return series_or_df.iloc[:, 0].tolist()
         return list(series_or_df)
 
-    closes = _to_list(df["Close"].dropna())
-    highs = _to_list(df["High"].dropna())
-    lows = _to_list(df["Low"].dropna())
-    volumes = _to_list(df["Volume"].dropna())
-
-    # Flatten values if they are nested within another level (extra safety)
     def _flatten(lst):
         if lst and isinstance(lst[0], (list, tuple, np.ndarray)):
             return [x[0] if hasattr(x, "__len__") and len(x) > 0 else x for x in lst]
         return lst
 
-    closes = _flatten(closes)
-    highs = _flatten(highs)
-    lows = _flatten(lows)
-    volumes = _flatten(volumes)
+    def _extract(data):
+        c = _flatten(_to_list(data["Close"].dropna()))
+        h = _flatten(_to_list(data["High"].dropna()))
+        l = _flatten(_to_list(data["Low"].dropna()))
+        v = _flatten(_to_list(data["Volume"].dropna()))
+        return c, h, l, v
 
-    result = compute_technical_score(closes, highs, lows, volumes)
+    c5, h5, l5, v5 = _extract(df)
+    c15, h15, l15, v15 = _extract(df_15m)
+    c30, h30, l30, v30 = _extract(df_30m)
+
+    res_5m = compute_technical_score(c5, h5, l5, v5)
+    res_15m = compute_technical_score(c15, h15, l15, v15)
+    res_30m = compute_technical_score(c30, h30, l30, v30)
 
     # Also compute the existing OI-based score for comparison if chain data is available
     existing_score = None
@@ -2691,9 +2714,14 @@ async def score_technical_endpoint(symbol: str):
 
     return {
         "symbol": symbol,
-        "technical_score": result.to_dict(),
+        "technical_score": res_15m.to_dict(),
+        "timeframes": {
+            "5m": res_5m.to_dict(),
+            "15m": res_15m.to_dict(),
+            "30m": res_30m.to_dict(),
+        },
         "existing_score": existing_score,
-        "bars_used": len(closes),
+        "bars_used": len(c5),
     }
 
 

@@ -340,15 +340,20 @@ function TradeRow({ trade, theme, onSelect }) {
       e.currentTarget.style.background = theme.card;
       e.currentTarget.style.transform = "translateX(0)";
     }}>
-      <div>
-        <span style={{ fontWeight: 700 }}>{trade.symbol}</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 700, fontSize: 13, color: trade.type === "CE" ? "#22c55e" : "#ef4444" }}>
+          {trade.type === "CE" ? "📈" : "📉"} {trade.symbol}
+        </span>
         <span style={{
-          marginLeft: 6, padding: "1px 6px", borderRadius: 3, fontSize: 10, fontWeight: 600,
-          background: trade.type === "CE" ? "rgba(34,197,94,.12)" : "rgba(239,68,68,.12)",
+          padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+          background: trade.type === "CE" ? "rgba(34,197,94,.15)" : "rgba(239,68,68,.15)",
           color: trade.type === "CE" ? "#22c55e" : "#ef4444",
-        }}>{trade.type}</span>
-        {isAuto && <span style={{ marginLeft: 4, fontSize: 9, color: "#6366f1" }}>⚡auto</span>}
-        {isSuggestion && <span style={{ marginLeft: 4, fontSize: 9, color: "#f59e0b" }}>💡sugg</span>}
+          border: `1px solid ${trade.type === "CE" ? "rgba(34,197,94,.3)" : "rgba(239,68,68,.3)"}`,
+        }}>
+          {trade.type === "CE" ? "CE (BULL)" : "PE (BEAR)"}
+        </span>
+        {isAuto && <span style={{ fontSize: 9, color: "#6366f1", background: "rgba(99,102,241,.1)", padding: "2px 4px", borderRadius: 4 }}>⚡auto</span>}
+        {isSuggestion && <span style={{ fontSize: 9, color: "#f59e0b", background: "rgba(245,158,11,.1)", padding: "2px 4px", borderRadius: 4 }}>💡sugg</span>}
       </div>
       <div style={{ color: theme.muted }}>{trade.strike}</div>
       <div>₹{Number(trade.entry_price || 0).toFixed(2)}</div>

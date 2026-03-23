@@ -13,7 +13,7 @@ Applies research-backed filters to scan data:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Optional
 
@@ -55,6 +55,22 @@ TIME_WINDOWS = [
 ]
 
 
+def is_safe_entry_window(now: Optional[datetime] = None) -> tuple[bool, Optional[str]]:
+    now = now or datetime.now(IST)
+    from datetime import time
+    current_time = now.time()
+    
+    BLOCKED_WINDOWS = [
+        (time(9, 15), time(9, 45)),   # Opening volatility flush
+        (time(15, 0), time(15, 30)),  # Closing auction distortion
+    ]
+    
+    for start, end in BLOCKED_WINDOWS:
+        if start <= current_time <= end:
+            return False, f"Blocked window: {start}–{end}"
+    
+    return True, None
+
 def _get_time_window(now: Optional[datetime] = None) -> dict:
     """Return current time window advisory."""
     now = now or datetime.now(IST)
@@ -73,52 +89,52 @@ def _get_time_window(now: Optional[datetime] = None) -> dict:
 
 
 def _check_confluence(stock: dict) -> dict:
-    \"\"\"
+    """
     Evaluate 5 independent factors on a 0-100 scale.
     Requires at least 3 factors to score >= 40.
     At least one must be Price Action, and one from Derivatives.
-    \"\"\"
+    """
     signal = stock.get("signal", "NEUTRAL")
     metrics = stock.get("metrics", {})
     spot = stock.get("ltp", 0)
 
     factors = {}
 
-    # 1. GEX (Derivatives)
+    # 1. GEX (Group A)
     gex = metrics.get("gex", 0)
     gex_score = 0
     if signal == "BULLISH" and gex > 50_000: gex_score = 80
     elif signal == "BEARISH" and gex < -50_000: gex_score = 80
-    factors["gex"] = {"group": "derivatives", "score": gex_score, "value": gex}
+    factors["gex"] = {"group": "group_a", "score": gex_score, "value": gex}
 
-    # 2. PCR (Derivatives)
+    # 2. PCR (Group A)
     pcr = stock.get("pcr", 1.0)
     pcr_score = 0
     if signal == "BULLISH" and pcr > 1.1: pcr_score = 80
     elif signal == "BEARISH" and pcr < 0.9: pcr_score = 80
-    factors["pcr"] = {"group": "derivatives", "score": pcr_score, "value": pcr}
+    factors["pcr"] = {"group": "group_a", "score": pcr_score, "value": pcr}
 
-    # 3. IV Skew (Derivatives)
+    # 3. IV Skew (Group A)
     iv_skew = metrics.get("iv_skew", 0)
     skew_score = 0
     if signal == "BULLISH" and iv_skew < -0.2: skew_score = 80
     elif signal == "BEARISH" and iv_skew > 0.2: skew_score = 80
-    factors["iv_skew"] = {"group": "derivatives", "score": skew_score, "value": iv_skew}
+    factors["iv_skew"] = {"group": "group_a", "score": skew_score, "value": iv_skew}
 
-    # 4. OI Velocity (Derivatives)
+    # 4. OI Velocity (Group B)
     oi_vel = stock.get("oi_velocity_score", 0)
     vel_score = 0
     if signal == "BULLISH" and oi_vel > 0.3: vel_score = 80
     elif signal == "BEARISH" and oi_vel < -0.3: vel_score = 80
-    factors["oi_velocity"] = {"group": "derivatives", "score": vel_score, "value": oi_vel}
+    factors["oi_velocity"] = {"group": "group_b", "score": vel_score, "value": oi_vel}
 
-    # 5. Price Action (Technicals)
+    # 5. Price Action (Group B)
     rsi = metrics.get("rsi_14", 50)
     ema = metrics.get("ema_9", spot)
     pa_score = 0
     if signal == "BULLISH" and spot > ema and rsi >= 50: pa_score = 80
     elif signal == "BEARISH" and spot < ema and rsi <= 50: pa_score = 80
-    factors["price_action"] = {"group": "technicals", "score": pa_score, "value": rsi}
+    factors["price_action"] = {"group": "group_b", "score": pa_score, "value": rsi}
 
     MIN_FACTOR_SCORE = 40
     MIN_FACTORS_ALIGNED = 3
@@ -126,11 +142,10 @@ def _check_confluence(stock: dict) -> dict:
     aligned_factors = {k: v for k, v in factors.items() if v["score"] >= MIN_FACTOR_SCORE}
     aligned_count = len(aligned_factors)
 
-    # Need at least 1 technical and 1 derivative
-    has_tech = any(v["group"] == "technicals" for v in aligned_factors.values())
-    has_deriv = any(v["group"] == "derivatives" for v in aligned_factors.values())
+    group_a_count = sum(1 for v in aligned_factors.values() if v["group"] == "group_a")
+    group_b_count = sum(1 for v in aligned_factors.values() if v["group"] == "group_b")
 
-    passed = aligned_count >= MIN_FACTORS_ALIGNED and has_tech and has_deriv
+    passed = (group_a_count >= 2) and (group_b_count >= 1)
 
     # Format output backwards compatible with UI
     formatted_factors = []
@@ -155,20 +170,18 @@ def _check_multi_day_oi_trend(symbol: str, signal: str) -> dict:
         ce_chg = last.get("CE", 0) - first.get("CE", 0)
         pe_chg = last.get("PE", 0) - first.get("PE", 0)
         
-        net_bullish = pe_chg - ce_chg
-        
         # We want to see a minimum threshold of change (e.g., 0.5% of total OI)
         total_oi = last.get("CE", 0) + last.get("PE", 0)
         threshold = total_oi * 0.005  
         
         if signal == "BULLISH":
-            aligned = net_bullish > threshold
-            reason = "PE buildup outpaces CE buildup" if aligned else "Contradictory OI trend"
-            return {"valid": aligned, "aligned": aligned, "reason": f"{reason} (Net: {net_bullish:,.0f})"}
+            aligned = pe_chg > ce_chg and pe_chg > threshold
+            reason = "PE writing (bulls defending puts)" if aligned else "Contradictory OI trend"
+            return {"valid": aligned, "aligned": aligned, "reason": f"{reason} (PE change: {pe_chg:,.0f}, CE change: {ce_chg:,.0f})"}
         elif signal == "BEARISH":
-            aligned = net_bullish < -threshold
-            reason = "CE buildup outpaces PE buildup" if aligned else "Contradictory OI trend"
-            return {"valid": aligned, "aligned": aligned, "reason": f"{reason} (Net: {-net_bullish:,.0f})"}
+            aligned = ce_chg > pe_chg and ce_chg > threshold
+            reason = "CE writing (bears defending calls)" if aligned else "Contradictory OI trend"
+            return {"valid": aligned, "aligned": aligned, "reason": f"{reason} (CE change: {ce_chg:,.0f}, PE change: {pe_chg:,.0f})"}
             
         return {"valid": True, "aligned": False, "reason": "Neutral signal"}
         
@@ -188,6 +201,23 @@ def _check_dte_strategy_match(strategy_code: str, dte: int) -> dict:
     if dte > hi:
         return {"valid": False, "reason": f"DTE {dte} too high for {strategy_code} (max {hi})"}
     return {"valid": True, "reason": f"DTE {dte} within range ({lo}–{hi})"}
+
+PREMIUM_SELL_STRATEGIES = ['short_straddle', 'iron_condor', 'credit_spread']
+
+def _iv_rank_gate(strategy: str, iv_rank: float) -> dict:
+    if not strategy or not iv_rank:
+        return {'pass': True, "reason": ""}
+        
+    s = strategy.lower()
+    if s in PREMIUM_SELL_STRATEGIES:
+        if iv_rank < 40:
+            return {'pass': False, 'reason': f"IV Rank {iv_rank} too low for premium selling"}
+    
+    if s in ['long_call', 'long_put']:
+        if iv_rank > 75:
+            return {'pass': False, 'reason': f"IV Rank {iv_rank} too high — buying expensive premium"}
+            
+    return {'pass': True, 'reason': f"IV Rank {iv_rank} valid for {strategy}"}
 
 
 def _check_max_pain_convergence(stock: dict) -> dict:
@@ -225,6 +255,18 @@ def run_pipeline(scan_data: list, suggestions: list, now: Optional[datetime] = N
     """
     now = now or datetime.now(IST)
     time_window = _get_time_window(now)
+    
+    safe_window, safe_reason = is_safe_entry_window(now)
+    if not safe_window:
+        log.warning(f"Pipeline execution blocked by time guard. {safe_reason}")
+        # Return an empty set if it's not a safe entry window
+        return {
+            "timestamp": now.isoformat(),
+            "time_window": time_window,
+            "pipeline": {"scanned": len(scan_data), "after_liquidity": 0, "after_confluence": 0, "after_dte": 0, "final": 0},
+            "count": 0,
+            "trades": []
+        }
 
     # Build lookup from suggestions
     sug_map = {}
@@ -284,8 +326,17 @@ def run_pipeline(scan_data: list, suggestions: list, now: Optional[datetime] = N
         strategy_code = (sug.get("strategy", {}) or {}).get("strategy_code", "")
         dte_check = _check_dte_strategy_match(strategy_code, dte)
         if not dte_check["valid"]:
+            log.info(f"{symbol} dropped | strategy={strategy_code} | dte={dte} | " + 
+                     f"valid_range={STRATEGY_DTE_RANGES.get(strategy_code)}")
             continue
         pipeline["after_dte"] += 1
+        
+        # ── Stage 3.5: IV Rank Gate ──
+        iv_rank = stock.get("iv_rank", 50)
+        iv_gate_check = _iv_rank_gate(strategy_code, iv_rank)
+        if not iv_gate_check["pass"]:
+            log.info(f"{symbol} dropped | strategy={strategy_code} | iv_rank={iv_rank} | reason={iv_gate_check['reason']}")
+            continue
 
         # ── Stage 4: Multi-Day OI Trend (P1.1) ──
         oi_trend = _check_multi_day_oi_trend(symbol, signal)
@@ -294,14 +345,19 @@ def run_pipeline(scan_data: list, suggestions: list, now: Optional[datetime] = N
         mp_check = _check_max_pain_convergence(stock)
 
         # ── Stage 4.8: Earnings Event Gate ──
-        dte_earnings = get_days_to_earnings(symbol)
-        if dte_earnings <= 5:
-            if strategy_code in ("long_call", "long_put", "short_straddle", "strangle"):
-                # Drop naked long options and short volatility plays going into earnings
-                continue
-            # Note: For defined risk spreads, we allow the trade but penalize score/add alert
-            score = max(0, score - 10)
-            stock.setdefault("signal_reasons", []).append(f"⚠️ High Volatility Event (Earnings in {dte_earnings}d)")
+        earnings_event = get_days_to_earnings(symbol)
+        if earnings_event.get("data_missing"):
+            stock.setdefault("signal_reasons", []).append("⚠️ Event data unavailable — verify manually")
+            score = max(0, score - 5)
+        else:
+            dte_earnings = earnings_event.get("days_away", 999)
+            if dte_earnings <= 5:
+                if strategy_code in ("long_call", "long_put", "short_straddle", "strangle"):
+                    # Drop naked long options and short volatility plays going into earnings
+                    continue
+                # Note: For defined risk spreads, we allow the trade but penalize score/add alert
+                score = max(0, score - 10)
+                stock.setdefault("signal_reasons", []).append(f"⚠️ High Volatility Event (Earnings in {dte_earnings}d)")
 
         # ── Stage 5: Bulk Deal Bonus (P1.2) ──
         sym_deals = deals_map.get(symbol, [])
@@ -315,10 +371,10 @@ def run_pipeline(scan_data: list, suggestions: list, now: Optional[datetime] = N
                     continue
                 deal_type = deal.get("type", "").upper()
                 if (signal == "BULLISH" and "BUY" in deal_type) or (signal == "BEARISH" and "SELL" in deal_type):
-                    deal_score_modifier += 8
+                    deal_score_modifier += 5
                     has_aligned_deal = True
                 elif (signal == "BULLISH" and "SELL" in deal_type) or (signal == "BEARISH" and "BUY" in deal_type):
-                    deal_score_modifier -= 5
+                    deal_score_modifier -= 8
                 else:
                     deal_score_modifier += 2 # Unknown direction
 
