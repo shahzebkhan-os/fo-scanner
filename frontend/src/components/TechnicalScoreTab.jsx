@@ -1138,16 +1138,16 @@ export default function TechnicalScoreTab({ theme, scanData }) {
 
               {/* Row 1: Key metrics */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
-                <Card theme={theme} style={{ textAlign: "center", padding: 16, display: "flex", flexDirection: "column", justifyContent: "center" }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 8 }}>COMPOSITE SCORE</div>
-                  <div style={{ fontSize: 42, fontWeight: 900, color: signalColor(tech.direction) }}>{tech.score}</div>
+                <Card theme={theme} style={{ textAlign: "center", padding: 16, display: "flex", flexDirection: "column", justifyContent: "center", background: `linear-gradient(135deg, ${signalBg(tech.direction)} 0%, transparent 100%)` }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: theme.muted, marginBottom: 8 }}>TRUE COMPOSITE (1m-15m)</div>
+                  <div style={{ fontSize: 46, fontWeight: 900, color: signalColor(tech.direction), textShadow: "0px 2px 10px rgba(0,0,0,0.1)" }}>{tech.score}</div>
                   <div style={{ fontSize: 11, color: theme.muted }}>/ 100</div>
                 </Card>
 
                 <Card theme={theme} style={{ textAlign: "center", padding: 16 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 8 }}>CONFIDENCE</div>
-                  <div style={{ fontSize: 42, fontWeight: 900, color: signalColor(tech.direction) }}>{fmt(tech.confidence * 100, 0)}%</div>
-                  <div style={{ fontSize: 11, color: theme.muted }}>{tech.confidence >= 0.7 ? "High" : tech.confidence >= 0.5 ? "Medium" : "Low"}</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 8 }}>OVERALL TREND</div>
+                  <div style={{ fontSize: 24, fontWeight: 800, color: signalColor(tech.direction), margin: "8px 0" }}>{tech.direction_strength} {tech.direction}</div>
+                  <div style={{ fontSize: 11, color: theme.muted }}>Confidence: {fmt(tech.confidence * 100, 0)}%</div>
                 </Card>
 
                 <TrendStrengthMeter

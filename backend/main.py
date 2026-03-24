@@ -2800,6 +2800,30 @@ async def score_technical_endpoint(symbol: str):
         "15m": res_15m.to_dict()
     })
 
+    # --- Compute True Composite Technical Score ---
+    scores_list = [res_1m.score, res_2m.score, res_5m.score, res_10m.score, res_15m.score]
+    avg_score = sum(scores_list) / len(scores_list)
+
+    directions_list = [res_1m.direction, res_2m.direction, res_5m.direction, res_10m.direction, res_15m.direction]
+    bullish = sum(1 for d in directions_list if d == "BULLISH")
+    bearish = sum(1 for d in directions_list if d == "BEARISH")
+    avg_direction = "BULLISH" if bullish > bearish else "BEARISH" if bearish > bullish else "NEUTRAL"
+
+    confidences = [res_1m.confidence, res_2m.confidence, res_5m.confidence, res_10m.confidence, res_15m.confidence]
+    avg_conf = sum(confidences) / len(confidences)
+
+    strength_map = {"WEAK": 1, "MODERATE": 2, "STRONG": 3}
+    strengths = [strength_map.get(r.direction_strength, 1) for r in [res_1m, res_2m, res_5m, res_10m, res_15m]]
+    avg_str = sum(strengths) / len(strengths)
+    avg_strength = "STRONG" if avg_str >= 2.5 else "MODERATE" if avg_str >= 1.5 else "WEAK"
+
+    composite_tech = res_15m.to_dict()
+    composite_tech["score"] = round(avg_score, 1)
+    composite_tech["direction"] = avg_direction
+    composite_tech["confidence"] = round(avg_conf, 3)
+    composite_tech["direction_strength"] = avg_strength
+    composite_tech["is_composite"] = True
+
     # Also compute the existing OI-based score for comparison if it's an F&O symbol
     existing_score = None
     if symbol in SLUG_MAP:
@@ -2829,7 +2853,7 @@ async def score_technical_endpoint(symbol: str):
 
     return {
         "symbol": symbol,
-        "technical_score": res_15m.to_dict(),
+        "technical_score": composite_tech,
         "timeframes": {
             "1m": res_1m.to_dict(),
             "2m": res_2m.to_dict(),
