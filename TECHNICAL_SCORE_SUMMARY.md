@@ -8,7 +8,7 @@ This research provides a comprehensive analysis and actionable roadmap for impro
 
 ## How the Technical Score is calculated (current implementation)
 
-- **Data source & timeframes**: `/api/score-technical/{symbol}` in `backend/main.py` pulls ~5 days of 1m Yahoo Finance bars, resamples them into 1m/2m/5m/10m/15m, and runs `compute_technical_score` for each. A timeframe-consensus block is returned alongside per-timeframe outputs.
+- **Data source & timeframes**: `/api/score-technical/{symbol}` in `backend/main.py` pulls ~5 days of native 1m Yahoo Finance bars, keeps the 1m stream as-is, and resamples that data into 2m/5m/10m/15m before running `compute_technical_score` on each slice. A timeframe-consensus block is returned alongside per-timeframe outputs.
 - **Indicator weighting**: `backend/scoring_technical.py` uses adaptive weights keyed off ADX (trending weights if ADX > 30, ranging weights if ADX < 20, otherwise balanced). Eleven indicators are scored to raw values in **[-1, +1]** (RSI, MACD, ADX, Stochastic, EMA stack, Bollinger %B, Volume flow, VWAP deviation, Supertrend, Divergence, Ichimoku).
 - **Direction & sub-scores**: `_determine_direction_weighted` applies weighted bullish vs bearish contributions to set `direction`, `direction_strength`, `directional_edge`, and `agreement_pct`. Raw scores are converted to direction-aware 0-100 sub-scores (bearish signals invert when direction is BEARISH), then combined with the active weights to produce the **final 0-100 score**.
 - **Confidence**: Starts at 0.3, adds agreement_pct × 0.5, plus boosts for strong ADX (>25), dual divergence, and supportive S/R proximity (or a small penalty when direction fights a nearby level). Clipped to **0.0–1.0**.
