@@ -837,6 +837,72 @@ export default function TechnicalScoreTab({ theme, scanData }) {
           {/* HERO: Directional Banner */}
           <DirectionalBanner tech={tech} theme={theme} />
 
+          {/* ADX Warning Banner - Low ADX means ranging market (less reliable signals) */}
+          {tech.indicators.adx?.adx < 25 && (
+            <div style={{
+              background: "rgba(251,146,60,0.15)",
+              border: "2px solid rgba(251,146,60,0.5)",
+              borderRadius: 8,
+              padding: "12px 16px",
+              marginBottom: 16,
+              display: "flex",
+              alignItems: "center",
+              gap: 12
+            }}>
+              <div style={{ fontSize: 24 }}>⚠️</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 13, color: "#f97316", marginBottom: 4 }}>
+                  Low ADX ({tech.indicators.adx.adx.toFixed(1)}) - Ranging Market Detected
+                </div>
+                <div style={{ fontSize: 11, color: theme.text, opacity: 0.9 }}>
+                  Technical signals are less reliable in ranging markets (ADX {'<'} 25).
+                  Consider waiting for ADX ≥ 25 (trending market) for higher accuracy trades.
+                  {tech.direction_strength === "WEAK" && " Direction strength is also WEAK - avoid trading this setup."}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Direction Strength Warning - WEAK signals have lower win rate */}
+          {tech.direction_strength === "WEAK" && tech.indicators.adx?.adx >= 25 && (
+            <div style={{
+              background: "rgba(251,146,60,0.1)",
+              border: "1px solid rgba(251,146,60,0.4)",
+              borderRadius: 8,
+              padding: "10px 14px",
+              marginBottom: 16,
+              fontSize: 11,
+              color: theme.text,
+              opacity: 0.95
+            }}>
+              ⚡ <b>Direction Strength: WEAK</b> - This signal has lower conviction.
+              STRONG signals typically have 68-75% win rate vs 48-55% for WEAK signals. Use caution.
+            </div>
+          )}
+
+          {/* Backtesting Documentation Link */}
+          <div style={{
+            textAlign: "right",
+            marginBottom: 12,
+            fontSize: 11
+          }}>
+            <a
+              href="https://github.com/shahzebkhan-os/fo-scanner/blob/main/TECHNICAL_SIGNAL_ACCURACY_TESTING.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                color: theme.accent,
+                textDecoration: "none",
+                opacity: 0.8,
+                transition: "opacity 0.2s"
+              }}
+              onMouseEnter={(e) => e.target.style.opacity = 1}
+              onMouseLeave={(e) => e.target.style.opacity = 0.8}
+            >
+              📊 How to Test Signal Accuracy →
+            </a>
+          </div>
+
           {/* Row 1: Key metrics + Trend Strength + Timeframe Consensus */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
 
