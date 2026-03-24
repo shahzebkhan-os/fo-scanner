@@ -72,6 +72,9 @@ class SignalQualityFilter:
     IV_RANK_MIN = 20.0
     IV_RANK_MAX = 80.0
 
+    MIN_ABS_OPTION_VOLUME = 500      # Guardrail for very thin options
+    MAX_SPREAD_PCT = 3.0             # Guardrail for wide spreads
+
     def evaluate(
         self,
         unified_score: float,
@@ -81,6 +84,8 @@ class SignalQualityFilter:
         option_volume: Optional[float],
         option_avg_volume: Optional[float],
         iv_rank: Optional[float],
+        option_spread_pct: Optional[float] = None,
+        spot_volume: Optional[float] = None,
     ) -> QualityResult:
         """
         Evaluate signal quality based on 6 hard conditions.
@@ -207,6 +212,28 @@ class SignalQualityFilter:
                 "note": "IV Rank not available, condition passed by default",
             }
 
+        # Guardrails: thin volume / wide spreads block PRIME/QUALIFIED
+        guardrail_failed = False
+        if option_volume is not None:
+            if option_volume < self.MIN_ABS_OPTION_VOLUME:
+                guardrail_failed = True
+                failed.append(f"Option volume {option_volume} below guardrail {self.MIN_ABS_OPTION_VOLUME}")
+                details["option_volume"]["guardrail_min"] = self.MIN_ABS_OPTION_VOLUME
+        if option_spread_pct is not None:
+            details["option_spread_pct"] = {
+                "value": option_spread_pct,
+                "threshold": self.MAX_SPREAD_PCT,
+                "pass": option_spread_pct <= self.MAX_SPREAD_PCT,
+            }
+            if option_spread_pct > self.MAX_SPREAD_PCT:
+                guardrail_failed = True
+                failed.append(f"Bid-ask spread {option_spread_pct:.2f}% > {self.MAX_SPREAD_PCT}% guardrail")
+        if spot_volume is not None:
+            details["spot_volume"] = {"value": spot_volume}
+            if spot_volume <= 0:
+                guardrail_failed = True
+                failed.append("Missing spot volume")
+
         # Count passed conditions
         passed_count = sum(conditions)
         total_count = len(conditions)
@@ -220,6 +247,9 @@ class SignalQualityFilter:
             tag = QualityTag.MARGINAL
         else:
             tag = QualityTag.BLOCKED
+
+        if guardrail_failed and tag in (QualityTag.PRIME, QualityTag.QUALIFIED):
+            tag = QualityTag.MARGINAL
 
         return QualityResult(
             tag=tag,
@@ -253,6 +283,7 @@ class SignalQualityFilter:
         best_option = unified_result.get("best_option", {})
         option_volume = best_option.get("volume")
         option_avg_volume = best_option.get("avg_volume_20d")
+        option_spread_pct = best_option.get("spread_pct")
 
         # IV Rank
         iv_rank = unified_result.get("iv_rank")
@@ -265,6 +296,8 @@ class SignalQualityFilter:
             option_volume=option_volume,
             option_avg_volume=option_avg_volume,
             iv_rank=iv_rank,
+            option_spread_pct=option_spread_pct,
+            spot_volume=unified_result.get("spot_volume"),
         )
 
 

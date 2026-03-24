@@ -20,6 +20,7 @@ from .analytics import (
     STRIKE_INTERVALS
 )
 from .constants import LOT_SIZES, INDEX_SYMBOLS, FO_STOCKS
+from .data_source import fetch_indstocks_ltp
 from .signals_legacy import (
     SECTORS,
     SYMBOL_SECTOR,
@@ -2753,6 +2754,34 @@ async def score_technical_endpoint(symbol: str):
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
 
+    # ── Lightweight data-quality watchdog ─────────────────────────────────────
+    data_quality = {"missing_pct": 0.0, "stale_minutes": 0.0, "ltp_fallback_used": False, "low_liquidity": False}
+    if len(df.index) > 1:
+        ts_min, ts_max = df.index.min(), df.index.max()
+        expected_bars = int(((ts_max - ts_min).total_seconds() // 60) + 1)
+        data_quality["missing_pct"] = max(0.0, 1 - (len(df) / expected_bars)) if expected_bars > 0 else 0.0
+        data_quality["stale_minutes"] = float((datetime.now() - ts_max).total_seconds() / 60)
+
+    needs_ltp_patch = data_quality["stale_minutes"] > 10 or data_quality["missing_pct"] > 0.10
+    if needs_ltp_patch:
+        try:
+            ltp_map = await fetch_indstocks_ltp([symbol])
+            ltp_val = ltp_map.get(symbol, {}).get("ltp")
+            if ltp_val:
+                latest_time = df.index.max() if len(df.index) else datetime.now()
+                patch_ts = latest_time + pd.Timedelta(minutes=1)
+                df.loc[patch_ts] = {
+                    "Open": ltp_val,
+                    "High": ltp_val,
+                    "Low": ltp_val,
+                    "Close": ltp_val,
+                    "Volume": 0,
+                }
+                df = df.sort_index()
+                data_quality["ltp_fallback_used"] = True
+        except Exception as exc:
+            log.warning(f"  ⚠️ LTP fallback failed for {symbol}: {exc}")
+
     df_2m = df.resample('2min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
     df_5m = df.resample('5min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
     df_10m = df.resample('10min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
@@ -2801,28 +2830,80 @@ async def score_technical_endpoint(symbol: str):
     })
 
     # --- Compute True Composite Technical Score ---
-    scores_list = [res_1m.score, res_2m.score, res_5m.score, res_10m.score, res_15m.score]
-    avg_score = sum(scores_list) / len(scores_list)
+    # Determine session reliability (favor slower frames when liquidity is thin or data is stale)
+    recent_volumes = v1[-30:] if v1 else []
+    avg_recent_vol = sum(recent_volumes) / len(recent_volumes) if recent_volumes else 0
+    low_liquidity = avg_recent_vol < 10_000
+    data_quality["low_liquidity"] = bool(low_liquidity)
 
-    directions_list = [res_1m.direction, res_2m.direction, res_5m.direction, res_10m.direction, res_15m.direction]
-    bullish = sum(1 for d in directions_list if d == "BULLISH")
-    bearish = sum(1 for d in directions_list if d == "BEARISH")
-    avg_direction = "BULLISH" if bullish > bearish else "BEARISH" if bearish > bullish else "NEUTRAL"
+    base_weights = {"1m": 0.10, "2m": 0.10, "5m": 0.20, "10m": 0.25, "15m": 0.35}
+    low_liq_weights = {"1m": 0.05, "2m": 0.10, "5m": 0.15, "10m": 0.25, "15m": 0.45}
+    weights = low_liq_weights if low_liquidity else base_weights
 
-    confidences = [res_1m.confidence, res_2m.confidence, res_5m.confidence, res_10m.confidence, res_15m.confidence]
-    avg_conf = sum(confidences) / len(confidences)
+    # Downweight noisy short frames when data quality issues detected
+    if data_quality["missing_pct"] > 0.05 or data_quality["stale_minutes"] > 5:
+        weights = {
+            "1m": weights["1m"] * 0.5,
+            "2m": weights["2m"] * 0.75,
+            "5m": weights["5m"],
+            "10m": weights["10m"] * 1.05,
+            "15m": weights["15m"] * 1.1,
+        }
+
+    def _normalize(wdict):
+        total = sum(wdict.values())
+        return {k: v / total for k, v in wdict.items()} if total else wdict
+
+    weights = _normalize(weights)
+
+    scores_weighted = (
+        res_1m.score * weights["1m"] +
+        res_2m.score * weights["2m"] +
+        res_5m.score * weights["5m"] +
+        res_10m.score * weights["10m"] +
+        res_15m.score * weights["15m"]
+    )
+
+    confidences_weighted = (
+        res_1m.confidence * weights["1m"] +
+        res_2m.confidence * weights["2m"] +
+        res_5m.confidence * weights["5m"] +
+        res_10m.confidence * weights["10m"] +
+        res_15m.confidence * weights["15m"]
+    )
+
+    directions = {
+        "1m": res_1m.direction,
+        "2m": res_2m.direction,
+        "5m": res_5m.direction,
+        "10m": res_10m.direction,
+        "15m": res_15m.direction,
+    }
+    dir_score = 0
+    for tf, dir_val in directions.items():
+        if dir_val == "BULLISH":
+            dir_score += weights[tf]
+        elif dir_val == "BEARISH":
+            dir_score -= weights[tf]
+    avg_direction = "BULLISH" if dir_score > 0.05 else "BEARISH" if dir_score < -0.05 else "NEUTRAL"
 
     strength_map = {"WEAK": 1, "MODERATE": 2, "STRONG": 3}
-    strengths = [strength_map.get(r.direction_strength, 1) for r in [res_1m, res_2m, res_5m, res_10m, res_15m]]
-    avg_str = sum(strengths) / len(strengths)
-    avg_strength = "STRONG" if avg_str >= 2.5 else "MODERATE" if avg_str >= 1.5 else "WEAK"
+    strengths_weighted = (
+        strength_map.get(res_1m.direction_strength, 1) * weights["1m"] +
+        strength_map.get(res_2m.direction_strength, 1) * weights["2m"] +
+        strength_map.get(res_5m.direction_strength, 1) * weights["5m"] +
+        strength_map.get(res_10m.direction_strength, 1) * weights["10m"] +
+        strength_map.get(res_15m.direction_strength, 1) * weights["15m"]
+    )
+    avg_strength = "STRONG" if strengths_weighted >= 2.5 else "MODERATE" if strengths_weighted >= 1.5 else "WEAK"
 
     composite_tech = res_15m.to_dict()
-    composite_tech["score"] = round(avg_score, 1)
+    composite_tech["score"] = round(scores_weighted, 1)
     composite_tech["direction"] = avg_direction
-    composite_tech["confidence"] = round(avg_conf, 3)
+    composite_tech["confidence"] = round(confidences_weighted, 3)
     composite_tech["direction_strength"] = avg_strength
     composite_tech["is_composite"] = True
+    composite_tech["weights"] = weights
 
     # Also compute the existing OI-based score for comparison if it's an F&O symbol
     existing_score = None
@@ -2864,6 +2945,8 @@ async def score_technical_endpoint(symbol: str):
         "timeframe_consensus": timeframe_consensus,
         "existing_score": existing_score,
         "momentum": momentum_metrics,
+        "data_quality": data_quality,
+        "recommended_thresholds": TechnicalBacktester().get_recommended_thresholds(),
         "bars_used": len(c5),
     }
 
@@ -3160,9 +3243,9 @@ async def get_technical_backtest_run_details(run_id: int):
 
 
 @app.get("/api/technical-backtest/accuracy-summary")
-async def get_technical_accuracy_summary():
-    """
-    Get a summary of technical signal accuracy across all backtests.
+    async def get_technical_accuracy_summary():
+        """
+        Get a summary of technical signal accuracy across all backtests.
 
     Returns aggregated metrics:
     - Average win rate across all runs
@@ -3192,11 +3275,14 @@ async def get_technical_accuracy_summary():
         latest_run = runs[0]
         latest_metrics = latest_run.get('metrics', {})
 
+        thresholds = backtester.get_recommended_thresholds()
+
         return {
             "total_runs": total_runs,
             "total_trades_across_runs": total_trades,
             "avg_win_rate": round(avg_win_rate, 4),
             "avg_profit_factor": round(avg_profit_factor, 2),
+            "production_thresholds": thresholds,
             "latest_run": {
                 "id": latest_run['id'],
                 "run_time": latest_run['run_time'],

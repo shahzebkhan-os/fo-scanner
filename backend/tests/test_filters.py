@@ -122,6 +122,22 @@ class TestSignalQualityFilter:
 
         assert not result_high.details["iv_rank"]["pass"]
 
+    def test_thin_volume_guardrail_downgrades(self):
+        """Guardrail should downgrade PRIME to MARGINAL when volume is thin"""
+        filter = SignalQualityFilter()
+
+        result = filter.evaluate(
+            unified_score=85.0,
+            model_agreement_ratio=0.9,
+            unified_confidence=0.9,
+            risk_reward_ratio=2.0,
+            option_volume=100,  # Below guardrail
+            option_avg_volume=200,
+            iv_rank=50.0,
+        )
+
+        assert result.tag == QualityTag.MARGINAL
+
 
 class TestTimeOfDayFilter:
     """Test Time of Day Filter (Improvement #2)"""

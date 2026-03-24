@@ -636,6 +636,8 @@ class UnifiedEvaluation:
             option_volume=best_option.get("volume"),
             option_avg_volume=best_option.get("avg_volume_20d"),
             iv_rank=evaluation.get("iv_rank"),
+            option_spread_pct=best_option.get("spread_pct"),
+            spot_volume=scan_result.get("volume"),
         )
 
         quality_tag = quality_result.tag.value
