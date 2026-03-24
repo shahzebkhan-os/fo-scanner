@@ -60,6 +60,8 @@ SLUG_MAP = {
   "NIFTY": "nifty-50-share-price",
   "BANKNIFTY": "bank-nifty-share-price",
   "FINNIFTY": "nifty-financial",
+  "MIDCPNIFTY": "nifty-midcap-sel",
+  "SENSEX": "sensex",
   "RELIANCE": "reliance-industries-ltd-share-price",
   "TCS": "tata-consultancy-services-ltd-share-price",
   "INFY": "infosys-ltd-share-price",
@@ -159,14 +161,14 @@ YFINANCE_TICKER_MAP = {
     "FINNIFTY": "NIFTY_FIN_SERVICE.NS",
     "MIDCPNIFTY": "^NSEMDCP50",
     "SENSEX": "^BSESN",
-    "BANKEX": "BSE-BANK.BO",
-    "INDIAVIX": "^INDIAVIX",
-    "NIFTYIT": "^CNXIT",
-    "NIFTYAUTO": "^CNXAUTO",
-    "NIFTYFMCG": "^CNXFMCG",
-    "NIFTYPHARMA": "^CNXPHARMA",
-    "NIFTYMETAL": "^CNXMETAL",
-    "NIFTYENERGY": "^CNXENERGY",
-    "NIFTYPSUBANK": "^CNXPSUBANK",
     "TATAMOTORS": "TMPV.NS",
 }
+
+POPULAR_SYMBOLS = [
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX",
+    "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BAJFINANCE", 
+    "TATAMOTORS", "ITC", "AXISBANK", "LT", "HINDUNILVR", "BHARTIARTL", "KOTAKBANK",
+    "TATASTEEL", "HCLTECH", "WIPRO", "MARUTI",
+    "ADANIENT", "SUNPHARMA", "TITAN", "ULTRACEMCO", "ASIANPAINT", "MM", "NTPC",
+    "POWERGRID", "ONGC", "COALINDIA", "JSWSTEEL", "GRASIM", "BPCL", "INDUSINDBK", "BAJAJFINSV"
+]

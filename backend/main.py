@@ -259,16 +259,18 @@ async def lifespan(app: FastAPI):
 
     # Wire up the scheduler
     Scheduler.init_scheduler(
-        fetch_chain_fn    = fetch_nse_chain,
-        send_telegram_fn  = send_telegram_alert,
-        is_market_open_fn = is_market_open,
-        scan_fn           = _internal_scan,
-        train_fn         = ml_train_model,
-        all_symbols       = INDEX_SYMBOLS + FO_STOCKS,
+        fetch_chain_fn      = fetch_nse_chain,
+        send_telegram_fn    = send_telegram_alert,
+        is_market_open_fn   = is_market_open,
+        scan_fn             = _internal_scan,
+        train_fn           = ml_train_model,
+        all_symbols         = INDEX_SYMBOLS + FO_STOCKS,
+        scan_symbol_fn      = _process_single_symbol,
+        send_telegram_doc_fn = send_telegram_document,
     )
 
     asyncio.create_task(paper_trade_manager())
-    asyncio.create_task(_background_cache_warmer())
+    # asyncio.create_task(_background_cache_warmer())  # disabled
     await Scheduler.start_all()
     yield
     
@@ -540,7 +542,8 @@ async def fetch_nse_chain(symbol: str) -> dict:
 
     slug = SLUG_MAP.get(symbol)
     if not slug:
-        log.error(f"  ❌ No INDmoney slug for symbol={repr(symbol)}, in dict={symbol in SLUG_MAP}")
+        # Don't log as error for non-F&O symbols (indices, sectors, etc.)
+        log.info(f"  ℹ️ Skipping INDmoney fetch: No slug for {symbol}")
         return {}
 
     url = f"https://www.indmoney.com/options/{slug}"
@@ -1401,6 +1404,23 @@ async def scan_stream(limit: int = Query(90, ge=1, le=200)):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ── Paper Trade History Endpoints ─────────────────────────────────────────────
+
+@app.get("/api/paper-trades/active-technical")
+async def get_active_technical_trades():
+    """Fetch all open paper trades triggered by Technical Score >= 70%."""
+    all_open = db.get_open_trades()
+    # Filter by specific reason prefix
+    tech_trades = [t for t in all_open if (t.get("reason") or "").startswith("Auto: Technical Score")]
+    return tech_trades
+
+@app.get("/api/paper-trades/history/{trade_id}")
+async def get_paper_trade_history(trade_id: int):
+    """Fetch price history for a specific paper trade (for charting)."""
+    history = db.get_trade_history(trade_id)
+    return history
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2492,6 +2512,24 @@ async def unified_evaluation_export(include_technical: bool = False):
 
 # ── FII/DII Data ──────────────────────────────────────────────────────────────
 
+@app.get("/api/test-telegram")
+async def test_telegram_alert_endpoint():
+    """
+    Manual trigger to test the Telegram alert formatting.
+    """
+    test_msg = (
+        "⚡ *Technical Highlights (TEST)*\n\n"
+        "🟢 *Top Bullish Setups:*\n"
+        "• RELIANCE | Score: *85* | STRONG\n"
+        "• TCS | Score: *78* | MEDIUM\n\n"
+        "🔴 *Top Bearish Setups:*\n"
+        "• INFY | Score: *82* | STRONG\n"
+        "• HDFCBANK | Score: *75* | MEDIUM\n\n"
+        "_This is a manual test message_"
+    )
+    await send_telegram_alert(test_msg)
+    return {"status": "success", "message": "Test alert sent to Telegram"}
+
 @app.get("/api/fii-dii")
 async def fii_dii_data():
     """
@@ -2535,6 +2573,42 @@ if os.path.isdir(dist_path):
 
 # ── Internal scan helper (used by scheduler pre-market report) ────────────────
 
+async def _process_single_symbol(symbol: str, ltp: float = 0):
+    """
+    Process one symbol for full F&O analytics, including 
+    option chain fetching, scoring, Greeks, and ML predictions.
+    Used by both the full scan loop and the technical alert scheduler.
+    """
+    try:
+        cj    = await fetch_nse_chain(symbol)
+        recs  = cj.get("records", {})
+        spot  = recs.get("underlyingValue") or ltp or 0
+        if spot == 0: return None
+        ivr   = db.get_iv_rank(symbol)
+        exp   = recs.get("expiryDates", [""])[0]
+        
+        # Use cached sector signal if available
+        sector = get_sector(symbol)
+        sector_sig = _last_sector_heatmap.get(sector, {}).get("signal", "NEUTRAL")
+        
+        # Initial score with sector alignment
+        stats = compute_stock_score(cj, float(spot), symbol, exp, ivr, sector_signal=sector_sig)
+        
+        # Add ML prediction and refine score
+        stats["spot_price"] = float(spot)
+        ml_prob = ml_predict(stats, symbol=symbol)
+        stats["ml_bullish_probability"] = ml_prob
+        
+        # Refine score with ML conviction
+        if ml_prob is not None:
+            stats = compute_stock_score(cj, spot, symbol, exp, ivr, sector_signal=sector_sig, ml_prob=ml_prob)
+            stats["ml_bullish_probability"] = ml_prob # preserve it
+        
+        return {"symbol": symbol, "ltp": spot, **stats}
+    except Exception as e:
+        log.error(f"  {symbol}: Single-symbol process error: {e}")
+        return None
+
 async def _internal_scan() -> list:
     all_symbols = INDEX_SYMBOLS + FO_STOCKS
     ltp_map = await fetch_indstocks_ltp(all_symbols)
@@ -2543,35 +2617,8 @@ async def _internal_scan() -> list:
 
     async def process(symbol):
         async with sem:
-            try:
-                cj    = await fetch_nse_chain(symbol)
-                recs  = cj.get("records", {})
-                spot  = recs.get("underlyingValue") or ltp_map.get(symbol, {}).get("ltp") or 0
-                if spot == 0: return None
-                ivr   = db.get_iv_rank(symbol)
-                exp   = recs.get("expiryDates", [""])[0]
-                
-                # Use cached sector signal if available
-                sector = get_sector(symbol)
-                sector_sig = _last_sector_heatmap.get(sector, {}).get("signal", "NEUTRAL")
-                
-                # Initial score with sector alignment
-                stats = compute_stock_score(cj, float(spot), symbol, exp, ivr, sector_signal=sector_sig)
-                
-                # Add ML prediction and refine score
-                stats["spot_price"] = float(spot)
-                ml_prob = ml_predict(stats, symbol=symbol)
-                stats["ml_bullish_probability"] = ml_prob
-                
-                # Refine score with ML conviction (re-call or manual)
-                if ml_prob is not None:
-                    stats = compute_stock_score(cj, spot, symbol, exp, ivr, sector_signal=sector_sig, ml_prob=ml_prob)
-                    stats["ml_bullish_probability"] = ml_prob # preserve it
-                
-                return {"symbol": symbol, "ltp": spot, **stats}
-            except Exception as e:
-                log.error(f"  {symbol}: Background scan error: {e}")
-                return None
+            live_ltp = ltp_map.get(symbol, {}).get("ltp", 0)
+            return await _process_single_symbol(symbol, live_ltp)
 
     raw = await asyncio.gather(*[process(s) for s in all_symbols])
     results = [r for r in raw if r]
@@ -2745,21 +2792,32 @@ async def score_technical_endpoint(symbol: str):
         "30m": res_30m.to_dict()
     })
 
-    # Also compute the existing OI-based score for comparison if chain data is available
+    # Also compute the existing OI-based score for comparison if it's an F&O symbol
     existing_score = None
-    try:
-        cj = await fetch_nse_chain(symbol)
-        if cj and "records" in cj:
-            spot = cj.get("records", {}).get("underlyingValue", 0)
-            if spot:
-                stats = compute_stock_score(cj, float(spot), symbol)
-                existing_score = {
-                    "score": stats.get("score", 0),
-                    "signal": stats.get("signal", "NEUTRAL"),
-                    "confidence": stats.get("confidence", 0),
-                }
-    except Exception:
-        pass  # comparison is best-effort
+    if symbol in SLUG_MAP:
+        try:
+            cj = await fetch_nse_chain(symbol)
+            if cj and "records" in cj:
+                spot_val = cj.get("records", {}).get("underlyingValue", 0)
+                if spot_val:
+                    stats = compute_stock_score(cj, float(spot_val), symbol)
+                    existing_score = {
+                        "score": stats.get("score", 0),
+                        "signal": stats.get("signal", "NEUTRAL"),
+                        "confidence": stats.get("confidence", 0),
+                    }
+                    log.info(f"  ✅ Computed comparison OI score for {symbol}: {existing_score['score']}")
+                else:
+                    log.warning(f"  ⚠️ No spot price found for {symbol} in chain")
+            else:
+                log.warning(f"  ⚠️ No valid chain for {symbol} comparison")
+        except Exception as e:
+            log.error(f"  ❌ Error computing comparison score for {symbol}: {e}")
+    else:
+        log.info(f"  ℹ️ Skipping comparison score: {symbol} not in SLUG_MAP")
+
+    # Fetch momentum from database history
+    momentum_metrics = db.get_technical_momentum(symbol, "15m")
 
     return {
         "symbol": symbol,
@@ -2771,6 +2829,7 @@ async def score_technical_endpoint(symbol: str):
         },
         "timeframe_consensus": timeframe_consensus,
         "existing_score": existing_score,
+        "momentum": momentum_metrics,
         "bars_used": len(c5),
     }
 

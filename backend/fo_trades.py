@@ -94,6 +94,7 @@ def _check_confluence(stock: dict) -> dict:
     Requires at least 3 factors to score >= 40.
     At least one must be Price Action, and one from Derivatives.
     """
+
     signal = stock.get("signal", "NEUTRAL")
     metrics = stock.get("metrics", {})
     spot = stock.get("ltp", 0)

@@ -20,10 +20,10 @@ import UnifiedEvaluationTab from "./components/UnifiedEvaluationTab";
 const API = "http://localhost:8000";   // same-origin; set to http://localhost:8000 for dev
 
 const TABS = [
-  { id: "scanner", label: "Scanner", icon: "⚡" },
-  { id: "unified", label: "Market Eval", icon: "🎯" },
-  { id: "suggestions", label: "Suggestions", icon: "💡" },
-  { id: "fotrade", label: "F&O Trade", icon: "🎯" },
+  { id: "scanner", label: "Scanner", icon: "⚡", disabled: true },
+  { id: "unified", label: "Market Eval", icon: "🎯", disabled: true },
+  { id: "suggestions", label: "Suggestions", icon: "💡", disabled: true },
+  { id: "fotrade", label: "F&O Trade", icon: "🎯", disabled: true },
   { id: "paper", label: "Paper Trade", icon: "📝" },
   { id: "chain", label: "Chain", icon: "🔗" },
   { id: "greeks", label: "Greeks", icon: "Δ" },
@@ -33,7 +33,7 @@ const TABS = [
   { id: "straddle", label: "Straddle", icon: "⚖" },
   { id: "ml", label: "ML/NN", icon: "🧠" },
   { id: "techscore", label: "Tech Score", icon: "📊" },
-  { id: "accuracy", label: "Accuracy", icon: "🎯" },
+  { id: "accuracy", label: "Accuracy", icon: "🎯", disabled: true },
   { id: "backtest", label: "Backtest", icon: "🕰" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
@@ -68,7 +68,7 @@ async function apiFetch(path, options = {}) {
 
 // ── Root App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab] = useState("scanner");
+  const [tab, setTab] = useState("techscore");
   const [dark, setDark] = useState(() => localStorage.getItem("theme") !== "light");
   const [chainSymbol, setChainSymbol] = useState("NIFTY");
   const [marketStatus, setMarketStatus] = useState(null);
@@ -250,15 +250,20 @@ export default function App() {
         WebkitOverflowScrolling: "touch"
       }}>
         {TABS.map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)}
+          <button key={t.id} onClick={() => !t.disabled && setTab(t.id)}
             className="tab-btn"
+            disabled={t.disabled}
+            title={t.disabled ? `${t.label} (disabled)` : t.label}
             style={{
-              padding: "10px 16px", border: "none", cursor: "pointer",
+              padding: "10px 16px", border: "none",
+              cursor: t.disabled ? "not-allowed" : "pointer",
               background: tab === t.id ? "rgba(99,102,241,.08)" : "none",
-              color: tab === t.id ? theme.accent : theme.muted,
+              color: t.disabled ? theme.muted : tab === t.id ? theme.accent : theme.muted,
               borderBottom: tab === t.id ? `2px solid ${theme.accent}` : "2px solid transparent",
               whiteSpace: "nowrap", fontFamily: "inherit", fontSize: 12,
-              fontWeight: tab === t.id ? 600 : 400
+              fontWeight: tab === t.id ? 600 : 400,
+              opacity: t.disabled ? 0.35 : 1,
+              textDecoration: t.disabled ? "line-through" : "none",
             }}>
             {t.icon} {t.label}
           </button>

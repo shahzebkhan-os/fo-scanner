@@ -39,7 +39,7 @@ def find_oc_data(obj):
 async def fetch_nse_chain(symbol: str) -> dict:
     slug = SLUG_MAP.get(symbol)
     if not slug:
-        log.error(f"  ❌ No INDmoney slug for symbol={repr(symbol)}")
+        log.info(f"  ℹ️ Skipping INDmoney fetch: No slug for {symbol}")
         return {}
 
     url = f"https://www.indmoney.com/options/{slug}"

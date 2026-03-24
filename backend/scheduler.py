@@ -25,8 +25,10 @@ IST = ZoneInfo("Asia/Kolkata")
 # These are injected at startup from main.py
 _fetch_nse_chain_fn   = None
 _send_telegram_fn     = None
+_send_telegram_document_fn = None
 _is_market_open_fn    = None
 _scan_all_symbols_fn  = None   # should return list of scan result dicts
+_scan_symbol_fn       = None   # should return stats for one symbol
 _ml_train_fn          = None
 _all_symbols_list     = []
 
@@ -37,15 +39,20 @@ def init_scheduler(
     scan_fn,
     train_fn,
     all_symbols: list,
+    scan_symbol_fn = None,
+    send_telegram_doc_fn = None,
 ):
     global _fetch_nse_chain_fn, _send_telegram_fn, _is_market_open_fn
-    global _scan_all_symbols_fn, _ml_train_fn, _all_symbols_list
+    global _scan_all_symbols_fn, _ml_train_fn, _all_symbols_list, _scan_symbol_fn
+    global _send_telegram_document_fn
     _fetch_nse_chain_fn  = fetch_chain_fn
     _send_telegram_fn    = send_telegram_fn
+    _send_telegram_document_fn = send_telegram_doc_fn
     _is_market_open_fn   = is_market_open_fn
     _scan_all_symbols_fn = scan_fn
     _ml_train_fn         = train_fn
     _all_symbols_list    = all_symbols
+    _scan_symbol_fn      = scan_symbol_fn
     log.info("Scheduler initialised.")
 
 
@@ -146,79 +153,7 @@ async def iv_history_loop():
 # Task 3: Pre-Market Report (9:00 AM weekdays)
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def pre_market_report_loop():
-    """
-    Sends a Telegram summary of top setups every weekday at 9:00 AM IST,
-    before market opens. Scans all symbols and picks top 5 by score.
-    """
-    log.info("Pre-market report loop started.")
-    _sent_today = None
 
-    while True:
-        try:
-            now   = datetime.now(IST)
-            today = now.date()
-
-            # Weekdays only, between 8:55–9:10 AM, once per day
-            is_weekday  = now.weekday() < 5
-            is_report_window = dtime(8, 55) <= now.time() <= dtime(9, 10)
-
-            if is_weekday and is_report_window and _sent_today != today:
-                log.info("Generating pre-market report...")
-
-                if _scan_all_symbols_fn:
-                    results = await _scan_all_symbols_fn()
-                    top5    = sorted(results, key=lambda x: x.get("score", 0), reverse=True)[:5]
-
-                    if not top5:
-                        await asyncio.sleep(600)
-                        continue
-
-                    lines = [
-                        "📊 *PRE-MARKET REPORT*",
-                        f"🗓 {today.strftime('%d %b %Y')} | Top 5 Setups\n",
-                    ]
-                    for i, r in enumerate(top5, 1):
-                        sym    = r["symbol"]
-                        sig    = r.get("signal", "NEUTRAL")
-                        score  = r.get("score", 0)
-                        pcr    = r.get("pcr", 0)
-                        iv     = r.get("iv", 0)
-                        picks  = r.get("top_picks", [])
-                        pick_str = ", ".join(
-                            f"{p['strike']} {p['type']} @ ₹{p['ltp']}"
-                            for p in picks[:1]
-                        ) if picks else "—"
-
-                        emoji = "🟢" if sig == "BULLISH" else "🔴" if sig == "BEARISH" else "⚪"
-                        lines.append(
-                            f"{i}. {emoji} *{sym}* — Score: {score}\n"
-                            f"   Signal: {sig} | PCR: {pcr} | IV: {iv}\n"
-                            f"   Best Pick: {pick_str}"
-                        )
-
-                    # Sector summary
-                    sector_map = Signals.build_sector_heatmap(results)
-                    bull_sectors = [s for s, d in sector_map.items() if d["signal"] == "BULLISH"]
-                    bear_sectors = [s for s, d in sector_map.items() if d["signal"] == "BEARISH"]
-                    if bull_sectors:
-                        lines.append(f"\n🟢 Bullish sectors: {', '.join(bull_sectors)}")
-                    if bear_sectors:
-                        lines.append(f"🔴 Bearish sectors: {', '.join(bear_sectors)}")
-
-                    lines.append("\n_Market opens at 9:15 AM IST_")
-                    msg = "\n".join(lines)
-
-                    if _send_telegram_fn:
-                        await _send_telegram_fn(msg)
-                    _sent_today = today
-                    log.info("Pre-market report sent.")
-
-            await asyncio.sleep(120)   # check every 2 min
-
-        except Exception as e:
-            log.error(f"Pre-market report error: {e}")
-            await asyncio.sleep(120)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -492,6 +427,192 @@ async def accuracy_price_updater_loop():
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Task 8.5: Technical Score Momentum Snapshot (every 15 min)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def technical_snapshot_loop():
+    """Fetches 5m yfinance data for all symbols, saves scores to DB, and alerts Telegram."""
+    log.info("Technical snapshot loop started (5 min interval).")
+    while True:
+        try:
+            if _is_market_open_fn and _is_market_open_fn():
+                log.info("Taking technical score snapshot... (5-min interval)")
+                
+                def _fetch_and_score():
+                    import yfinance as yf
+                    import pandas as pd
+                    from .scoring_technical import compute_technical_score
+                    from .constants import YFINANCE_TICKER_MAP
+                    
+                    symbols = _all_symbols_list
+                    tickers = [YFINANCE_TICKER_MAP.get(s, f"{s}.NS") for s in symbols]
+                    
+                    df = yf.download(tickers, period="5d", interval="5m", progress=False, threads=True)
+                    if df is None or df.empty:
+                        return []
+                        
+                    if not isinstance(df.index, pd.DatetimeIndex):
+                         df.index = pd.to_datetime(df.index)
+                         
+                    df_15m = df.resample('15min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
+                    df_30m = df.resample('30min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
+                    
+                    records = []
+                    
+                    def _extract(data_df, tick):
+                        try:
+                            if isinstance(data_df.columns, pd.MultiIndex):
+                                c = data_df["Close"][tick].dropna().tolist()
+                                h = data_df["High"][tick].dropna().tolist()
+                                l = data_df["Low"][tick].dropna().tolist()
+                                v = data_df["Volume"][tick].dropna().tolist()
+                            else:
+                                c = data_df["Close"].dropna().tolist()
+                                h = data_df["High"].dropna().tolist()
+                                l = data_df["Low"].dropna().tolist()
+                                v = data_df["Volume"].dropna().tolist()
+                            
+                            def _flatten(lst):
+                                if lst and hasattr(lst[0], "__len__") and not isinstance(lst[0], str):
+                                    return [x[0] if len(x)>0 else x for x in lst]
+                                return lst
+                                
+                            return _flatten(c), _flatten(h), _flatten(l), _flatten(v)
+                        except Exception:
+                            return [], [], [], []
+                            
+                    for sym, tick in zip(symbols, tickers):
+                        try:
+                            c15, h15, l15, v15 = _extract(df_15m, tick)
+                            if len(c15) > 10:
+                                res15 = compute_technical_score(c15, h15, l15, v15)
+                                res15_dict = res15.to_dict()
+                                records.append({
+                                    "symbol": sym, 
+                                    "timeframe": "15m", 
+                                    "score": res15_dict.get("score", 0), 
+                                    "direction": res15_dict.get("direction", "NEUTRAL"),
+                                    "confidence": res15_dict.get("confidence", 0),
+                                    "strength": res15_dict.get("direction_strength", "MEDIUM")
+                                })
+                                
+                            c30, h30, l30, v30 = _extract(df_30m, tick)
+                            if len(c30) > 10:
+                                res30 = compute_technical_score(c30, h30, l30, v30)
+                                res30_dict = res30.to_dict()
+                                records.append({
+                                    "symbol": sym, 
+                                    "timeframe": "30m", 
+                                    "score": res30_dict.get("score", 0), 
+                                    "direction": res30_dict.get("direction", "NEUTRAL"),
+                                    "confidence": res30_dict.get("confidence", 0),
+                                    "strength": res30_dict.get("direction_strength", "MEDIUM")
+                                })
+                        except Exception:
+                            pass
+                    return records
+
+                records = await asyncio.to_thread(_fetch_and_score)
+                if records:
+                    db.save_technical_score_snapshots(records)
+                    log.info(f"Saved {len(records)} tech snapshots.")
+                    
+                    # ── Telegram Highlights ──
+                    if _send_telegram_fn:
+                        # Pick Top 5 Bullish and Top 5 Bearish based on 15m score/confidence
+                        rel = [r for r in records if r["timeframe"] == "15m"]
+                        bulls = sorted([r for r in rel if r["direction"] == "BULLISH"], key=lambda x: (x["score"], x["confidence"]), reverse=True)[:5]
+                        bears = sorted([r for r in rel if r["direction"] == "BEARISH"], key=lambda x: (x["score"], x["confidence"]), reverse=False)[:5] # Low score is more bearish for indexing, but raw_score was inverted? No, sub_scores are 0-100 logic.
+                        # Wait, sub_scores 0-100 means high is more BULLISH if direction is BULLISH.
+                        # For BEARISH, score is also 0-100 where high is more BEARISH conviction.
+                        # Let's double check scoring_technical logic. 
+                        # Line 376: sub_scores[name] = max(0.0, min(100.0, 50 - raw * 50)) for BEARISH.
+                        # So high score = high conviction for that direction.
+                        
+                        bears = sorted([r for r in rel if r["direction"] == "BEARISH"], key=lambda x: (x["score"], x["confidence"]), reverse=True)[:5]
+
+                        if bulls or bears:
+                            # ── Top Picks Enrichment ──
+                            # For the top technical setups, fetch their option chain "top picks"
+                            async def enrich_with_picks(setup_list, pick_type):
+                                enriched = []
+                                for r in setup_list:
+                                    try:
+                                        if _scan_symbol_fn:
+                                            full_stats = await _scan_symbol_fn(r["symbol"])
+                                            if full_stats and "top_picks" in full_stats:
+                                                # Filter picks to match the setup direction
+                                                picks = [p for p in full_stats["top_picks"] if p["type"] == pick_type]
+                                                if picks:
+                                                    r["picks"] = picks[:1] # Take the best one
+                                    except Exception as e:
+                                        log.warning(f"Failed to enrich picks for {r['symbol']}: {e}")
+                                    enriched.append(r)
+                                return enriched
+
+                            enriched_bulls = await enrich_with_picks(bulls, "CE")
+                            enriched_bears = await enrich_with_picks(bears, "PE")
+
+                            lines = ["⚡ *Technical Highlights (5-Min Scan)*\n"]
+                            if enriched_bulls:
+                                lines.append("🟢 *Top Bullish Setups:*")
+                                for r in enriched_bulls:
+                                    pick_str = ""
+                                    if "picks" in r:
+                                        p = r["picks"][0]
+                                        pick_str = f" → *{p['type']} {p['strike']}* (₹{p['ltp']})"
+                                    lines.append(f"• {r['symbol']} | Score: *{r['score']}*{pick_str}")
+                            
+                            if enriched_bears:
+                                lines.append("\n🔴 *Top Bearish Setups:*")
+                                for r in enriched_bears:
+                                    pick_str = ""
+                                    if "picks" in r:
+                                        p = r["picks"][0]
+                                        pick_str = f" → *{p['type']} {p['strike']}* (₹{p['ltp']})"
+                                    lines.append(f"• {r['symbol']} | Score: *{r['score']}*{pick_str}")
+                            
+                            lines.append(f"\n_Next update in 5 minutes_")
+                            await _send_telegram_fn("\n".join(lines))
+
+                        # ── Technical Auto-Trading Trigger (Score >= 70) ──
+                        # Process all 15m records, not just the top 5
+                        tech_70_plus = [r for r in rel if r["score"] >= 70]
+                        if tech_70_plus:
+                            log.info(f"Checking auto-trade for {len(tech_70_plus)} symbols with score >= 70")
+                            for r in tech_70_plus:
+                                try:
+                                    # Always get fresh full stats for trade execution
+                                    if _scan_symbol_fn:
+                                        full = await _scan_symbol_fn(r["symbol"])
+                                        if full and "top_picks" in full:
+                                            # Find pick matching direction
+                                            target_type = "CE" if r["direction"] == "BULLISH" else "PE"
+                                            picks = [p for p in full["top_picks"] if p["type"] == target_type]
+                                            if picks:
+                                                p = picks[0]
+                                                db.add_trade(
+                                                    symbol=r["symbol"],
+                                                    opt_type=p["type"],
+                                                    strike=p["strike"],
+                                                    entry_price=p["ltp"],
+                                                    reason=f"Auto: Technical Score {r['score']}% ({r['direction']})",
+                                                    entry_score=r["score"]
+                                                )
+                                except Exception as te:
+                                    log.error(f"Auto-trade trigger failed for {r['symbol']}: {te}")
+
+                else:
+                    log.warning("No technical score records generated.")
+                    
+            await asyncio.sleep(300)  # 5 min
+            
+        except Exception as e:
+            log.error(f"Technical snapshot loop error: {e}")
+            await asyncio.sleep(300)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Task 9: ML Model Retraining (daily at 15:45)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -550,18 +671,74 @@ async def auto_trade_loop():
             await asyncio.sleep(900)
 
 
+async def technical_report_loop():
+    """Generates a CSV report for all popular symbols every 15 minutes."""
+    log.info("Technical Report CSV loop started.")
+    import io
+    import csv
+    from .constants import POPULAR_SYMBOLS
+
+    while True:
+        try:
+            if _is_market_open_fn and _is_market_open_fn():
+                if _scan_symbol_fn and _send_telegram_document_fn:
+                    log.info("Generating Technical Score CSV Report...")
+                    
+                    rows = []
+                    for sym in POPULAR_SYMBOLS:
+                        try:
+                            stats = await _scan_symbol_fn(sym)
+                            if stats:
+                                ts = stats.get("technical_score", {})
+                                picks = stats.get("top_picks", [])
+                                best_pick = picks[0] if picks else {}
+                                
+                                rows.append([
+                                    sym,
+                                    ts.get("score", ""),
+                                    ts.get("direction", ""),
+                                    f"{ts.get('confidence', 0)*100:.1f}%",
+                                    best_pick.get("strike", ""),
+                                    best_pick.get("type", ""),
+                                    best_pick.get("ltp", "")
+                                ])
+                        except Exception as e:
+                            log.warning(f"Failed to fetch report stats for {sym}: {e}")
+                    
+                    if rows:
+                        headers = ["Symbol", "Score", "Direction", "Confidence", "Best Strike", "Type", "LTP"]
+                        buffer = io.StringIO()
+                        writer = csv.writer(buffer)
+                        writer.writerow(headers)
+                        writer.writerows(rows)
+                        
+                        csv_content = buffer.getvalue()
+                        filename = f"technical_report_{datetime.now(IST).strftime('%H%M')}.csv"
+                        caption = "📊 *Technical Score Report (All Popular Symbols)*\nFull coverage attached."
+                        
+                        await _send_telegram_document_fn(filename, csv_content, caption)
+                        log.info("Technical Report CSV dispatched.")
+
+            await asyncio.sleep(900)  # 15 minutes
+        except Exception as e:
+            log.error(f"Technical report loop error: {e}")
+            await asyncio.sleep(900)
+
+
 async def start_all():
     """Launch all background tasks. Call from FastAPI lifespan."""
-    asyncio.create_task(oi_snapshot_loop())
-    asyncio.create_task(iv_history_loop())
-    asyncio.create_task(pre_market_report_loop())
-    asyncio.create_task(bulk_deals_loop())
+    # ── Disabled: Scanner / Market Eval / Suggestions / F&O Trade tabs off ──
+    # asyncio.create_task(oi_snapshot_loop())       # Scanner/Market Eval
+    # asyncio.create_task(iv_history_loop())         # Scanner/Market Eval
+
+    # asyncio.create_task(bulk_deals_loop())         # Scanner
+    # asyncio.create_task(auto_trade_loop())         # F&O Trade
     asyncio.create_task(db_cleanup_loop())
-    # asyncio.create_task(auto_tpsl_loop()) # Redundant with paper_trade_manager in main.py
-    asyncio.create_task(accuracy_sampler_loop())
-    asyncio.create_task(accuracy_price_updater_loop())
+    # asyncio.create_task(accuracy_sampler_loop())
+    # asyncio.create_task(accuracy_price_updater_loop())
+    asyncio.create_task(technical_snapshot_loop())
+    asyncio.create_task(technical_report_loop())
     asyncio.create_task(ml_retrain_loop())
-    asyncio.create_task(auto_trade_loop())
-    log.info("All scheduler tasks started (including Auto Trade Background Loop).")
+    log.info("Scheduler started (scanner/trade loops disabled).")
 
 

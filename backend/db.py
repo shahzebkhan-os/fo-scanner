@@ -10,7 +10,7 @@ New tables vs v3:
 """
 
 import sqlite3, os, json, logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
 
@@ -270,6 +270,19 @@ def init_db():
             ON market_snapshots(trade_result);
         CREATE INDEX IF NOT EXISTS idx_snapshots_composite
             ON market_snapshots(data_source, snapshot_time, score, confidence, signal);
+
+        -- ── New: Technical Scores History ─────────────────────────────
+        CREATE TABLE IF NOT EXISTS technical_scores_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT    NOT NULL,
+            timeframe   TEXT    NOT NULL,
+            score       INTEGER NOT NULL,
+            direction   TEXT    NOT NULL,
+            snap_time   TEXT    DEFAULT (datetime('now')),
+            snap_date   TEXT    DEFAULT (date('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tech_history_sym_date
+            ON technical_scores_history(symbol, snap_date, timeframe);
         """)
 
     print("✅ DB initialised (v4)")
@@ -1027,3 +1040,75 @@ def get_partial_exits(trade_id: int) -> list:
             (trade_id,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Technical Scores Momentum History
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_technical_score_snapshots(records: list):
+    """
+    Bulk-insert a batch of technical scores.
+    Expected format: {"symbol": "...", "timeframe": "...", "score": 85, "direction": "..."}
+    """
+    if not records:
+        return
+    rows = []
+    now = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    today = date.today().isoformat()
+    for r in records:
+        rows.append((
+            r.get("symbol"),
+            r.get("timeframe"),
+            r.get("score", 0),
+            r.get("direction", "NEUTRAL"),
+            now,
+            today
+        ))
+    with _conn() as c:
+        c.executemany("""
+            INSERT INTO technical_scores_history
+                (symbol, timeframe, score, direction, snap_time, snap_date)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, rows)
+
+def get_technical_momentum(symbol: str, timeframe: str = "15m") -> dict:
+    """
+    Retrieves the most recent score delta vs 1h ago and 1d ago.
+    """
+    with _conn() as c:
+        # Get the latest entry
+        latest = c.execute("""
+            SELECT score, snap_time FROM technical_scores_history 
+            WHERE symbol=? AND timeframe=? 
+            ORDER BY snap_time DESC LIMIT 1
+        """, (symbol, timeframe)).fetchone()
+        
+        if not latest:
+            return {"1h": 0, "1d": 0}
+            
+        latest_score = latest["score"]
+        
+        # We need an IST string limit for 1 hour ago
+        one_hour_ago_str = (datetime.now(IST) - timedelta(minutes=50)).strftime("%Y-%m-%d %H:%M:%S")
+        
+        one_hour_ago = c.execute("""
+            SELECT score FROM technical_scores_history 
+            WHERE symbol=? AND timeframe=?
+            AND snap_time <= ?
+            ORDER BY snap_time DESC LIMIT 1
+        """, (symbol, timeframe, one_hour_ago_str)).fetchone()
+        
+        one_day_ago = c.execute("""
+            SELECT score FROM technical_scores_history 
+            WHERE symbol=? AND timeframe=?
+            AND snap_date < date('now')
+            ORDER BY snap_time DESC LIMIT 1
+        """, (symbol, timeframe)).fetchone()
+        
+        mom_1h = (latest_score - one_hour_ago["score"]) if one_hour_ago else 0
+        mom_1d = (latest_score - one_day_ago["score"]) if one_day_ago else 0
+        
+        return {
+            "1h": mom_1h,
+            "1d": mom_1d
+        }
