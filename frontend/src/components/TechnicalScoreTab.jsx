@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   CartesianGrid, Cell, RadarChart, PolarGrid, PolarAngleAxis,
@@ -757,6 +757,13 @@ export default function TechnicalScoreTab({ theme, scanData }) {
   const [selectedTF, setSelectedTF] = useState("15m");
 
   const [accuracySummary, setAccuracySummary] = useState(null);
+  const scanMap = useMemo(() => {
+    const map = {};
+    (scanData || []).forEach((row) => {
+      map[row.symbol] = row;
+    });
+    return map;
+  }, [scanData]);
 
   const fetchAccuracySummary = useCallback(async () => {
     try {
@@ -1243,6 +1250,8 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                         <th style={{ padding: "10px 8px" }}>Blended</th>
                         <th style={{ padding: "10px 8px" }}>Technical</th>
                         <th style={{ padding: "10px 8px" }}>Direction</th>
+                        <th style={{ padding: "10px 8px" }}>Scan Signal</th>
+                        <th style={{ padding: "10px 8px" }}>Top Pick</th>
                         <th style={{ padding: "10px 8px" }}>Signals</th>
                         <th style={{ padding: "10px 8px" }}>Regime</th>
                         <th style={{ padding: "10px 8px" }}>Confidence</th>
@@ -1251,16 +1260,29 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                     </thead>
                     <tbody>
                       {sorted.map((b, idx) => {
-                        const bTech = b.data.technical_score;
-                        const bExist = b.data.existing_score;
-                        const bHasExist = bExist?.score != null;
-                        const bBlended = Math.round((bTech.score + (bHasExist ? bExist.score : 0)) / (bHasExist ? 2 : 1));
-                        
-                        const inds = bTech.indicators || {};
-                        const st = inds.supertrend?.signal;
-                        const ichi = inds.ichimoku?.signal;
-                        const div = inds.divergence?.signal;
-                        const isTrending = inds.adx?.adx >= 25;
+                         const bTech = b.data.technical_score;
+                         const bExist = b.data.existing_score;
+                         const bHasExist = bExist?.score != null;
+                         const bBlended = Math.round((bTech.score + (bHasExist ? bExist.score : 0)) / (bHasExist ? 2 : 1));
+                         
+                         const scanRow = scanMap[b.symbol];
+                         const scanSignal = scanRow?.signal || bTech.direction;
+                         const topPick = scanRow?.top_picks?.find(p => {
+                           if (scanSignal === "BULLISH") return p.type === "CE";
+                           if (scanSignal === "BEARISH") return p.type === "PE";
+                           return true;
+                         }) || scanRow?.top_picks?.[0];
+                         const topPickLabel = topPick
+                           ? `${topPick.strike} ${topPick.type} @ ₹${fmt(topPick.ltp, 1)} • ${Math.round(topPick.score || 0)} pts`
+                           : "—";
+                         const topPickColor = topPick ? signalColor(topPick.type === "CE" ? "BULLISH" : "BEARISH") : theme.muted;
+                         const topPickBg = topPick ? signalBg(topPick.type === "CE" ? "BULLISH" : "BEARISH") : "transparent";
+
+                         const inds = bTech.indicators || {};
+                         const st = inds.supertrend?.signal;
+                         const ichi = inds.ichimoku?.signal;
+                         const div = inds.divergence?.signal;
+                         const isTrending = inds.adx?.adx >= 25;
                         const isBest = idx === 0 && bTech.score >= 70 && bTech.confidence >= 0.7;
 
                         return (
@@ -1282,19 +1304,48 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                               }}>{bBlended}</span>
                             </td>
                             <td style={{ padding: "8px", opacity: 0.8 }}>{bTech.score}</td>
-                            <td style={{ padding: "8px" }}>
-                              <span style={{ 
-                                color: signalColor(bTech.direction), fontWeight: 700, fontSize: 10,
-                                background: signalBg(bTech.direction), padding: "2px 6px", borderRadius: 4
-                              }}>
-                                {bTech.direction}
-                              </span>
-                            </td>
-                            <td style={{ padding: "8px" }}>
-                              <div style={{ display: "flex", gap: 6, fontSize: 14 }}>
-                                <span title="Supertrend" style={{ opacity: st ? 1 : 0.2 }}>{st === "BULLISH" ? "🎯" : st === "BEARISH" ? "⭕" : "🎯"}</span>
-                                <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{ichi === "BULLISH" ? "🟢" : ichi === "BEARISH" ? "🔴" : "⚪"}</span>
-                                <span title="Divergence" style={{ opacity: div && div !== "NEUTRAL" ? 1 : 0.2 }}>{div === "BULLISH" ? "⚡" : div === "BEARISH" ? "⛈️" : "⚡"}</span>
+                              <td style={{ padding: "8px" }}>
+                                <span style={{ 
+                                  color: signalColor(bTech.direction), fontWeight: 700, fontSize: 10,
+                                  background: signalBg(bTech.direction), padding: "2px 6px", borderRadius: 4
+                                }}>
+                                  {bTech.direction}
+                                </span>
+                              </td>
+                              <td style={{ padding: "8px" }}>
+                                <span style={{
+                                  color: signalColor(scanSignal), fontWeight: 700, fontSize: 10,
+                                  background: signalBg(scanSignal), padding: "2px 6px", borderRadius: 4
+                                }}>
+                                  {scanSignal}
+                                </span>
+                              </td>
+                              <td style={{ padding: "8px" }}>
+                                <div style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: 6,
+                                  background: topPickBg,
+                                  padding: "4px 8px",
+                                  borderRadius: 6,
+                                  border: `1px solid ${topPick ? topPickColor + "55" : theme.border}`
+                                }}>
+                                  <span style={{ color: topPickColor, fontWeight: 800 }}>{topPick ? "★" : "—"}</span>
+                                  <div style={{ lineHeight: 1.3 }}>
+                                    <div style={{ fontWeight: 700, color: topPickColor }}>{topPickLabel}</div>
+                                    {scanRow?.signal_reasons?.length > 0 && (
+                                      <div style={{ fontSize: 9, color: theme.muted }} title={scanRow.signal_reasons.join(" • ")}>
+                                        {scanRow.signal_reasons.slice(0, 2).join(" • ")}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+                              <td style={{ padding: "8px" }}>
+                                <div style={{ display: "flex", gap: 6, fontSize: 14 }}>
+                                  <span title="Supertrend" style={{ opacity: st ? 1 : 0.2 }}>{st === "BULLISH" ? "🎯" : st === "BEARISH" ? "⭕" : "🎯"}</span>
+                                  <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{ichi === "BULLISH" ? "🟢" : ichi === "BEARISH" ? "🔴" : "⚪"}</span>
+                                  <span title="Divergence" style={{ opacity: div && div !== "NEUTRAL" ? 1 : 0.2 }}>{div === "BULLISH" ? "⚡" : div === "BEARISH" ? "⛈️" : "⚡"}</span>
                               </div>
                             </td>
                             <td style={{ padding: "8px" }}>
