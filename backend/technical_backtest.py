@@ -240,6 +240,20 @@ class TechnicalBacktester:
             return None, []
 
         from backend.scoring_technical import compute_technical_score
+        from datetime import datetime, timedelta
+
+        # Enforce yfinance intraday limits (max 60 days for <1d intervals)
+        if timeframe in ["1m", "2m", "5m", "10m", "15m", "30m", "90m"]:
+            try:
+                dt_start = datetime.strptime(start_date, "%Y-%m-%d")
+                # Use 59 days to be safe against timezone drifts
+                min_start = datetime.now() - timedelta(days=59)
+                if dt_start < min_start:
+                    actual_start = min_start.strftime("%Y-%m-%d")
+                    log.warning(f"yfinance limits {timeframe} data to 60 days. Adjusting start_date from {start_date} to {actual_start}")
+                    start_date = actual_start
+            except Exception as e:
+                pass
 
         all_trades = []
 
@@ -251,11 +265,12 @@ class TechnicalBacktester:
             yf_symbol = ticker_map.get(symbol, f"{symbol}.NS")
 
             try:
+                fetch_tf = "5m" if timeframe == "10m" else timeframe
                 df = yf.download(
                     yf_symbol,
                     start=start_date,
                     end=end_date,
-                    interval=timeframe,
+                    interval=fetch_tf,
                     progress=False
                 )
 
@@ -268,10 +283,24 @@ class TechnicalBacktester:
                 continue
 
             # Prepare price arrays
-            closes = df['Close'].values.tolist()
-            highs = df['High'].values.tolist()
-            lows = df['Low'].values.tolist()
-            volumes = df['Volume'].values.tolist()
+            if isinstance(df.columns, pd.MultiIndex):
+                # Flatten MultiIndex to simple column names
+                df.columns = df.columns.get_level_values(0)
+
+            if timeframe == "10m":
+                # Resample 5m to 10m
+                df = df.resample("10T").agg({
+                    'Open': 'first',
+                    'High': 'max',
+                    'Low': 'min',
+                    'Close': 'last',
+                    'Volume': 'sum'
+                }).dropna()
+
+            closes = df['Close'].values.flatten().tolist()
+            highs = df['High'].values.flatten().tolist()
+            lows = df['Low'].values.flatten().tolist()
+            volumes = df['Volume'].values.flatten().tolist()
             timestamps = df.index.tolist()
 
             # Simulate trading
@@ -490,7 +519,7 @@ class TechnicalBacktester:
         ranging_wins = [t for t in ranging_trades if t.outcome == "WIN"]
         ranging_win_rate = len(ranging_wins) / len(ranging_trades) if ranging_trades else 0
 
-        # Statistical significance (Z-test)
+        # Statistical significance
         z_score = None
         p_value = None
         is_significant = False
@@ -498,44 +527,44 @@ class TechnicalBacktester:
         if total_trades >= 30:
             # Null hypothesis: win_rate = 0.5 (random)
             p0 = 0.5
-            z_score = (win_rate - p0) / np.sqrt(p0 * (1 - p0) / total_trades)
+            z_score = float((win_rate - p0) / np.sqrt(p0 * (1 - p0) / total_trades))
             # Two-tailed p-value
             from scipy import stats
-            p_value = 2 * (1 - stats.norm.cdf(abs(z_score)))
-            is_significant = p_value < 0.05
+            p_value = float(2 * (1 - stats.norm.cdf(abs(z_score))))
+            is_significant = bool(p_value < 0.05)
 
         return BacktestMetrics(
-            total_trades=total_trades,
-            winning_trades=winning_trades,
-            losing_trades=losing_trades,
-            win_rate=round(win_rate, 4),
-            total_profit_pct=round(total_profit_pct, 2),
-            total_loss_pct=round(total_loss_pct, 2),
-            avg_win_pct=round(avg_win_pct, 2),
-            avg_loss_pct=round(avg_loss_pct, 2),
-            profit_factor=round(profit_factor, 2),
-            max_consecutive_wins=max_consecutive_wins,
-            max_consecutive_losses=max_consecutive_losses,
-            bullish_trades=len(bullish_trades),
-            bullish_wins=len(bullish_wins),
-            bullish_win_rate=round(bullish_win_rate, 4),
-            bearish_trades=len(bearish_trades),
-            bearish_wins=len(bearish_wins),
-            bearish_win_rate=round(bearish_win_rate, 4),
-            strong_trades=len(strong_trades),
-            strong_wins=len(strong_wins),
-            strong_win_rate=round(strong_win_rate, 4),
-            weak_trades=len(weak_trades),
-            weak_wins=len(weak_wins),
-            weak_win_rate=round(weak_win_rate, 4),
-            trending_trades=len(trending_trades),
-            trending_wins=len(trending_wins),
-            trending_win_rate=round(trending_win_rate, 4),
-            ranging_trades=len(ranging_trades),
-            ranging_wins=len(ranging_wins),
-            ranging_win_rate=round(ranging_win_rate, 4),
-            z_score=round(z_score, 2) if z_score is not None else None,
-            p_value=round(p_value, 4) if p_value is not None else None,
+            total_trades=int(total_trades),
+            winning_trades=int(winning_trades),
+            losing_trades=int(losing_trades),
+            win_rate=float(round(win_rate, 4)),
+            total_profit_pct=float(round(total_profit_pct, 2)),
+            total_loss_pct=float(round(total_loss_pct, 2)),
+            avg_win_pct=float(round(avg_win_pct, 2)),
+            avg_loss_pct=float(round(avg_loss_pct, 2)),
+            profit_factor=float(round(profit_factor, 2)),
+            max_consecutive_wins=int(max_consecutive_wins),
+            max_consecutive_losses=int(max_consecutive_losses),
+            bullish_trades=int(len(bullish_trades)),
+            bullish_wins=int(len(bullish_wins)),
+            bullish_win_rate=float(round(bullish_win_rate, 4)),
+            bearish_trades=int(len(bearish_trades)),
+            bearish_wins=int(len(bearish_wins)),
+            bearish_win_rate=float(round(bearish_win_rate, 4)),
+            strong_trades=int(len(strong_trades)),
+            strong_wins=int(len(strong_wins)),
+            strong_win_rate=float(round(strong_win_rate, 4)),
+            weak_trades=int(len(weak_trades)),
+            weak_wins=int(len(weak_wins)),
+            weak_win_rate=float(round(weak_win_rate, 4)),
+            trending_trades=int(len(trending_trades)),
+            trending_wins=int(len(trending_wins)),
+            trending_win_rate=float(round(trending_win_rate, 4)),
+            ranging_trades=int(len(ranging_trades)),
+            ranging_wins=int(len(ranging_wins)),
+            ranging_win_rate=float(round(ranging_win_rate, 4)),
+            z_score=z_score,
+            p_value=p_value,
             is_significant=is_significant
         )
 
@@ -554,6 +583,13 @@ class TechnicalBacktester:
         """Save backtest run and trades to database."""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+
+        def numpy_default(obj):
+            if hasattr(obj, 'item'):  # numpy types
+                return obj.item()
+            if isinstance(obj, (datetime, timedelta)):
+                return str(obj)
+            return str(obj)
 
         # Save run
         c.execute("""
@@ -574,7 +610,7 @@ class TechnicalBacktester:
             metrics.total_trades,
             metrics.win_rate,
             metrics.profit_factor,
-            json.dumps(metrics.to_dict()),
+            json.dumps(metrics.to_dict(), default=numpy_default),
             json.dumps({
                 'min_score_threshold': min_score_threshold,
                 'min_confidence': min_confidence,
@@ -611,7 +647,7 @@ class TechnicalBacktester:
                 trade.adx_at_entry,
                 trade.directional_edge,
                 trade.agreement_pct,
-                json.dumps(trade.indicators)
+                json.dumps(trade.indicators, default=numpy_default)
             ))
 
         conn.commit()

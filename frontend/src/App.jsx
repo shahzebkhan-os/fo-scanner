@@ -272,22 +272,22 @@ export default function App() {
 
       {/* Content */}
       <main style={{ padding: 16, maxWidth: 1400, margin: "0 auto" }}>
-        <div style={{ display: tab === "scanner"   ? "block" : "none" }}><ScannerTab theme={theme} onChain={goChain} onGreeks={goGreeks} onData={setScanData} scanData={scanData} marketStatus={marketStatus} /></div>
-        <div style={{ display: tab === "unified"   ? "block" : "none" }}><UnifiedEvaluationTab darkMode={dark} /></div>
-        <div style={{ display: tab === "suggestions" ? "block" : "none" }}><SuggestionsTab theme={theme} goChain={goChain} scanData={scanData} onData={setScanData} /></div>
-        <div style={{ display: tab === "fotrade" ? "block" : "none" }}><FOTradeTab theme={theme} goChain={goChain} scanData={scanData} onData={setScanData} /></div>
-        <div style={{ display: tab === "paper"   ? "block" : "none" }}><PaperTradingTab theme={theme} /></div>
-        <div style={{ display: tab === "chain"     ? "block" : "none" }}><ChainTab theme={theme} symbol={chainSymbol} setSymbol={setChainSymbol} /></div>
-        <div style={{ display: tab === "greeks"    ? "block" : "none" }}><GreeksTab theme={theme} symbol={greeksSymbol} /></div>
-        <div style={{ display: tab === "heatmap"   ? "block" : "none" }}><HeatmapTab theme={theme} /></div>
-        <div style={{ display: tab === "sector"    ? "block" : "none" }}><SectorTab theme={theme} onChain={goChain} /></div>
-        <div style={{ display: tab === "uoa"       ? "block" : "none" }}><UOATab theme={theme} onChain={goChain} /></div>
-        <div style={{ display: tab === "straddle"  ? "block" : "none" }}><StraddleTab theme={theme} /></div>
-        <div style={{ display: tab === "ml"        ? "block" : "none" }}><MLTab theme={theme} /></div>
-        <div style={{ display: tab === "techscore" ? "block" : "none" }}><TechnicalScoreTab theme={theme} scanData={scanData} /></div>
-        <div style={{ display: tab === "accuracy"  ? "block" : "none" }}><AccuracyTab theme={theme} /></div>
-        <div style={{ display: tab === "backtest"  ? "block" : "none" }}><BacktestTab theme={theme} /></div>
-        <div style={{ display: tab === "settings"  ? "block" : "none" }}><SettingsTab theme={theme} /></div>
+        {tab === "scanner" && <ScannerTab theme={theme} onChain={goChain} onGreeks={goGreeks} onData={setScanData} scanData={scanData} marketStatus={marketStatus} />}
+        {tab === "unified" && <UnifiedEvaluationTab darkMode={dark} />}
+        {tab === "suggestions" && <SuggestionsTab theme={theme} goChain={goChain} scanData={scanData} onData={setScanData} />}
+        {tab === "fotrade" && <FOTradeTab theme={theme} goChain={goChain} scanData={scanData} onData={setScanData} />}
+        {tab === "paper" && <PaperTradingTab theme={theme} />}
+        {tab === "chain" && <ChainTab theme={theme} symbol={chainSymbol} setSymbol={setChainSymbol} />}
+        {tab === "greeks" && <GreeksTab theme={theme} symbol={greeksSymbol} />}
+        {tab === "heatmap" && <HeatmapTab theme={theme} />}
+        {tab === "sector" && <SectorTab theme={theme} onChain={goChain} />}
+        {tab === "uoa" && <UOATab theme={theme} onChain={goChain} />}
+        {tab === "straddle" && <StraddleTab theme={theme} />}
+        {tab === "ml" && <MLTab theme={theme} />}
+        {tab === "techscore" && <TechnicalScoreTab theme={theme} scanData={scanData} />}
+        {tab === "accuracy" && <AccuracyTab theme={theme} />}
+        {tab === "backtest" && <BacktestTab theme={theme} />}
+        {tab === "settings" && <SettingsTab theme={theme} />}
       </main>
     </div>
   );

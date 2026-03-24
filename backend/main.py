@@ -1021,7 +1021,6 @@ async def scan_all(limit: int = Query(90, ge=1, le=200)):
     cache_key = cache.cache_key("scan_result", "all", limit)
     cached = await cache.get(cache_key)
     if cached:
-        log.info(f"=== SCAN: returning cached result ===")
         return cached
 
     # 2. Coalescing: Check if a scan is already running for this limit
@@ -2739,7 +2738,7 @@ async def score_technical_endpoint(symbol: str):
     try:
         import pandas as pd
         df = await asyncio.to_thread(
-            lambda: yf.download(ticker, period="5d", interval="5m", progress=False)
+            lambda: yf.download(ticker, period="5d", interval="1m", progress=False)
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to fetch price data: {exc}")
@@ -2754,8 +2753,10 @@ async def score_technical_endpoint(symbol: str):
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
 
+    df_2m = df.resample('2min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
+    df_5m = df.resample('5min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
+    df_10m = df.resample('10min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
     df_15m = df.resample('15min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
-    df_30m = df.resample('30min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
 
     # Ensure we get Series, not DataFrames (in case of duplicate columns or remaining MultiIndex)
     def _to_list(series_or_df):
@@ -2778,19 +2779,25 @@ async def score_technical_endpoint(symbol: str):
         v = _flatten(_to_list(data["Volume"].dropna()))
         return c, h, l, v
 
-    c5, h5, l5, v5 = _extract(df)
+    c1, h1, l1, v1 = _extract(df)
+    c2, h2, l2, v2 = _extract(df_2m)
+    c5, h5, l5, v5 = _extract(df_5m)
+    c10, h10, l10, v10 = _extract(df_10m)
     c15, h15, l15, v15 = _extract(df_15m)
-    c30, h30, l30, v30 = _extract(df_30m)
 
+    res_1m = compute_technical_score(c1, h1, l1, v1)
+    res_2m = compute_technical_score(c2, h2, l2, v2)
     res_5m = compute_technical_score(c5, h5, l5, v5)
+    res_10m = compute_technical_score(c10, h10, l10, v10)
     res_15m = compute_technical_score(c15, h15, l15, v15)
-    res_30m = compute_technical_score(c30, h30, l30, v30)
 
     # Compute timeframe consensus
     timeframe_consensus = _compute_timeframe_consensus({
+        "1m": res_1m.to_dict(),
+        "2m": res_2m.to_dict(),
         "5m": res_5m.to_dict(),
-        "15m": res_15m.to_dict(),
-        "30m": res_30m.to_dict()
+        "10m": res_10m.to_dict(),
+        "15m": res_15m.to_dict()
     })
 
     # Also compute the existing OI-based score for comparison if it's an F&O symbol
@@ -2824,9 +2831,11 @@ async def score_technical_endpoint(symbol: str):
         "symbol": symbol,
         "technical_score": res_15m.to_dict(),
         "timeframes": {
+            "1m": res_1m.to_dict(),
+            "2m": res_2m.to_dict(),
             "5m": res_5m.to_dict(),
+            "10m": res_10m.to_dict(),
             "15m": res_15m.to_dict(),
-            "30m": res_30m.to_dict(),
         },
         "timeframe_consensus": timeframe_consensus,
         "existing_score": existing_score,

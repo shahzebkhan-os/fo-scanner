@@ -118,8 +118,8 @@ function TechnicalTradeMonitor({ theme }) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-async function apiFetch(path) {
-  const r = await fetch(path);
+async function apiFetch(path, options = {}) {
+  const r = await fetch(path, options);
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
     throw new Error(body.detail || `HTTP ${r.status}`);
@@ -292,34 +292,27 @@ function IndicatorCard({ name, data, subScore, theme }) {
 }
 
 // ── Directional Banner (Hero Element) ───────────────────────────────────────
-function DirectionalBanner({ tech, theme }) {
+function DirectionalBanner({ tech, theme, accuracySummary }) {
   if (!tech) return null;
 
   const direction = tech.direction;
   const strength = tech.direction_strength;
-  const edge = tech.directional_edge || 0;
-  const agreement = tech.agreement_pct || 0;
+  const pValue = accuracySummary?.stats?.p_value;
+  const isVerified = pValue != null && pValue < 0.05;
 
   const isStrong = strength === "STRONG";
-  const isWeak = strength === "WEAK";
-  const isSideways = strength === "SIDEWAYS";
-  const isBullish = direction === "BULLISH";
-  const isBearish = direction === "BEARISH";
-
-  const baseColor = isBullish ? "#22c55e" : isBearish ? "#ef4444" : "#94a3b8";
-  const bgColor = isBullish
+  const baseColor = direction === "BULLISH" ? "#22c55e" : direction === "BEARISH" ? "#ef4444" : "#94a3b8";
+  const bgColor = direction === "BULLISH"
     ? (isStrong ? "rgba(34,197,94,0.15)" : "rgba(34,197,94,0.08)")
-    : isBearish
+    : direction === "BEARISH"
     ? (isStrong ? "rgba(239,68,68,0.15)" : "rgba(239,68,68,0.08)")
     : "rgba(148,163,184,0.05)";
 
-  const arrowIcon = isBullish ? "▲▲▲" : isBearish ? "▼▼▼" : "◆◆◆";
-  const emoji = isBullish ? "🚀" : isBearish ? "📉" : isStrong ? "➡️" : "〰️";
+  const arrowIcon = direction === "BULLISH" ? "▲▲▲" : direction === "BEARISH" ? "▼▼▼" : "◆◆◆";
+  const emoji = direction === "BULLISH" ? "🚀" : direction === "BEARISH" ? "📉" : isStrong ? "➡️" : "〰️";
 
   const message = isStrong
-    ? (isBullish ? "Strong Uptrend Detected" : isBearish ? "Strong Downtrend Detected" : "Strong Sideways Action")
-    : isWeak
-    ? (isBullish ? "Weak Bullish Bias" : isBearish ? "Weak Bearish Bias" : "Weak Direction")
+    ? (direction === "BULLISH" ? "Strong Uptrend Detected" : direction === "BEARISH" ? "Strong Downtrend Detected" : "Strong Sideways Action")
     : "Consolidating / No Clear Direction";
 
   return (
@@ -330,9 +323,23 @@ function DirectionalBanner({ tech, theme }) {
       padding: "24px",
       marginBottom: 20,
       textAlign: "center",
+      position: "relative",
       animation: isStrong ? "directionPulse 2s ease-in-out infinite" : "none",
       boxShadow: isStrong ? `0 0 20px ${baseColor}30` : "none"
     }}>
+      {isVerified && (
+        <div style={{
+          position: "absolute", top: 12, right: 12,
+          background: "#22c55e", color: "#fff", 
+          padding: "4px 10px", borderRadius: 20,
+          fontSize: 10, fontWeight: 800, letterSpacing: 0.5,
+          boxShadow: "0 2px 10px rgba(34,197,94,0.3)",
+          display: "flex", alignItems: "center", gap: 6
+        }}>
+          <span>🛡️ VERIFIED SIGNAL</span>
+          <span style={{ opacity: 0.8, fontSize: 8 }}>p={pValue.toFixed(3)}</span>
+        </div>
+      )}
       <div style={{
         fontSize: 48,
         fontWeight: 900,
@@ -351,12 +358,12 @@ function DirectionalBanner({ tech, theme }) {
       </div>
       <div style={{ display: "flex", justifyContent: "center", gap: 24, fontSize: 14, flexWrap: "wrap" }}>
         <div>
-          <span style={{ color: theme.muted }}>Directional Edge: </span>
-          <b style={{ color: baseColor }}>{(edge * 100).toFixed(1)}%</b>
+          <span style={{ color: theme.muted }}>Confidence: </span>
+          <b style={{ color: baseColor }}>{(tech.confidence * 100).toFixed(1)}%</b>
         </div>
         <div>
-          <span style={{ color: theme.muted }}>Agreement: </span>
-          <b style={{ color: baseColor }}>{(agreement * 100).toFixed(0)}%</b>
+          <span style={{ color: theme.muted }}>Score: </span>
+          <b style={{ color: baseColor }}>{tech.score.toFixed(0)}</b>
         </div>
         <div>
           <span style={{ color: theme.muted }}>Strength: </span>
@@ -399,8 +406,8 @@ function TimeframeConsensus({ consensus, theme }) {
           </div>
         </div>
       </div>
-      <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 12 }}>
-        {["5m", "15m", "30m"].map(tf => {
+      <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        {["1m", "2m", "5m", "10m", "15m"].map(tf => {
           const aligned = consensus.timeframes_aligned.includes(tf);
           const tfDir = consensus.detail[tf];
           const tfColor = tfDir === "BULLISH" ? "#22c55e" : tfDir === "BEARISH" ? "#ef4444" : "#94a3b8";
@@ -501,6 +508,239 @@ function TrendStrengthMeter({ adx, plusDI, minusDI, theme }) {
   );
 }
 
+// ── Accuracy Summary Card ───────────────────────────────────────────────────
+function AccuracySummaryCard({ summary, theme }) {
+  if (!summary || summary.total_runs === 0) {
+    return (
+      <Card theme={theme} style={{ textAlign: "center", padding: 30 }}>
+        <div style={{ fontSize: 32, marginBottom: 12 }}>📉</div>
+        <div style={{ fontWeight: 700, marginBottom: 4 }}>No Signal Accuracy Data</div>
+        <div style={{ fontSize: 11, color: theme.muted }}>
+          Run a technical backtest to see win rates and statistical validity.
+        </div>
+      </Card>
+    );
+  }
+
+  const latest = summary.latest_run;
+  const isSignificant = latest.statistical_significance?.is_significant;
+  const pVal = latest.statistical_significance?.p_value;
+  const sigColor = isSignificant ? "#22c55e" : "#f59e0b";
+
+  return (
+    <Card theme={theme} style={{ padding: 20, border: isSignificant ? `2px solid ${theme.accent}44` : `1px solid ${theme.border}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 4 }}>SIGNAL ACCURACY (LATEST RUN)</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ fontSize: 24, fontWeight: 800 }}>{fmt(latest.win_rate * 100, 1)}% Win Rate</div>
+            {isSignificant && (
+              <span style={{ 
+                background: "rgba(34,197,94,0.15)", color: "#22c55e", 
+                fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 4,
+                border: "1px solid rgba(34,197,94,0.3)"
+              }}>
+                ✓ STATISTICALLY VALID
+              </span>
+            )}
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontSize: 11, color: theme.muted }}>Profit Factor</div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: latest.profit_factor >= 1.5 ? "#22c55e" : latest.profit_factor >= 1 ? "#f59e0b" : "#ef4444" }}>
+            {fmt(latest.profit_factor, 2)}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
+        <div style={{ background: theme.bg, padding: 10, borderRadius: 6, textAlign: "center" }}>
+          <div style={{ fontSize: 10, color: theme.muted }}>Bullish Win Rate</div>
+          <div style={{ fontWeight: 700, color: "#22c55e" }}>{fmt(latest.by_direction.bullish_win_rate * 100, 0)}%</div>
+        </div>
+        <div style={{ background: theme.bg, padding: 10, borderRadius: 6, textAlign: "center" }}>
+          <div style={{ fontSize: 10, color: theme.muted }}>Bearish Win Rate</div>
+          <div style={{ fontWeight: 700, color: "#ef4444" }}>{fmt(latest.by_direction.bearish_win_rate * 100, 0)}%</div>
+        </div>
+        <div style={{ background: theme.bg, padding: 10, borderRadius: 6, textAlign: "center" }}>
+          <div style={{ fontSize: 10, color: theme.muted }}>Sample Size</div>
+          <div style={{ fontWeight: 700 }}>{latest.total_trades} trades</div>
+        </div>
+      </div>
+
+      <div style={{ borderTop: `1px solid ${theme.border}`, paddingTop: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ fontSize: 10, color: theme.muted }}>
+          p-value: <b style={{ color: sigColor }}>{pVal != null ? fmt(pVal, 4) : "N/A"}</b>
+          <span style={{ marginLeft: 8 }}>Signal Age: <b>NEW</b></span>
+        </div>
+        <div style={{ fontSize: 10, fontStyle: "italic", color: theme.muted }}>
+          Based on {latest.symbols.length} symbols • {latest.run_time.split(" ")[0]}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ── Backtest Control Panel ──────────────────────────────────────────────────
+function BacktestPanel({ theme, onComplete }) {
+  const [symbols, setSymbols] = useState("NIFTY,BANKNIFTY,RELIANCE,TCS,HDFCBANK");
+  const [days, setDays] = useState(30);
+  const [timeframe, setTimeframe] = useState("15m");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const runBacktest = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const symList = symbols.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+      const endDate = new Date().toISOString().split("T")[0];
+      const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+      await apiFetch("/api/technical-backtest/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbols: symList,
+          start_date: startDate,
+          end_date: endDate,
+          timeframe: timeframe,
+          min_score_threshold: 70,
+          min_confidence: 0.65
+        })
+      });
+      if (onComplete) onComplete();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Card theme={theme} style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 16 }}>⚡ RUN TECHNICAL BACKTEST</div>
+      
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "flex-end" }}>
+        <div>
+          <label style={{ fontSize: 10, color: theme.muted, display: "block", marginBottom: 4 }}>Symbols (comma separated)</label>
+          <input 
+            value={symbols}
+            onChange={e => setSymbols(e.target.value)}
+            style={{ 
+              width: "100%", padding: "8px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
+              background: theme.bg, color: theme.text, fontSize: 12
+            }}
+          />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: theme.muted, display: "block", marginBottom: 4 }}>Lookback Days</label>
+          <select 
+            value={days}
+            onChange={e => setDays(parseInt(e.target.value))}
+            style={{ 
+              padding: "8px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
+              background: theme.bg, color: theme.text, fontSize: 12
+            }}
+          >
+            <option value={7}>7 Days</option>
+            <option value={14}>14 Days</option>
+            <option value={30}>30 Days</option>
+            <option value={60}>60 Days</option>
+            <option value={90}>90 Days</option>
+          </select>
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: theme.muted, display: "block", marginBottom: 4 }}>Timeframe</label>
+          <select 
+            value={timeframe}
+            onChange={e => setTimeframe(e.target.value)}
+            style={{ 
+              padding: "8px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
+              background: theme.bg, color: theme.text, fontSize: 12
+            }}
+          >
+            <option value="5m">5m</option>
+            <option value="10m">10m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+          </select>
+        </div>
+        <button 
+          onClick={runBacktest}
+          disabled={loading}
+          style={{ 
+            height: 35, padding: "0 20px", borderRadius: 6, background: theme.accent, color: "#fff",
+            border: "none", fontWeight: 700, cursor: loading ? "wait" : "pointer"
+          }}
+        >
+          {loading ? "⌛ Testing..." : "🚀 Run Backtest"}
+        </button>
+      </div>
+
+      {error && <div style={{ color: "#ef4444", fontSize: 11, marginTop: 8 }}>❌ Error: {error}</div>}
+      
+      <div style={{ marginTop: 12, padding: "8px 12px", background: "rgba(99,102,241,0.05)", borderRadius: 6, fontSize: 10, color: theme.muted }}>
+        <b>Tip:</b> Running a backtest helps calibrate the Composite Score weights. 
+        Aim for a sample size of {'>'}30 trades for statistical significance.
+      </div>
+    </Card>
+  );
+}
+
+function BacktestHistory({ theme }) {
+  const [runs, setRuns] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = async () => {
+    try {
+      const data = await apiFetch("/api/technical-backtest/runs?limit=5");
+      setRuns(data.runs || []);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  if (loading) return <div style={{ fontSize: 11, color: theme.muted, padding: 20 }}>Loading runs...</div>;
+  if (runs.length === 0) return null;
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 10 }}>RECENT BACKTEST RUNS</div>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+        <thead>
+          <tr style={{ textAlign: "left", color: theme.muted, borderBottom: `1px solid ${theme.border}` }}>
+            <th style={{ padding: 8 }}>Date</th>
+            <th style={{ padding: 8 }}>Win Rate</th>
+            <th style={{ padding: 8 }}>Trades</th>
+            <th style={{ padding: 8 }}>PF</th>
+            <th style={{ padding: 8 }}>Sig.</th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.map(r => {
+            const isSig = r.metrics?.is_significant || false;
+            return (
+              <tr key={r.id} style={{ borderBottom: `1px solid ${theme.border}` }}>
+                <td style={{ padding: 8 }}>{r.run_time.split(" ")[0]}</td>
+                <td style={{ padding: 8, fontWeight: 700, color: signalColor(r.win_rate >= 0.5 ? "BULLISH" : "BEARISH") }}>{fmt(r.win_rate * 100, 1)}%</td>
+                <td style={{ padding: 8 }}>{r.total_trades}</td>
+                <td style={{ padding: 8 }}>{fmt(r.profit_factor, 2)}</td>
+                <td style={{ padding: 8 }}>{isSig ? "✅" : "—"}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ── Main Tab Component ───────────────────────────────────────────────────────
 export default function TechnicalScoreTab({ theme, scanData }) {
   const [symbol, setSymbol] = useState("NIFTY");
@@ -516,7 +756,20 @@ export default function TechnicalScoreTab({ theme, scanData }) {
   const [batchResults, setBatchResults] = useState([]);
   const [selectedTF, setSelectedTF] = useState("15m");
 
-  // ... (skipped some unchanged lines handling effects and api)
+  const [accuracySummary, setAccuracySummary] = useState(null);
+
+  const fetchAccuracySummary = useCallback(async () => {
+    try {
+      const data = await apiFetch("/api/technical-backtest/accuracy-summary");
+      setAccuracySummary(data);
+    } catch (e) {
+      console.error("Failed to fetch accuracy summary:", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAccuracySummary();
+  }, [fetchAccuracySummary]);
 
   const analyse = useCallback(async (sym) => {
     const s = (sym || symbol).toUpperCase().trim();
@@ -669,7 +922,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
   };
 
   return (
-    <div>
+    <div style={{ animation: "fadeIn 0.3s ease" }}>
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
         <div>
@@ -678,734 +931,413 @@ export default function TechnicalScoreTab({ theme, scanData }) {
             RSI · MACD · ADX · Stochastic · EMA · Bollinger · Volume · VWAP
           </div>
         </div>
+      </div>
 
-        {/* Search */}
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <input
-            value={inputVal}
-            onChange={(e) => setInputVal(e.target.value.toUpperCase())}
-            onKeyDown={handleKeyDown}
-            placeholder="Symbol..."
+      {/* Sub-Tab Navigation */}
+      <div style={{ display: "flex", gap: 20, borderBottom: `1px solid ${theme.border}`, marginBottom: 20 }}>
+        {["analysis", "batch", "backtest"].map(tab => (
+          <div
+            key={tab}
+            onClick={() => setActiveTab(tab)}
             style={{
-              padding: "7px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
-              background: theme.bg, color: theme.text, fontFamily: "inherit", fontSize: 13,
-              width: 130, outline: "none",
-            }}
-          />
-          <button
-            onClick={() => analyse(inputVal)}
-            disabled={loading}
-            style={{
-              padding: "7px 16px", borderRadius: 6, background: theme.accent, color: "#fff",
-              border: "none", cursor: loading ? "wait" : "pointer", fontWeight: 600, fontSize: 13,
+              padding: "10px 4px", fontSize: 13, fontWeight: 700, cursor: "pointer",
+              color: activeTab === tab ? theme.accent : theme.muted,
+              borderBottom: activeTab === tab ? `3px solid ${theme.accent}` : "3px solid transparent",
+              transition: "all 0.2s", textTransform: "uppercase", letterSpacing: 0.5
             }}
           >
-            {loading ? "⟳" : "Analyse"}
-          </button>
-        </div>
-      </div>
-
-      {/* Quick-pick buttons */}
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-        {POPULAR_SYMBOLS.map(s => {
-          const bRes = batchResults.find(b => b.symbol === s);
-          const sData = bRes && bRes.data.technical_score ? {
-            signal: bRes.data.technical_score.direction,
-            confidence: bRes.data.technical_score.confidence
-          } : scanData?.find(r => r.symbol === s);
-          
-          const sig = sData?.signal || "NEUTRAL";
-          const conf = sData?.confidence ? `${fmt(sData.confidence * 100, 0)}%` : "";
-          const isBull = sig === "BULLISH";
-          const isBear = sig === "BEARISH";
-          const btnColor = isBull ? (theme.green || "#22c55e") : isBear ? (theme.red || "#ef4444") : theme.muted;
-          const bg = symbol === s ? btnColor : theme.card;
-          const textCol = symbol === s ? "#fff" : btnColor;
-
-          return (
-            <button key={s} onClick={() => analyse(s)}
-              disabled={loading}
-              style={{
-                padding: "4px 10px", borderRadius: 4, border: `1px solid ${symbol === s ? btnColor : theme.border}`,
-                background: bg,
-                color: textCol,
-                cursor: "pointer", fontSize: 11, fontWeight: symbol === s ? 700 : 600,
-                fontFamily: "inherit", transition: "all 0.15s",
-                display: "flex", alignItems: "center", gap: 6
-              }}
-            >
-              {s}
-              {conf && (
-                <span style={{ fontSize: 9, opacity: 0.9, backgroundColor: "rgba(0,0,0,0.1)", padding: "1px 4px", borderRadius: 4 }}>
-                  {conf}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Actions */}
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12, flexWrap: "wrap", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <label style={{ fontSize: 11, color: theme.muted, display: "flex", alignItems: "center", gap: 6 }}>
-            <input type="checkbox" checked={sortIndicators} onChange={() => setSortIndicators(v => !v)} />
-            Sort indicators by score
-          </label>
-          <button
-            onClick={exportTechExcel}
-          disabled={!tech}
-          style={{
-            padding: "6px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
-            background: tech ? "rgba(99,102,241,.1)" : theme.border,
-            color: tech ? "#6366f1" : theme.muted,
-            fontSize: 11, fontWeight: 700, cursor: tech ? "pointer" : "not-allowed",
-          }}
-        >
-          ↓ Export Excel
-        </button>
-      </div>
-        <button
-          onClick={loadAll}
-          disabled={batchLoading}
-          style={{
-             padding: "6px 16px", borderRadius: 6, border: `1px solid ${theme.border}`,
-             background: batchLoading ? theme.border : theme.card,
-             color: theme.text,
-             fontSize: 11, fontWeight: 700, 
-             cursor: batchLoading ? "default" : "pointer",
-             position: "relative",
-             overflow: "hidden"
-          }}
-        >
-          {batchLoading && (
-            <div style={{
-              position: "absolute", top: 0, left: 0, height: "100%",
-              background: "rgba(34,197,94,0.15)",
-              width: `${(batchProgress / POPULAR_SYMBOLS.length) * 100}%`,
-              transition: "width 0.3s ease", zIndex: 0
-            }} />
-          )}
-          <span style={{ position: "relative", zIndex: 1 }}>
-            {batchLoading ? `Loading... ${batchProgress} / ${POPULAR_SYMBOLS.length}` : "⚡ Load All Quick-Picks"}
-          </span>
-        </button>
-      </div>
-
-      {/* Loading */}
-      {loading && <Loader theme={theme} />}
-
-      {/* Error */}
-      {error && (
-        <Card theme={theme} style={{ textAlign: "center", padding: 24, color: theme.red || "#ef4444" }}>
-          <div style={{ fontSize: 20, marginBottom: 6 }}>⚠</div>
-          <div style={{ fontWeight: 600 }}>{error}</div>
-        </Card>
-      )}
-      {/* Multi-Timeframe UI */}
-      {result && result.timeframes && (
-        <Card theme={theme} style={{ padding: "16px 20px", marginBottom: 16 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 16 }}>MULTI-TIMEFRAME TREND</div>
-          <div style={{ display: "flex", gap: 12, justifyContent: "space-around", flexWrap: "wrap" }}>
-            {["5m", "15m", "30m"].map(tf => {
-              const d = result.timeframes[tf];
-              if (!d) return null;
-              const isSel = selectedTF === tf;
-              return (
-                <div key={tf} 
-                  onClick={() => setSelectedTF(tf)}
-                  style={{
-                    flex: 1, minWidth: 90, textAlign: "center", padding: "12px", 
-                    borderRadius: 8, border: `2px solid ${isSel ? theme.accent : theme.border}`,
-                    background: isSel ? "rgba(99,102,241,.05)" : theme.bg,
-                    cursor: "pointer", transition: "all 0.15s"
-                  }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: theme.muted }}>{tf} TIMEFRAME</div>
-                  <div style={{ fontSize: 22, fontWeight: 800, color: signalColor(d.direction), margin: "6px 0" }}>{d.score}</div>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: signalColor(d.direction), background: signalBg(d.direction), display: "inline-block", padding: "2px 8px", borderRadius: 12 }}>{d.direction}</div>
-                </div>
-              );
-            })}
+            {tab === "analysis" ? "🔍 Analysis" : tab === "batch" ? "⚡ Market Scan" : "🧪 Backtesting"}
           </div>
-        </Card>
-      )}
+        ))}
+      </div>
 
-      {/* Results */}
-      {result && tech && (
+      {activeTab === "backtest" && (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
-
-          {/* HERO: Directional Banner */}
-          <DirectionalBanner tech={tech} theme={theme} />
-
-          {/* ADX Warning Banner - Low ADX means ranging market (less reliable signals) */}
-          {tech.indicators.adx?.adx < 25 && (
-            <div style={{
-              background: "rgba(251,146,60,0.15)",
-              border: "2px solid rgba(251,146,60,0.5)",
-              borderRadius: 8,
-              padding: "12px 16px",
-              marginBottom: 16,
-              display: "flex",
-              alignItems: "center",
-              gap: 12
-            }}>
-              <div style={{ fontSize: 24 }}>⚠️</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 13, color: "#f97316", marginBottom: 4 }}>
-                  Low ADX ({tech.indicators.adx.adx.toFixed(1)}) - Ranging Market Detected
-                </div>
-                <div style={{ fontSize: 11, color: theme.text, opacity: 0.9 }}>
-                  Technical signals are less reliable in ranging markets (ADX {'<'} 25).
-                  Consider waiting for ADX ≥ 25 (trending market) for higher accuracy trades.
-                  {tech.direction_strength === "WEAK" && " Direction strength is also WEAK - avoid trading this setup."}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 20 }}>
+            <div>
+              <BacktestPanel theme={theme} onComplete={fetchAccuracySummary} />
+              <BacktestHistory theme={theme} />
+            </div>
+            <AccuracySummaryCard summary={accuracySummary} theme={theme} />
+          </div>
+          
+          <Card theme={theme} style={{ padding: 24, background: "rgba(34,197,94,0.03)", border: "1px dashed rgba(34,197,94,0.3)" }}>
+            <div style={{ display: "flex", gap: 16 }}>
+              <div style={{ fontSize: 24 }}>💡</div>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4, color: "#22c55e" }}>Accuracy Verification Protocol</div>
+                <div style={{ fontSize: 11, color: theme.text, opacity: 0.8, lineHeight: 1.5 }}>
+                  The F&O Scanner distinguishes between <b>Active Trade Health</b> (real-time monitoring) and 
+                  <b>Historical Accuracy</b> (backtesting). Always verify a signal's statistical validity before 
+                  increasing position sizes. A "Verified Signal" badge appears on the main gauge when p-value {'<'} 0.05.
                 </div>
               </div>
             </div>
-          )}
-
-          {/* Direction Strength Warning - WEAK signals have lower win rate */}
-          {tech.direction_strength === "WEAK" && tech.indicators.adx?.adx >= 25 && (
-            <div style={{
-              background: "rgba(251,146,60,0.1)",
-              border: "1px solid rgba(251,146,60,0.4)",
-              borderRadius: 8,
-              padding: "10px 14px",
-              marginBottom: 16,
-              fontSize: 11,
-              color: theme.text,
-              opacity: 0.95
-            }}>
-              ⚡ <b>Direction Strength: WEAK</b> - This signal has lower conviction.
-              STRONG signals typically have 68-75% win rate vs 48-55% for WEAK signals. Use caution.
-            </div>
-          )}
-
-          {/* Backtesting Documentation Link */}
-          <div style={{
-            textAlign: "right",
-            marginBottom: 12,
-            fontSize: 11
-          }}>
-            <a
-              href="https://github.com/shahzebkhan-os/fo-scanner/blob/main/TECHNICAL_SIGNAL_ACCURACY_TESTING.md"
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                color: theme.accent,
-                textDecoration: "none",
-                opacity: 0.8,
-                transition: "opacity 0.2s"
-              }}
-              onMouseEnter={(e) => e.target.style.opacity = 1}
-              onMouseLeave={(e) => e.target.style.opacity = 0.8}
-            >
-              📊 How to Test Signal Accuracy →
-            </a>
-          </div>
-
-          {/* Row 1: Key metrics + Trend Strength + Timeframe Consensus */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
-
-            {/* Score gauge (compact) */}
-            <Card theme={theme} style={{ textAlign: "center", padding: 16, display: "flex", flexDirection: "column", justifyContent: "center" }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 8 }}>
-                COMPOSITE SCORE
-              </div>
-              <div style={{ fontSize: 42, fontWeight: 900, color: signalColor(tech.direction) }}>
-                {tech.score}
-              </div>
-              <div style={{ fontSize: 11, color: theme.muted, marginBottom: 8 }}>/ 100</div>
-
-              {/* Momentum Badge */}
-              {result.momentum && (
-                <div>
-                  <div style={{
-                    display: "inline-block", padding: "4px 8px", borderRadius: 12,
-                    fontSize: 10, fontWeight: 700, 
-                    background: result.momentum["1h"] > 0 ? "rgba(34,197,94,0.15)" : result.momentum["1h"] < 0 ? "rgba(239,68,68,0.15)" : theme.bg,
-                    color: result.momentum["1h"] > 0 ? "#22c55e" : result.momentum["1h"] < 0 ? "#ef4444" : theme.muted,
-                    border: `1px solid ${result.momentum["1h"] > 0 ? "rgba(34,197,94,0.4)" : result.momentum["1h"] < 0 ? "rgba(239,68,68,0.4)" : theme.border}`
-                  }}>
-                    {result.momentum["1h"] > 0 ? "🔥" : result.momentum["1h"] < 0 ? "❄️" : "➖"} 
-                    {" "}{result.momentum["1h"] > 0 ? "+" : ""}{result.momentum["1h"]} pts (1h)
-                  </div>
-                </div>
-              )}
-            </Card>
-
-            {/* Confidence */}
-            <Card theme={theme} style={{ textAlign: "center", padding: 16 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 8 }}>
-                CONFIDENCE
-              </div>
-              <div style={{ fontSize: 42, fontWeight: 900, color: signalColor(tech.direction) }}>
-                {fmt(tech.confidence * 100, 0)}%
-              </div>
-              <div style={{ fontSize: 11, color: theme.muted }}>
-                {tech.confidence >= 0.7 ? "High" : tech.confidence >= 0.5 ? "Medium" : "Low"}
-              </div>
-            </Card>
-
-            {/* Trend Strength */}
-            <TrendStrengthMeter
-              adx={tech.indicators.adx?.adx}
-              plusDI={tech.indicators.adx?.plus_di}
-              minusDI={tech.indicators.adx?.minus_di}
-              theme={theme}
-            />
-
-            {/* Timeframe Consensus */}
-            {result.timeframe_consensus && (
-              <TimeframeConsensus
-                consensus={result.timeframe_consensus}
-                theme={theme}
-              />
-            )}
-          </div>
-
-          {/* Row 2: Model Comparison & Reasons */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
-            {/* Model Comparison */}
-            <Card theme={theme} style={{ padding: 24 }}>
-              <div style={{ fontSize: 11, color: theme.muted, marginBottom: 12, fontWeight: 600 }}>MODEL COMPARISON</div>
-              {blendedScore !== null && (
-                <div style={{ marginBottom: 10, padding: "6px 10px", borderRadius: 6, background: "rgba(99,102,241,.08)", fontSize: 12 }}>
-                  Blended score: <b style={{ color: "#6366f1" }}>{blendedScore}</b>
-                </div>
-              )}
-              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                {/* Technical model */}
-                <div>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                    <span style={{ fontSize: 12 }}>📊 Technical (new)</span>
-                    <span style={{ fontWeight: 800, color: signalColor(tech.direction) }}>{tech.score}</span>
-                  </div>
-                  <div style={{ height: 8, borderRadius: 4, background: theme.border, overflow: "hidden" }}>
-                    <div style={{
-                      height: "100%", borderRadius: 4, background: signalColor(tech.direction),
-                      width: `${tech.score}%`, transition: "width 0.6s ease"
-                    }} />
-                  </div>
-                  <div style={{ fontSize: 10, color: signalColor(tech.direction), fontWeight: 600, marginTop: 2 }}>
-                    {tech.direction} • {fmt(tech.confidence * 100, 0)}% conf
-                  </div>
-                </div>
-                {/* OI-based model */}
-                <div>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                    <span style={{ fontSize: 12 }}>⚡ OI/IV/Greeks (current)</span>
-                    <span style={{ fontWeight: 800, color: existing ? signalColor(existing.signal) : theme.muted }}>
-                      {existing ? existing.score : "—"}
-                    </span>
-                  </div>
-                  <div style={{ height: 8, borderRadius: 4, background: theme.border, overflow: "hidden" }}>
-                    <div style={{
-                      height: "100%", borderRadius: 4,
-                      background: existing ? signalColor(existing.signal) : theme.muted,
-                      width: `${existing ? existing.score : 0}%`, transition: "width 0.6s ease"
-                    }} />
-                  </div>
-                  <div style={{ fontSize: 10, color: existing ? signalColor(existing.signal) : theme.muted, fontWeight: 600, marginTop: 2 }}>
-                    {existing ? `${existing.signal} • ${fmt((existing.confidence || 0) * 100, 0)}% conf` : "Chain data unavailable"}
-                  </div>
-                </div>
-                {/* Agreement */}
-                {existing && (
-                  <div style={{
-                    textAlign: "center", padding: "6px 0", borderTop: `1px solid ${theme.border}`,
-                    fontSize: 11, marginTop: 4,
-                  }}>
-                    {tech.direction === existing.signal ? (
-                      <span style={{ color: "#22c55e", fontWeight: 700 }}>✓ Both models agree: {tech.direction}</span>
-                    ) : (
-                      <span style={{ color: "#f59e0b", fontWeight: 700 }}>⚠ Models diverge: {tech.direction} vs {existing.signal}</span>
-                    )}
-                  </div>
-                )}
-              </div>
-            </Card>
-
-            {/* Reasons / Signals */}
-            <Card theme={theme} style={{ padding: 24 }}>
-              <div style={{ fontSize: 11, color: theme.muted, marginBottom: 12, fontWeight: 600 }}>SIGNAL REASONS</div>
-              {tech.reasons && tech.reasons.length > 0 ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {tech.reasons.map((r, i) => (
-                    <div key={i} style={{
-                      fontSize: 11, padding: "5px 10px", borderRadius: 4,
-                      background: theme.bg, border: `1px solid ${theme.border}`,
-                      lineHeight: 1.4,
-                    }}>
-                      {r}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div style={{ color: theme.muted, fontSize: 12, textAlign: "center", padding: 20 }}>
-                  No strong signals detected
-                </div>
-              )}
-            </Card>
-          </div>
-
-          {/* Charts row */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
-            {/* Radar Chart */}
-            <Card theme={theme}>
-              <div style={{ fontSize: 11, color: theme.muted, marginBottom: 8, fontWeight: 600 }}>INDICATOR RADAR</div>
-              <ResponsiveContainer width="100%" height={280}>
-                <RadarChart data={radarData}>
-                  <PolarGrid stroke={theme.border} />
-                  <PolarAngleAxis dataKey="indicator" tick={{ fill: theme.muted, fontSize: 10 }} />
-                  <PolarRadiusAxis angle={90} domain={[0, 100]} tick={{ fill: theme.muted, fontSize: 9 }} />
-                  <Radar name="Score" dataKey="score" stroke={theme.accent} fill={theme.accent} fillOpacity={0.25} strokeWidth={2} />
-                </RadarChart>
-              </ResponsiveContainer>
-            </Card>
-
-            {/* Bar Chart */}
-            <Card theme={theme}>
-              <div style={{ fontSize: 11, color: theme.muted, marginBottom: 8, fontWeight: 600 }}>SUB-SCORE BREAKDOWN</div>
-              <ResponsiveContainer width="100%" height={280}>
-                <BarChart data={barData} layout="vertical" margin={{ left: 60 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
-                  <XAxis type="number" domain={[0, 100]} tick={{ fill: theme.muted, fontSize: 10 }} />
-                  <YAxis type="category" dataKey="name" tick={{ fill: theme.muted, fontSize: 10 }} width={58} />
-                  <Tooltip
-                    contentStyle={{ background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 6, fontSize: 11 }}
-                    formatter={(v) => [fmt(v, 1), "Score"]}
-                  />
-                  <Bar dataKey="score" radius={[0, 4, 4, 0]} barSize={18}>
-                    {barData.map((entry, i) => (
-                      <Cell key={i} fill={entry.score >= 70 ? "#22c55e" : entry.score >= 50 ? "#f59e0b" : entry.score >= 30 ? "#fb923c" : "#ef4444"} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </Card>
-          </div>
-
-          {/* Indicator detail cards */}
-          <div style={{ fontSize: 11, color: theme.muted, marginBottom: 8, fontWeight: 600 }}>INDICATOR DETAILS</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            {sortedIndicatorEntries.map(([name, subScore]) => (
-              <IndicatorCard
-                key={name}
-                name={name}
-                data={tech.indicators[name]}
-                subScore={subScore}
-                theme={theme}
-              />
-            ))}
-          </div>
+          </Card>
         </div>
       )}
 
-      {/* Empty state */}
-      {!loading && !error && !result && (
-        <Card theme={theme} style={{ textAlign: "center", padding: 40, marginBottom: 16 }}>
-          <div style={{ fontSize: 36, marginBottom: 12 }}>📊</div>
-          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Technical Indicator Score</div>
-          <div style={{ fontSize: 12, color: theme.muted, maxWidth: 420, margin: "0 auto", lineHeight: 1.6 }}>
-            Select a symbol above or type one in to compute a technical score
-            using 8 classical indicators. Results are compared side-by-side with the
-            existing OI/IV/Greeks model.
-          </div>
-        </Card>
-      )}
-
-      {/* NEW: Performance Monitor Section */}
-      <TechnicalTradeMonitor theme={theme} />
-
-      {batchResults.length > 0 && (() => {
-        const sorted = [...batchResults]
-          .filter(b => b.data?.technical_score?.score != null)
-          .sort((a, b) => {
-            const aConv = Math.abs((a.data?.technical_score?.score || 50) - 50) * (a.data?.technical_score?.confidence || 0);
-            const bConv = Math.abs((b.data?.technical_score?.score || 50) - 50) * (b.data?.technical_score?.confidence || 0);
-            return bConv - aConv;
-          });
-        const bestBullish = sorted.find(b => b.data?.technical_score?.direction === "BULLISH");
-        const bestBearish = sorted.find(b => b.data?.technical_score?.direction === "BEARISH");
-
-        const getRegime = (t) => {
-          const adx = t?.indicators?.adx?.adx || 0;
-          if (adx > 30) return { label: "TRENDING", color: "#8b5cf6", icon: "📈" };
-          if (adx < 20) return { label: "RANGING", color: "#f59e0b", icon: "↔️" };
-          return { label: "BALANCED", color: "#64748b", icon: "⚖️" };
-        };
-
-        const getStrengthBar = (score) => {
-          const dist = Math.abs(score - 50);
-          const pct = Math.min(100, dist * 2);
-          const color = score >= 70 ? "#22c55e" : score >= 60 ? "#4ade80" : score <= 30 ? "#ef4444" : score <= 40 ? "#f87171" : "#94a3b8";
-          return { pct, color };
-        };
-
-        const getSupertrend = (t) => {
-          const st = t?.indicators?.supertrend;
-          if (!st) return null;
-          return st.direction === "BULLISH" ? { icon: "🎯", label: "▲", color: "#22c55e" } : { icon: "🎯", label: "▼", color: "#ef4444" };
-        };
-
-        const getIchimoku = (t) => {
-          const ic = t?.indicators?.ichimoku;
-          if (!ic) return null;
-          const cloud = ic.cloud === "green" ? "🟢" : ic.cloud === "red" ? "🔴" : "⚪";
-          const pos = ic.position === "above" ? "▲" : ic.position === "below" ? "▼" : "◆";
-          const color = ic.position === "above" ? "#22c55e" : ic.position === "below" ? "#ef4444" : "#94a3b8";
-          return { cloud, pos, color };
-        };
-
-        const getDivergence = (t) => {
-          const div = t?.indicators?.divergence;
-          if (!div || div.type === "none") return null;
-          const bull = div.type.includes("bullish");
-          const dual = div.type.includes("dual");
-          return { icon: dual ? "⚡⚡" : "⚡", color: bull ? "#22c55e" : "#ef4444", label: bull ? "Bull Div" : "Bear Div" };
-        };
-
-        return (
-        <Card theme={theme} style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>📊 Market Scan Results</div>
-              <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10, background: "rgba(99,102,241,0.15)", color: "#6366f1", fontWeight: 600 }}>
-                {sorted.length} stocks
-              </span>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                onClick={exportBatchExcel}
+      {activeTab === "analysis" && (
+        <>
+          {/* Search */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                value={inputVal}
+                onChange={(e) => setInputVal(e.target.value.toUpperCase())}
+                onKeyDown={handleKeyDown}
+                placeholder="Symbol..."
                 style={{
-                  padding: "5px 12px", borderRadius: 6, background: theme.accent, color: "#fff", border: "none", cursor: "pointer", fontSize: 11, fontWeight: 600
-                }}>
+                  padding: "7px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
+                  background: theme.bg, color: theme.text, fontFamily: "inherit", fontSize: 13,
+                  width: 130, outline: "none",
+                }}
+              />
+              <button
+                onClick={() => analyse(inputVal)}
+                disabled={loading}
+                style={{
+                  padding: "7px 16px", borderRadius: 6, background: theme.accent, color: "#fff",
+                  border: "none", cursor: loading ? "wait" : "pointer", fontWeight: 600, fontSize: 13,
+                }}
+              >
+                {loading ? "⟳" : "Analyse"}
+              </button>
+            </div>
+
+            {/* Actions for current symbol */}
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <label style={{ fontSize: 11, color: theme.muted, display: "flex", alignItems: "center", gap: 6 }}>
+                <input type="checkbox" checked={sortIndicators} onChange={() => setSortIndicators(v => !v)} />
+                Sort indicators
+              </label>
+              <button
+                onClick={exportTechExcel}
+                disabled={!tech}
+                style={{
+                  padding: "6px 12px", borderRadius: 6, border: `1px solid ${theme.border}`,
+                  background: tech ? "rgba(99,102,241,.1)" : theme.border,
+                  color: tech ? "#6366f1" : theme.muted,
+                  fontSize: 11, fontWeight: 700, cursor: tech ? "pointer" : "not-allowed",
+                }}
+              >
                 ↓ Export Excel
               </button>
             </div>
           </div>
 
-          {/* Best Picks Banner */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
-            {bestBullish && (() => {
-              const t = bestBullish.data.technical_score;
+          {/* Quick-pick buttons only in analysis tab */}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+            {POPULAR_SYMBOLS.map(s => {
+              const bRes = batchResults.find(b => b.symbol === s);
+              const sData = bRes && bRes.data.technical_score ? {
+                signal: bRes.data.technical_score.direction,
+                confidence: bRes.data.technical_score.confidence
+              } : scanData?.find(r => r.symbol === s);
+              
+              const sig = sData?.signal || "NEUTRAL";
+              const conf = sData?.confidence ? `${fmt(sData.confidence * 100, 0)}%` : "";
+              const isBull = sig === "BULLISH";
+              const isBear = sig === "BEARISH";
+              const btnColor = isBull ? (theme.green || "#22c55e") : isBear ? (theme.red || "#ef4444") : theme.muted;
+              const bg = symbol === s ? btnColor : theme.card;
+              const textCol = symbol === s ? "#fff" : btnColor;
+
               return (
-                <div style={{
-                  background: "linear-gradient(135deg, rgba(34,197,94,0.12) 0%, rgba(34,197,94,0.04) 100%)",
-                  border: "1px solid rgba(34,197,94,0.3)", borderRadius: 8, padding: "10px 14px",
-                  boxShadow: "0 0 12px rgba(34,197,94,0.08)"
-                }}>
-                  <div style={{ fontSize: 10, color: "#22c55e", fontWeight: 700, marginBottom: 4 }}>🏆 BEST BULLISH PICK</div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div>
-                      <span style={{ fontSize: 15, fontWeight: 800, color: "#22c55e" }}>{bestBullish.symbol}</span>
-                      <span style={{ fontSize: 11, color: theme.muted, marginLeft: 6 }}>{t.direction_strength}</span>
-                    </div>
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 20, fontWeight: 800, color: "#22c55e" }}>{t.score}</div>
-                      <div style={{ fontSize: 10, color: theme.muted }}>{fmt(t.confidence * 100, 0)}% conf</div>
-                    </div>
-                  </div>
-                </div>
+                <button key={s} onClick={() => analyse(s)}
+                  disabled={loading}
+                  style={{
+                    padding: "4px 10px", borderRadius: 4, border: `1px solid ${symbol === s ? btnColor : theme.border}`,
+                    background: bg,
+                    color: textCol,
+                    cursor: "pointer", fontSize: 11, fontWeight: symbol === s ? 700 : 600,
+                    fontFamily: "inherit", transition: "all 0.15s",
+                    display: "flex", alignItems: "center", gap: 6
+                  }}
+                >
+                  {s}
+                  {conf && (
+                    <span style={{ fontSize: 9, opacity: 0.9, backgroundColor: "rgba(0,0,0,0.1)", padding: "1px 4px", borderRadius: 4 }}>
+                      {conf}
+                    </span>
+                  )}
+                </button>
               );
-            })()}
-            {bestBearish && (() => {
-              const t = bestBearish.data.technical_score;
-              return (
-                <div style={{
-                  background: "linear-gradient(135deg, rgba(239,68,68,0.12) 0%, rgba(239,68,68,0.04) 100%)",
-                  border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, padding: "10px 14px",
-                  boxShadow: "0 0 12px rgba(239,68,68,0.08)"
-                }}>
-                  <div style={{ fontSize: 10, color: "#ef4444", fontWeight: 700, marginBottom: 4 }}>🏆 BEST BEARISH PICK</div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div>
-                      <span style={{ fontSize: 15, fontWeight: 800, color: "#ef4444" }}>{bestBearish.symbol}</span>
-                      <span style={{ fontSize: 11, color: theme.muted, marginLeft: 6 }}>{t.direction_strength}</span>
-                    </div>
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 20, fontWeight: 800, color: "#ef4444" }}>{t.score}</div>
-                      <div style={{ fontSize: 10, color: theme.muted }}>{fmt(t.confidence * 100, 0)}% conf</div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
+            })}
           </div>
 
-          {/* Main Table */}
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-              <thead>
-                <tr style={{ background: "rgba(0,0,0,0.06)", textAlign: "left" }}>
-                  <th style={{ padding: "8px 6px", width: 30 }}>#</th>
-                  <th style={{ padding: "8px 6px" }}>Symbol</th>
-                  <th style={{ padding: "8px 6px", textAlign: "center" }}>Score</th>
-                  <th style={{ padding: "8px 6px", textAlign: "center" }}>Direction</th>
-                  <th style={{ padding: "8px 6px", textAlign: "center" }}>Confidence</th>
-                  <th style={{ padding: "8px 6px", textAlign: "center" }}>Regime</th>
-                  <th style={{ padding: "8px 6px", textAlign: "center" }}>Signals</th>
-                  <th style={{ padding: "8px 6px", textAlign: "right" }}>OI Score</th>
-                  <th style={{ padding: "8px 6px", textAlign: "center" }}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {sorted.map((b, idx) => {
-                  const t = b.data?.technical_score;
-                  if (!t) return null;
-                  const isBestBull = bestBullish && b.symbol === bestBullish.symbol;
-                  const isBestBear = bestBearish && b.symbol === bestBearish.symbol;
-                  const isBest = isBestBull || isBestBear;
-                  const bar = getStrengthBar(t.score);
-                  const regime = getRegime(t);
-                  const st = getSupertrend(t);
-                  const ichi = getIchimoku(t);
-                  const div = getDivergence(t);
-                  const dirColor = signalColor(t.direction);
+          {/* Loading */}
+          {loading && <Loader theme={theme} />}
 
+          {/* Error */}
+          {error && (
+            <Card theme={theme} style={{ textAlign: "center", padding: 24, color: theme.red || "#ef4444" }}>
+              <div style={{ fontSize: 20, marginBottom: 6 }}>⚠</div>
+              <div style={{ fontWeight: 600 }}>{error}</div>
+            </Card>
+          )}
+
+          {/* Multi-Timeframe UI */}
+          {result && result.timeframes && (
+            <Card theme={theme} style={{ padding: "16px 20px", marginBottom: 16 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 16 }}>MULTI-TIMEFRAME TREND</div>
+              <div style={{ display: "flex", gap: 12, justifyContent: "space-around", flexWrap: "wrap", overflowX: "auto" }}>
+                {["1m", "2m", "5m", "10m", "15m"].map(tf => {
+                  const d = result.timeframes[tf];
+                  if (!d) return null;
+                  const isSel = selectedTF === tf;
                   return (
-                  <tr key={b.symbol} style={{
-                    borderBottom: `1px solid ${theme.border}`,
-                    background: isBest
-                      ? (isBestBull ? "rgba(34,197,94,0.06)" : "rgba(239,68,68,0.06)")
-                      : idx % 2 === 0 ? "transparent" : "rgba(0,0,0,0.015)",
-                    transition: "background 0.15s",
-                  }}
-                  onMouseEnter={e => e.currentTarget.style.background = "rgba(99,102,241,0.06)"}
-                  onMouseLeave={e => e.currentTarget.style.background = isBest ? (isBestBull ? "rgba(34,197,94,0.06)" : "rgba(239,68,68,0.06)") : "transparent"}
-                  >
-                    {/* Rank */}
-                    <td style={{ padding: "8px 6px", textAlign: "center", fontWeight: 700, color: idx === 0 ? "#f59e0b" : theme.muted, fontSize: idx < 3 ? 13 : 11 }}>
-                      {idx === 0 ? "👑" : idx + 1}
-                    </td>
-
-                    {/* Symbol */}
-                    <td style={{ padding: "8px 6px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ fontWeight: 700, fontSize: 12, color: isBest ? dirColor : theme.text }}>{b.symbol}</span>
-                        {isBest && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 4, background: isBestBull ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)", color: dirColor, fontWeight: 700 }}>TOP PICK</span>}
-                      </div>
-                    </td>
-
-                    {/* Score with bar */}
-                    <td style={{ padding: "8px 6px", textAlign: "center" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "center" }}>
-                        <span style={{ fontWeight: 800, fontSize: 14, color: dirColor, minWidth: 28 }}>{t.score}</span>
-                        <div style={{ width: 50, height: 6, borderRadius: 3, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
-                          <div style={{ width: `${bar.pct}%`, height: "100%", borderRadius: 3, background: bar.color, transition: "width 0.6s ease" }} />
-                        </div>
-                      </div>
-                    </td>
-
-                    {/* Direction + Strength */}
-                    <td style={{ padding: "8px 6px", textAlign: "center" }}>
-                      <span style={{
-                        padding: "3px 8px", borderRadius: 4, fontSize: 10, fontWeight: 700,
-                        background: signalBg(t.direction), color: dirColor,
-                        display: "inline-flex", alignItems: "center", gap: 3,
+                    <div key={tf} 
+                      onClick={() => setSelectedTF(tf)}
+                      style={{
+                        flex: 1, minWidth: 90, textAlign: "center", padding: "12px", 
+                        borderRadius: 8, border: `2px solid ${isSel ? theme.accent : theme.border}`,
+                        background: isSel ? "rgba(99,102,241,.05)" : theme.bg,
+                        cursor: "pointer", transition: "all 0.15s"
                       }}>
-                        {t.direction === "BULLISH" ? "▲" : t.direction === "BEARISH" ? "▼" : "●"} {t.direction}
-                        {t.direction_strength && <span style={{ opacity: 0.7, fontSize: 9 }}>({t.direction_strength})</span>}
-                      </span>
-                    </td>
-
-                    {/* Confidence bar */}
-                    <td style={{ padding: "8px 6px", textAlign: "center" }}>
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-                        <span style={{ fontWeight: 600, fontSize: 11, color: t.confidence >= 0.7 ? "#22c55e" : t.confidence >= 0.5 ? "#f59e0b" : "#ef4444" }}>
-                          {fmt(t.confidence * 100, 0)}%
-                        </span>
-                        <div style={{ width: 40, height: 4, borderRadius: 2, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
-                          <div style={{
-                            width: `${Math.min(100, t.confidence * 100)}%`, height: "100%", borderRadius: 2,
-                            background: t.confidence >= 0.7 ? "#22c55e" : t.confidence >= 0.5 ? "#f59e0b" : "#ef4444",
-                          }} />
-                        </div>
-                      </div>
-                    </td>
-
-                    {/* Regime */}
-                    <td style={{ padding: "8px 6px", textAlign: "center" }}>
-                      <span style={{
-                        fontSize: 9, padding: "2px 6px", borderRadius: 4, fontWeight: 700,
-                        background: `${regime.color}18`, color: regime.color,
-                      }}>
-                        {regime.icon} {regime.label}
-                      </span>
-                    </td>
-
-                    {/* Signals: Supertrend + Ichimoku + Divergence */}
-                    <td style={{ padding: "8px 6px", textAlign: "center" }}>
-                      <div style={{ display: "flex", gap: 4, justifyContent: "center", flexWrap: "wrap" }}>
-                        {st && (
-                          <span title={`Supertrend ${st.label === "▲" ? "Bullish" : "Bearish"}`} style={{
-                            fontSize: 10, padding: "1px 5px", borderRadius: 3,
-                            background: `${st.color}18`, color: st.color, fontWeight: 700, cursor: "default",
-                          }}>
-                            {st.icon}{st.label}
-                          </span>
-                        )}
-                        {ichi && (
-                          <span title={`Ichimoku ${ichi.pos === "▲" ? "Above" : ichi.pos === "▼" ? "Below" : "Inside"} Cloud`} style={{
-                            fontSize: 10, padding: "1px 5px", borderRadius: 3,
-                            background: `${ichi.color}18`, color: ichi.color, fontWeight: 700, cursor: "default",
-                          }}>
-                            {ichi.cloud}{ichi.pos}
-                          </span>
-                        )}
-                        {div && (
-                          <span title={div.label} style={{
-                            fontSize: 10, padding: "1px 5px", borderRadius: 3,
-                            background: `${div.color}18`, color: div.color, fontWeight: 700, cursor: "default",
-                          }}>
-                            {div.icon}
-                          </span>
-                        )}
-                        {!st && !ichi && !div && <span style={{ color: theme.muted }}>—</span>}
-                      </div>
-                    </td>
-
-                    {/* OI Score */}
-                    <td style={{ padding: "8px 6px", textAlign: "right" }}>
-                      {b.data?.existing_score?.score != null ? (
-                        <span style={{ fontWeight: 600, color: signalColor(b.data.existing_score.signal) }}>
-                          {b.data.existing_score.score}
-                        </span>
-                      ) : (
-                        <span style={{ color: theme.muted }}>—</span>
-                      )}
-                    </td>
-
-                    {/* Action */}
-                    <td style={{ padding: "8px 6px", textAlign: "center" }}>
-                      <button onClick={() => { setSymbol(b.symbol); setInputVal(b.symbol); setResult(b.data); window.scrollTo({ top: 0, behavior: 'smooth' }); }} style={{
-                        padding: "4px 10px", fontSize: 10, cursor: "pointer", fontWeight: 600,
-                        background: isBest ? theme.accent : theme.bg, color: isBest ? "#fff" : theme.text,
-                        border: `1px solid ${isBest ? theme.accent : theme.border}`, borderRadius: 5,
-                        transition: "all 0.15s",
-                      }}>
-                        {isBest ? "★ Analyse" : "View"}
-                      </button>
-                    </td>
-                  </tr>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: theme.muted }}>{tf} TIMEFRAME</div>
+                      <div style={{ fontSize: 22, fontWeight: 800, color: signalColor(d.direction), margin: "6px 0" }}>{d.score}</div>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: signalColor(d.direction), background: signalBg(d.direction), display: "inline-block", padding: "2px 8px", borderRadius: 12 }}>{d.direction}</div>
+                    </div>
                   );
                 })}
-              </tbody>
-            </table>
+              </div>
+            </Card>
+          )}
+
+          {/* Results */}
+          {result && tech && (
+            <div style={{ animation: "fadeIn 0.3s ease" }}>
+              {/* HERO: Directional Banner */}
+              <DirectionalBanner tech={tech} theme={theme} accuracySummary={accuracySummary} />
+
+              {/* ADX Warning Banner */}
+              {tech.indicators.adx?.adx < 25 && (
+                <div style={{
+                  background: "rgba(251,146,60,0.15)",
+                  border: "2px solid rgba(251,146,60,0.5)",
+                  borderRadius: 8,
+                  padding: "12px 16px",
+                  marginBottom: 16,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12
+                }}>
+                  <div style={{ fontSize: 24 }}>⚠️</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: "#f97316", marginBottom: 4 }}>
+                      Low ADX ({tech.indicators.adx.adx.toFixed(1)}) - Ranging Market Detected
+                    </div>
+                    <div style={{ fontSize: 11, color: theme.text, opacity: 0.9 }}>
+                      Technical signals are less reliable in ranging markets (ADX {'<'} 25).
+                      Consider waiting for ADX ≥ 25 (trending market) for higher accuracy trades.
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Row 1: Key metrics */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+                <Card theme={theme} style={{ textAlign: "center", padding: 16, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 8 }}>COMPOSITE SCORE</div>
+                  <div style={{ fontSize: 42, fontWeight: 900, color: signalColor(tech.direction) }}>{tech.score}</div>
+                  <div style={{ fontSize: 11, color: theme.muted }}>/ 100</div>
+                </Card>
+
+                <Card theme={theme} style={{ textAlign: "center", padding: 16 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 8 }}>CONFIDENCE</div>
+                  <div style={{ fontSize: 42, fontWeight: 900, color: signalColor(tech.direction) }}>{fmt(tech.confidence * 100, 0)}%</div>
+                  <div style={{ fontSize: 11, color: theme.muted }}>{tech.confidence >= 0.7 ? "High" : tech.confidence >= 0.5 ? "Medium" : "Low"}</div>
+                </Card>
+
+                <TrendStrengthMeter
+                  adx={tech.indicators.adx?.adx}
+                  plusDI={tech.indicators.adx?.plus_di}
+                  minusDI={tech.indicators.adx?.minus_di}
+                  theme={theme}
+                />
+
+                {result.timeframe_consensus && (
+                  <TimeframeConsensus consensus={result.timeframe_consensus} theme={theme} />
+                )}
+              </div>
+
+              {/* Charts row */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+                <Card theme={theme}>
+                  <div style={{ fontSize: 11, color: theme.muted, marginBottom: 8, fontWeight: 600 }}>INDICATOR RADAR</div>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <RadarChart data={radarData}>
+                      <PolarGrid stroke={theme.border} />
+                      <PolarAngleAxis dataKey="indicator" tick={{ fill: theme.muted, fontSize: 10 }} />
+                      <PolarRadiusAxis angle={90} domain={[0, 100]} tick={{ fill: theme.muted, fontSize: 9 }} />
+                      <Radar name="Score" dataKey="score" stroke={theme.accent} fill={theme.accent} fillOpacity={0.25} strokeWidth={2} />
+                    </RadarChart>
+                  </ResponsiveContainer>
+                </Card>
+
+                <Card theme={theme}>
+                  <div style={{ fontSize: 11, color: theme.muted, marginBottom: 8, fontWeight: 600 }}>SUB-SCORE BREAKDOWN</div>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <BarChart data={barData} layout="vertical" margin={{ left: 60 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
+                      <XAxis type="number" domain={[0, 100]} tick={{ fill: theme.muted, fontSize: 10 }} />
+                      <YAxis type="category" dataKey="name" tick={{ fill: theme.muted, fontSize: 10 }} width={58} />
+                      <Tooltip formatter={(v) => [fmt(v, 1), "Score"]} />
+                      <Bar dataKey="score" radius={[0, 4, 4, 0]} barSize={18}>
+                        {barData.map((entry, i) => (
+                          <Cell key={i} fill={entry.score >= 70 ? "#22c55e" : entry.score >= 50 ? "#f59e0b" : entry.score >= 30 ? "#fb923c" : "#ef4444"} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </Card>
+              </div>
+
+              {/* Indicator details */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                {sortedIndicatorEntries.map(([name, subScore]) => (
+                  <IndicatorCard key={name} name={name} data={tech.indicators[name]} subScore={subScore} theme={theme} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Empty state */}
+          {!loading && !error && !result && (
+            <Card theme={theme} style={{ textAlign: "center", padding: 40 }}>
+              <div style={{ fontSize: 36, marginBottom: 12 }}>📊</div>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>Select a symbol to begin analysis</div>
+            </Card>
+          )}
+        </>
+      )}
+
+      {activeTab === "batch" && (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          {/* Batch Actions */}
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+            <button
+              onClick={loadAll}
+              disabled={batchLoading}
+              style={{
+                padding: "8px 20px", borderRadius: 6, background: theme.accent, color: "#fff", border: "none", cursor: "pointer", fontWeight: 700
+              }}
+            >
+              {batchLoading ? `⚡ Scanning (${batchProgress}/${POPULAR_SYMBOLS.length})...` : "⚡ Start Market Scan"}
+            </button>
           </div>
 
-          {/* Legend */}
-          <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap", fontSize: 10, color: theme.muted }}>
-            <span>🎯 Supertrend</span>
-            <span>🟢🔴 Ichimoku Cloud</span>
-            <span>⚡ Divergence</span>
-            <span>📈 Trending</span>
-            <span>↔️ Ranging</span>
-            <span>👑 Highest conviction</span>
-          </div>
-        </Card>
-        );
-      })()}
+          {batchResults.length > 0 && (() => {
+            const sorted = [...batchResults]
+              .filter(b => b.data?.technical_score?.score != null)
+              .sort((a, b) => (b.data.technical_score.score * b.data.technical_score.confidence) - (a.data.technical_score.score * a.data.technical_score.confidence));
+            
+            return (
+              <Card theme={theme}>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                    <thead>
+                      <tr style={{ background: "rgba(0,0,0,0.06)", textAlign: "left" }}>
+                        <th style={{ padding: "10px 8px" }}>Symbol</th>
+                        <th style={{ padding: "10px 8px" }}>Blended</th>
+                        <th style={{ padding: "10px 8px" }}>Technical</th>
+                        <th style={{ padding: "10px 8px" }}>Direction</th>
+                        <th style={{ padding: "10px 8px" }}>Signals</th>
+                        <th style={{ padding: "10px 8px" }}>Regime</th>
+                        <th style={{ padding: "10px 8px" }}>Confidence</th>
+                        <th style={{ padding: "10px 8px" }}>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sorted.map((b, idx) => {
+                        const bTech = b.data.technical_score;
+                        const bExist = b.data.existing_score;
+                        const bHasExist = bExist?.score != null;
+                        const bBlended = Math.round((bTech.score + (bHasExist ? bExist.score : 0)) / (bHasExist ? 2 : 1));
+                        
+                        const inds = bTech.indicators || {};
+                        const st = inds.supertrend?.signal;
+                        const ichi = inds.ichimoku?.signal;
+                        const div = inds.divergence?.signal;
+                        const isTrending = inds.adx?.adx >= 25;
+                        const isBest = idx === 0 && bTech.score >= 70 && bTech.confidence >= 0.7;
+
+                        return (
+                          <tr key={b.symbol} style={{ 
+                            borderBottom: `1px solid ${theme.border}`, 
+                            background: isBest ? "rgba(234,179,8,0.05)" : "transparent",
+                            transition: "background 0.2s" 
+                          }}>
+                            <td style={{ padding: "8px" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <b>{b.symbol}</b>
+                                {isBest && <span title="Best Trend Detected" style={{ color: "#eab308" }}>👑</span>}
+                              </div>
+                            </td>
+                            <td style={{ padding: "8px" }}>
+                              <span style={{ 
+                                fontWeight: 800, 
+                                color: isBest ? "#eab308" : signalColor(bBlended > 50 ? "BULLISH" : "BEARISH") 
+                              }}>{bBlended}</span>
+                            </td>
+                            <td style={{ padding: "8px", opacity: 0.8 }}>{bTech.score}</td>
+                            <td style={{ padding: "8px" }}>
+                              <span style={{ 
+                                color: signalColor(bTech.direction), fontWeight: 700, fontSize: 10,
+                                background: signalBg(bTech.direction), padding: "2px 6px", borderRadius: 4
+                              }}>
+                                {bTech.direction}
+                              </span>
+                            </td>
+                            <td style={{ padding: "8px" }}>
+                              <div style={{ display: "flex", gap: 6, fontSize: 14 }}>
+                                <span title="Supertrend" style={{ opacity: st ? 1 : 0.2 }}>{st === "BULLISH" ? "🎯" : st === "BEARISH" ? "⭕" : "🎯"}</span>
+                                <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{ichi === "BULLISH" ? "🟢" : ichi === "BEARISH" ? "🔴" : "⚪"}</span>
+                                <span title="Divergence" style={{ opacity: div && div !== "NEUTRAL" ? 1 : 0.2 }}>{div === "BULLISH" ? "⚡" : div === "BEARISH" ? "⛈️" : "⚡"}</span>
+                              </div>
+                            </td>
+                            <td style={{ padding: "8px" }}>
+                              <span style={{ 
+                                fontSize: 9, fontWeight: 700, color: isTrending ? "#6366f1" : theme.muted,
+                                border: `1px solid ${isTrending ? "#6366f144" : theme.border}`,
+                                padding: "1px 5px", borderRadius: 4
+                              }}>
+                                {isTrending ? "📈 TREND" : "↔️ RANGE"}
+                              </span>
+                            </td>
+                            <td style={{ padding: "8px" }}>{fmt(bTech.confidence * 100, 0)}%</td>
+                            <td style={{ padding: "8px" }}>
+                              <button 
+                                onClick={() => { setActiveTab("analysis"); analyse(b.symbol); window.scrollTo({ top: 0, behavior: 'smooth' }); }} 
+                                style={{ 
+                                  padding: "4px 10px", borderRadius: 6, 
+                                  border: `1px solid ${isBest ? "#eab308" : theme.border}`,
+                                  background: isBest ? "#eab308" : theme.bg, 
+                                  color: isBest ? "#fff" : theme.text, 
+                                  fontSize: 10, fontWeight: 700, cursor: "pointer",
+                                  transition: "all 0.2s"
+                                }}
+                              >
+                                {isBest ? "★ Analyse" : "View"}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Persistence Monitor (Always visible) */}
+      <div style={{ marginTop: 30 }}>
+        <TechnicalTradeMonitor theme={theme} />
+      </div>
     </div>
   );
 }
