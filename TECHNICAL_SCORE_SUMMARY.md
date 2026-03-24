@@ -6,6 +6,17 @@ This research provides a comprehensive analysis and actionable roadmap for impro
 
 ---
 
+## How the Technical Score is calculated (current implementation)
+
+- **Data source & timeframes**: `/api/score-technical/{symbol}` in `backend/main.py` pulls ~5 days of 1m Yahoo Finance bars, resamples them into 1m/2m/5m/10m/15m, and runs `compute_technical_score` for each. A timeframe-consensus block is returned alongside per-timeframe outputs.
+- **Indicator weighting**: `backend/scoring_technical.py` uses adaptive weights keyed off ADX (trending weights if ADX > 30, ranging weights if ADX < 20, otherwise balanced). Eleven indicators are scored to raw values in **[-1, +1]** (RSI, MACD, ADX, Stochastic, EMA stack, Bollinger %B, Volume flow, VWAP deviation, Supertrend, Divergence, Ichimoku).
+- **Direction & sub-scores**: `_determine_direction_weighted` applies weighted bullish vs bearish contributions to set `direction`, `direction_strength`, `directional_edge`, and `agreement_pct`. Raw scores are converted to direction-aware 0-100 sub-scores (bearish signals invert when direction is BEARISH), then combined with the active weights to produce the **final 0-100 score**.
+- **Confidence**: Starts at 0.3, adds agreement_pct × 0.5, plus boosts for strong ADX (>25), dual divergence, and supportive S/R proximity (or a small penalty when direction fights a nearby level). Clipped to **0.0–1.0**.
+- **Composite vs selected timeframe**: The backend also averages the five timeframes for a composite `technical_score` (average score/confidence, majority direction, averaged strength). On the frontend (`TechnicalScoreTab.jsx`), the hero cards show the **selected timeframe** (default 15m) while the radar/bar breakdowns use the composite `technical_score` sub-scores.
+- **Blended display with OI score**: When an OI/IV score exists (`existing_score`), the tab shows a simple blended score = `(technical score + existing score) / 2` to let users compare the technical model with the legacy OI model.
+
+---
+
 ## Key Documents Created
 
 ### 1. **TECHNICAL_SCORE_IMPROVEMENTS.md** (Main Research Document)
