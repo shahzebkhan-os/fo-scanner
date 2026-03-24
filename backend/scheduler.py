@@ -488,25 +488,27 @@ async def technical_snapshot_loop():
                                 res15 = compute_technical_score(c15, h15, l15, v15)
                                 res15_dict = res15.to_dict()
                                 records.append({
-                                    "symbol": sym, 
-                                    "timeframe": "15m", 
-                                    "score": res15_dict.get("score", 0), 
+                                    "symbol": sym,
+                                    "timeframe": "15m",
+                                    "score": res15_dict.get("score", 0),
                                     "direction": res15_dict.get("direction", "NEUTRAL"),
                                     "confidence": res15_dict.get("confidence", 0),
-                                    "strength": res15_dict.get("direction_strength", "MEDIUM")
+                                    "direction_strength": res15_dict.get("direction_strength", "UNKNOWN"),
+                                    "adx": res15_dict.get("indicators", {}).get("adx", {}).get("adx", 0)
                                 })
-                                
+
                             c30, h30, l30, v30 = _extract(df_30m, tick)
                             if len(c30) > 10:
                                 res30 = compute_technical_score(c30, h30, l30, v30)
                                 res30_dict = res30.to_dict()
                                 records.append({
-                                    "symbol": sym, 
-                                    "timeframe": "30m", 
-                                    "score": res30_dict.get("score", 0), 
+                                    "symbol": sym,
+                                    "timeframe": "30m",
+                                    "score": res30_dict.get("score", 0),
                                     "direction": res30_dict.get("direction", "NEUTRAL"),
                                     "confidence": res30_dict.get("confidence", 0),
-                                    "strength": res30_dict.get("direction_strength", "MEDIUM")
+                                    "direction_strength": res30_dict.get("direction_strength", "UNKNOWN"),
+                                    "adx": res30_dict.get("indicators", {}).get("adx", {}).get("adx", 0)
                                 })
                         except Exception:
                             pass
@@ -577,11 +579,26 @@ async def technical_snapshot_loop():
 
                         # ── Technical Auto-Trading Trigger (Score >= 70) ──
                         # Process all 15m records, not just the top 5
+                        # Enhanced with ADX and direction strength filters for higher accuracy
                         tech_70_plus = [r for r in rel if r["score"] >= 70]
                         if tech_70_plus:
                             log.info(f"Checking auto-trade for {len(tech_70_plus)} symbols with score >= 70")
                             for r in tech_70_plus:
                                 try:
+                                    # Apply quality filters for auto-trading:
+                                    # 1. ADX >= 25 (trending market only)
+                                    # 2. Direction strength must be STRONG (not WEAK)
+                                    adx_val = r.get("adx", 0)
+                                    direction_strength = r.get("direction_strength", "UNKNOWN")
+
+                                    if adx_val < 25:
+                                        log.info(f"Skipping {r['symbol']} auto-trade: ADX {adx_val:.1f} < 25 (ranging market)")
+                                        continue
+
+                                    if direction_strength != "STRONG":
+                                        log.info(f"Skipping {r['symbol']} auto-trade: Direction strength is {direction_strength} (need STRONG)")
+                                        continue
+
                                     # Always get fresh full stats for trade execution
                                     if _scan_symbol_fn:
                                         full = await _scan_symbol_fn(r["symbol"])
@@ -596,9 +613,10 @@ async def technical_snapshot_loop():
                                                     opt_type=p["type"],
                                                     strike=p["strike"],
                                                     entry_price=p["ltp"],
-                                                    reason=f"Auto: Technical Score {r['score']}% ({r['direction']})",
+                                                    reason=f"Auto: Technical Score {r['score']}% ({r['direction']}/{direction_strength}, ADX {adx_val:.0f})",
                                                     entry_score=r["score"]
                                                 )
+                                                log.info(f"✓ Auto-trade executed: {r['symbol']} {target_type} (Score {r['score']}%, {direction_strength}, ADX {adx_val:.0f})")
                                 except Exception as te:
                                     log.error(f"Auto-trade trigger failed for {r['symbol']}: {te}")
 
