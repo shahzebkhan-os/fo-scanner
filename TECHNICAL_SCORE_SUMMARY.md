@@ -15,6 +15,11 @@ This research provides a comprehensive analysis and actionable roadmap for impro
 - **Composite vs selected timeframe**: The backend also averages the five timeframes for a composite `technical_score` (average score/confidence, majority direction, averaged strength). On the frontend (`TechnicalScoreTab.jsx`), the top stat cards (“hero cards”) show the **selected timeframe** (default 15m) while the radar/bar breakdowns use the composite `technical_score` sub-scores.
 - **Blended display with OI score**: When an OI/IV score exists (`existing_score`), the tab shows a simple blended score = `(technical score + existing score) / 2` to let users compare the technical model with the legacy OI model.
 
+### Quick evaluation (marks & remarks)
+- **Score**: **86 / 100**
+- **Strengths**: Adaptive weighting by ADX regime; weighted directional consensus fixes score–direction mismatches; multi-timeframe consensus and confidence boosts (ADX, divergence, S/R) provide context; frontend clearly surfaces direction, strength, and indicator breakdowns.
+- **Gaps to watch**: Reliance on Yahoo 1m data quality/latency; composite averaging treats all timeframes equally (could weight by reliability or session context); no automated guardrails for thin-volume symbols; ongoing need to validate win-rate with technical_backtest data as markets evolve.
+
 ---
 
 ## Key Documents Created
