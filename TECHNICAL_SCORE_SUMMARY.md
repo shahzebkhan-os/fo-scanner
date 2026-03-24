@@ -19,6 +19,11 @@ This research provides a comprehensive analysis and actionable roadmap for impro
 - **Score**: **86 / 100**
 - **Strengths**: Adaptive weighting by ADX regime; weighted directional consensus fixes score–direction mismatches; multi-timeframe consensus and confidence boosts (ADX, divergence, S/R) provide context; frontend clearly surfaces direction, strength, and indicator breakdowns.
 - **Gaps to watch**: Reliance on Yahoo 1m data quality/latency; composite averaging treats all timeframes equally (could weight by reliability or session context); no automated guardrails for thin-volume symbols; ongoing need to validate win-rate with technical_backtest data as markets evolve.
+- **Gap closure plan**:
+  - Add a lightweight data quality watchdog (missing bars, stale timestamps) with fallback to broker LTP where available.
+  - Weight the composite by session reliability (e.g., favor 15m/30m during low-liquidity periods) instead of equal averaging.
+  - Introduce thin-volume guardrails (min volume / spread filters) before surfacing PRIME/QUALIFIED signals.
+  - Keep the technical_backtest runs fresh (rolling 90-day window) and gate production thresholds off observed win-rate/Sharpe.
 
 ---
 
