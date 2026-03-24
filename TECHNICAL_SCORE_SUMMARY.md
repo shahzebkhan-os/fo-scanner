@@ -6,6 +6,27 @@ This research provides a comprehensive analysis and actionable roadmap for impro
 
 ---
 
+## How the Technical Score is calculated (current implementation)
+
+- **Data source & timeframes**: `/api/score-technical/{symbol}` in `backend/main.py` pulls ~5 days of native 1m Yahoo Finance bars. It keeps the 1m stream untouched, resamples the same data into 2m/5m/10m/15m, and runs `compute_technical_score` on each slice. A timeframe-consensus block is returned alongside per-timeframe outputs.
+- **Indicator weighting**: `backend/scoring_technical.py` uses adaptive weights keyed off ADX (trending weights if ADX > 30, ranging weights if ADX < 20, otherwise balanced). Eleven indicators are scored to raw values in **[-1, +1]** (RSI, MACD, ADX, Stochastic, EMA stack, Bollinger %B, Volume flow, VWAP deviation, Supertrend, Divergence, Ichimoku).
+- **Direction & sub-scores**: `_determine_direction_weighted` applies weighted bullish vs bearish contributions to set `direction`, `direction_strength`, `directional_edge`, and `agreement_pct`. Raw scores are converted to direction-aware 0-100 sub-scores (bearish signals invert when direction is BEARISH), then combined with the active weights to produce the **final 0-100 score**.
+- **Confidence**: Starts at 0.3, adds agreement_pct × 0.5, plus boosts for strong ADX (>25), dual divergence, and supportive S/R proximity (or a small penalty when direction fights a nearby level). Clipped to **0.0–1.0**.
+- **Composite vs selected timeframe**: The backend also averages the five timeframes for a composite `technical_score` (average score/confidence, majority direction, averaged strength). On the frontend (`TechnicalScoreTab.jsx`), the top stat cards (“hero cards”) show the **selected timeframe** (default 15m) while the radar/bar breakdowns use the composite `technical_score` sub-scores.
+- **Blended display with OI score**: When an OI/IV score exists (`existing_score`), the tab shows a simple blended score = `(technical score + existing score) / 2` to let users compare the technical model with the legacy OI model.
+
+### Quick evaluation (marks & remarks)
+- **Score**: **86 / 100**
+- **Strengths**: Adaptive weighting by ADX regime; weighted directional consensus fixes score–direction mismatches; multi-timeframe consensus and confidence boosts (ADX, divergence, S/R) provide context; frontend clearly surfaces direction, strength, and indicator breakdowns.
+- **Gaps to watch**: Reliance on Yahoo 1m data quality/latency; composite averaging treats all timeframes equally (could weight by reliability or session context); no automated guardrails for thin-volume symbols; ongoing need to validate win-rate with technical_backtest data as markets evolve.
+- **Gap closure plan**:
+  - Add a lightweight data quality watchdog (missing bars, stale timestamps) with fallback to broker LTP where available.
+  - Weight the composite by session reliability (e.g., favor 15m/30m during low-liquidity periods) instead of equal averaging.
+  - Introduce thin-volume guardrails (min volume / spread filters) before surfacing PRIME/QUALIFIED signals.
+  - Keep the technical_backtest runs fresh (rolling 90-day window) and gate production thresholds off observed win-rate/Sharpe.
+
+---
+
 ## Key Documents Created
 
 ### 1. **TECHNICAL_SCORE_IMPROVEMENTS.md** (Main Research Document)

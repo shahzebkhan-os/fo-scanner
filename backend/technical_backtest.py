@@ -235,6 +235,8 @@ class TechnicalBacktester:
         Returns:
             (metrics, trades) tuple
         """
+        # Keep history fresh (rolling 90 days)
+        self._prune_old_runs(days=90)
         if not DEPS_AVAILABLE:
             log.error("Cannot run backtest - dependencies not available")
             return None, []
@@ -447,6 +449,22 @@ class TechnicalBacktester:
 
         return metrics, all_trades
 
+    def _prune_old_runs(self, days: int = 90):
+        """Remove backtest runs older than N days along with their trades."""
+        cutoff = datetime.now() - timedelta(days=days)
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        # Find old run ids
+        rows = c.execute(
+            "SELECT id FROM technical_backtest_runs WHERE run_time < ?", (cutoff.isoformat(),)
+        ).fetchall()
+        old_ids = [r[0] for r in rows]
+        if old_ids:
+            c.executemany("DELETE FROM technical_backtest_trades WHERE run_id = ?", [(rid,) for rid in old_ids])
+            c.executemany("DELETE FROM technical_backtest_runs WHERE id = ?", [(rid,) for rid in old_ids])
+            conn.commit()
+        conn.close()
+
     def _calculate_metrics(self, trades: List[BacktestTrade]) -> BacktestMetrics:
         """Calculate aggregate metrics from trades."""
         if not trades:
@@ -657,6 +675,7 @@ class TechnicalBacktester:
 
     def get_backtest_runs(self, limit: int = 10) -> List[dict]:
         """Get recent backtest runs."""
+        self._prune_old_runs(days=90)
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
 
@@ -686,6 +705,31 @@ class TechnicalBacktester:
             })
 
         return runs
+
+    def get_recommended_thresholds(self) -> Dict[str, float]:
+        """
+        Derive production thresholds (min score/confidence) from latest backtest.
+        Uses win-rate and profit factor (proxy for Sharpe) to adapt gates.
+        """
+        runs = self.get_backtest_runs(limit=1)
+        if not runs:
+            return {"min_score": 75, "min_confidence": 0.65, "source_run_id": None}
+
+        latest = runs[0]
+        win_rate = latest.get("win_rate", 0)
+        profit_factor = latest.get("profit_factor", 0)
+
+        if win_rate >= 0.60 and profit_factor >= 1.30:
+            thresholds = {"min_score": 70, "min_confidence": 0.60}
+        elif win_rate >= 0.55 and profit_factor >= 1.10:
+            thresholds = {"min_score": 72, "min_confidence": 0.62}
+        else:
+            thresholds = {"min_score": 75, "min_confidence": 0.65}
+
+        thresholds["source_run_id"] = latest.get("id")
+        thresholds["win_rate"] = win_rate
+        thresholds["profit_factor"] = profit_factor
+        return thresholds
 
     def get_backtest_trades(self, run_id: int) -> List[dict]:
         """Get trades for a specific backtest run."""
