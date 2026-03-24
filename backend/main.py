@@ -1220,6 +1220,38 @@ async def _do_full_scan(limit: int) -> dict:
                                 f"{symbol},{signal},{stock_score},{pick['strike']} {pick['type']},{pick['score']},{pick['ltp']},{stats.get('pcr',0)},{stats.get('vol_spike',0)},\"{reasons_text}\""
                             )
 
+                            # Instant alert for excellent signals
+                            is_excellent = stock_score >= 85 and pick.get("score", 0) >= 70
+                            if is_excellent:
+                                option_side = "Call" if pick["type"] == "CE" else "Put"
+                                pcr_val = stats.get("pcr", 0) or 0
+                                iv_rank_val = stats.get("iv_rank", 0) or 0
+                                vol_spike_val = stats.get("vol_spike", 0) or 0
+                                # Safeguard against unexpected types
+                                try:
+                                    iv_rank_val = float(iv_rank_val)
+                                except (TypeError, ValueError):
+                                    iv_rank_val = 0.0
+                                try:
+                                    pcr_val = float(pcr_val)
+                                except (TypeError, ValueError):
+                                    pcr_val = 0.0
+                                try:
+                                    vol_spike_val = float(vol_spike_val)
+                                except (TypeError, ValueError):
+                                    vol_spike_val = 0.0
+
+                                msg_lines = [
+                                    f"🚨 Excellent Signal: *{symbol}* ({signal})",
+                                    f"Stock Score: *{stock_score}* | Option Score: *{pick.get('score',0)}*",
+                                    f"Top Pick: {pick['strike']} {option_side} @ ₹{round(pick.get('ltp',0), 2)}",
+                                ]
+                                if stats.get("pcr") is not None:
+                                    msg_lines.append(f"PCR: {round(pcr_val, 2)} · IVR: {round(iv_rank_val, 1)} · Vol Spike: {round(vol_spike_val, 2)}")
+                                if reasons_text:
+                                    msg_lines.append(f"Reasons: {reasons_text}")
+                                asyncio.create_task(send_telegram_alert("\n".join(msg_lines)))
+
                 return {
                     "symbol":         symbol,
                     "ltp":            round(spot, 2),
