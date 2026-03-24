@@ -41,6 +41,7 @@ from .signals.global_cues import GlobalCuesSignal
 from .scoring_technical import compute_technical_score
 from .unified_evaluation import get_unified_evaluator
 from .constants import FO_STOCKS, INDEX_SYMBOLS, LOT_SIZES, SLUG_MAP, YFINANCE_TICKER_MAP
+from .technical_backtest import TechnicalBacktester
 
 # Module-level GlobalCuesSignal singleton (stateless, safe to share)
 _global_cues_signal = GlobalCuesSignal()
@@ -3017,6 +3018,183 @@ async def get_accuracy_trade_price_history(trade_id: int, limit: int = 50):
     """Get price history for a specific accuracy trade."""
     history = db.get_accuracy_trade_history(trade_id)
     return {"history": history[:limit]}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Technical Score Backtesting Endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TechnicalBacktestRequest(BaseModel):
+    """Request model for running a technical backtest."""
+    symbols: List[str] = Field(default_factory=lambda: ["NIFTY", "BANKNIFTY", "RELIANCE"])
+    start_date: str = Field(..., description="Start date YYYY-MM-DD")
+    end_date: str = Field(..., description="End date YYYY-MM-DD")
+    timeframe: str = Field(default="15m", description="Bar interval: 5m, 15m, or 30m")
+    min_score_threshold: int = Field(default=70, ge=0, le=100)
+    min_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
+    holding_period_minutes: int = Field(default=1440, description="How long to hold position (default 1 day)")
+    exit_on_direction_flip: bool = Field(default=True, description="Exit early if direction changes")
+
+
+@app.post("/api/technical-backtest/run")
+async def run_technical_backtest(request: TechnicalBacktestRequest):
+    """
+    Run a backtest on technical scoring signals.
+
+    Returns comprehensive metrics including:
+    - Overall win rate and profit factor
+    - Performance by direction (bullish vs bearish)
+    - Performance by strength (strong vs weak)
+    - Performance by regime (trending vs ranging)
+    - Statistical significance testing
+    """
+    try:
+        backtester = TechnicalBacktester()
+
+        metrics, trades = backtester.run_backtest(
+            symbols=request.symbols,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            timeframe=request.timeframe,
+            min_score_threshold=request.min_score_threshold,
+            min_confidence=request.min_confidence,
+            holding_period_minutes=request.holding_period_minutes,
+            exit_on_direction_flip=request.exit_on_direction_flip
+        )
+
+        if metrics is None:
+            return {"error": "Backtest failed - check server logs for details"}
+
+        # Convert trades to dict for JSON serialization
+        trades_dict = [t.to_dict() for t in trades]
+
+        return {
+            "status": "completed",
+            "metrics": metrics.to_dict(),
+            "trade_count": len(trades),
+            "trades_summary": trades_dict[:10],  # First 10 trades for preview
+            "config": {
+                "symbols": request.symbols,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "timeframe": request.timeframe,
+                "min_score_threshold": request.min_score_threshold,
+                "min_confidence": request.min_confidence,
+                "holding_period_minutes": request.holding_period_minutes
+            }
+        }
+
+    except Exception as e:
+        log.error(f"Error running technical backtest: {e}", exc_info=True)
+        return {"error": str(e)}
+
+
+@app.get("/api/technical-backtest/runs")
+async def get_technical_backtest_runs(limit: int = 10):
+    """Get list of recent technical backtest runs."""
+    try:
+        backtester = TechnicalBacktester()
+        runs = backtester.get_backtest_runs(limit=limit)
+        return {"runs": runs}
+    except Exception as e:
+        log.error(f"Error fetching backtest runs: {e}")
+        return {"error": str(e), "runs": []}
+
+
+@app.get("/api/technical-backtest/runs/{run_id}")
+async def get_technical_backtest_run_details(run_id: int):
+    """Get detailed results for a specific backtest run."""
+    try:
+        backtester = TechnicalBacktester()
+        trades = backtester.get_backtest_trades(run_id)
+
+        # Get run metadata
+        runs = backtester.get_backtest_runs(limit=100)
+        run = next((r for r in runs if r['id'] == run_id), None)
+
+        if not run:
+            return {"error": f"Backtest run {run_id} not found"}
+
+        return {
+            "run": run,
+            "trades": trades,
+            "trade_count": len(trades)
+        }
+
+    except Exception as e:
+        log.error(f"Error fetching backtest run {run_id}: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/technical-backtest/accuracy-summary")
+async def get_technical_accuracy_summary():
+    """
+    Get a summary of technical signal accuracy across all backtests.
+
+    Returns aggregated metrics:
+    - Average win rate across all runs
+    - Best/worst performing symbols
+    - Best/worst performing regimes
+    - Trend over time
+    """
+    try:
+        backtester = TechnicalBacktester()
+        runs = backtester.get_backtest_runs(limit=50)
+
+        if not runs:
+            return {
+                "total_runs": 0,
+                "avg_win_rate": 0,
+                "avg_profit_factor": 0,
+                "message": "No backtest runs found. Run a backtest first."
+            }
+
+        # Calculate summary statistics
+        total_runs = len(runs)
+        avg_win_rate = sum(r['win_rate'] for r in runs) / total_runs
+        avg_profit_factor = sum(r['profit_factor'] for r in runs if r['profit_factor']) / total_runs
+        total_trades = sum(r['total_trades'] for r in runs)
+
+        # Get latest run metrics for detailed breakdown
+        latest_run = runs[0]
+        latest_metrics = latest_run.get('metrics', {})
+
+        return {
+            "total_runs": total_runs,
+            "total_trades_across_runs": total_trades,
+            "avg_win_rate": round(avg_win_rate, 4),
+            "avg_profit_factor": round(avg_profit_factor, 2),
+            "latest_run": {
+                "id": latest_run['id'],
+                "run_time": latest_run['run_time'],
+                "symbols": latest_run['symbols'],
+                "win_rate": latest_run['win_rate'],
+                "profit_factor": latest_run['profit_factor'],
+                "total_trades": latest_run['total_trades'],
+                "by_direction": {
+                    "bullish_win_rate": latest_metrics.get('bullish_win_rate', 0),
+                    "bearish_win_rate": latest_metrics.get('bearish_win_rate', 0)
+                },
+                "by_strength": {
+                    "strong_win_rate": latest_metrics.get('strong_win_rate', 0),
+                    "weak_win_rate": latest_metrics.get('weak_win_rate', 0)
+                },
+                "by_regime": {
+                    "trending_win_rate": latest_metrics.get('trending_win_rate', 0),
+                    "ranging_win_rate": latest_metrics.get('ranging_win_rate', 0)
+                },
+                "statistical_significance": {
+                    "z_score": latest_metrics.get('z_score'),
+                    "p_value": latest_metrics.get('p_value'),
+                    "is_significant": latest_metrics.get('is_significant', False)
+                }
+            },
+            "runs_history": runs[:10]  # Last 10 runs for trend analysis
+        }
+
+    except Exception as e:
+        log.error(f"Error generating accuracy summary: {e}")
+        return {"error": str(e)}
 
 
 # ── Frontend Catch-all ────────────────────────────────────────────────────────
