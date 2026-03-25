@@ -184,6 +184,9 @@ const WEIGHT_LABELS = {
   supertrend: "9%", divergence: "10%", ichimoku: "7%",
 };
 
+const QUICK_TARGET_PCT = 0.02;
+const QUICK_STOP_LOSS_PCT = 0.01;
+
 // ── Score Gauge ──────────────────────────────────────────────────────────────
 function ScoreGauge({ score, direction, confidence, theme }) {
   const color = direction === "BULLISH" ? "#22c55e" : direction === "BEARISH" ? "#ef4444" : "#94a3b8";
@@ -757,6 +760,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
   const [selectedTF, setSelectedTF] = useState("15m");
   const [sortConfig, setSortConfig] = useState({ key: "blended", dir: "desc" });
   const [localScanMap, setLocalScanMap] = useState(null);
+  const [showScanInfo, setShowScanInfo] = useState(false);
 
   const [accuracySummary, setAccuracySummary] = useState(null);
   const scanMap = useMemo(() => {
@@ -833,24 +837,34 @@ export default function TechnicalScoreTab({ theme, scanData }) {
     setBatchProgress(0);
     const results = [];
     
-    // Fetch latest scan data for Top Picks & Signals
-    try {
-      const scanRes = await apiFetch("/api/scan?limit=500");
-      const smap = {};
-      (scanRes.data || []).forEach(r => smap[r.symbol] = r);
-      setLocalScanMap(smap);
-    } catch(e) { console.warn("Failed to fetch fresh scan map", e); }
+    // Fetch latest scan data in parallel with technical fetches
+    const scanPromise = apiFetch("/api/scan?limit=500")
+      .then((scanRes) => {
+        const smap = {};
+        (scanRes.data || []).forEach(r => { smap[r.symbol] = r; });
+        setLocalScanMap(smap);
+      })
+      .catch((e) => console.warn("Failed to fetch fresh scan map", e));
 
-    for (let i = 0; i < POPULAR_SYMBOLS.length; i++) {
-      const sym = POPULAR_SYMBOLS[i];
-      try {
-        const data = await apiFetch(`/api/score-technical/${sym}`);
-        results.push({ symbol: sym, data });
-      } catch (e) {
-        console.error(`Failed to load ${sym}:`, e);
-      }
-      setBatchProgress(i + 1);
+    const concurrency = 6;
+    let processed = 0;
+    for (let i = 0; i < POPULAR_SYMBOLS.length; i += concurrency) {
+      const chunk = POPULAR_SYMBOLS.slice(i, i + concurrency);
+      await Promise.allSettled(chunk.map(async (sym) => {
+        try {
+          const data = await apiFetch(`/api/score-technical/${sym}`);
+          results.push({ symbol: sym, data });
+        } catch (e) {
+          console.error(`Failed to load ${sym}:`, e);
+        } finally {
+          processed += 1;
+          setBatchProgress(processed);
+        }
+      }));
+      setBatchResults([...results]);
     }
+
+    await scanPromise;
     
     setBatchResults(results);
     setBatchLoading(false);
@@ -1084,6 +1098,192 @@ export default function TechnicalScoreTab({ theme, scanData }) {
             })}
           </div>
 
+          {/* Market Scan (moved from Market Scan tab) */}
+          <Card theme={theme} style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 12, fontWeight: 700 }}>⚡ Market Scan Table</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button
+                  onClick={() => setShowScanInfo(v => !v)}
+                  title="What is this scan?"
+                  style={{
+                    width: 26, height: 26, borderRadius: "50%",
+                    border: `1px solid ${theme.border}`, background: theme.bg, color: theme.text,
+                    fontWeight: 800, cursor: "pointer"
+                  }}
+                >
+                  i
+                </button>
+                <button
+                  onClick={loadAll}
+                  disabled={batchLoading}
+                  style={{
+                    padding: "8px 16px", borderRadius: 6, background: theme.accent, color: "#fff",
+                    border: "none", cursor: "pointer", fontWeight: 700
+                  }}
+                >
+                  {batchLoading ? `⚡ Scanning (${batchProgress}/${POPULAR_SYMBOLS.length})...` : "⚡ Start Market Scan"}
+                </button>
+              </div>
+            </div>
+
+            {showScanInfo && (
+              <div style={{
+                marginBottom: 12, padding: "10px 12px", borderRadius: 6,
+                background: "rgba(99,102,241,0.08)", border: `1px solid ${theme.border}`, fontSize: 11, lineHeight: 1.5
+              }}>
+                This table quickly scans popular symbols and ranks them by combined technical + options context.
+                Use <b>View</b> to open full indicator analysis for any row.
+              </div>
+            )}
+
+            {batchResults.length > 0 && (() => {
+              const sorted = [...batchResults].filter(b => b.data?.technical_score?.score != null).sort((a, b) => {
+                const aTech = a.data.technical_score;
+                const aExist = a.data.existing_score;
+                const aBlended = Math.round((aTech.score + (aExist?.score != null ? aExist.score : 0)) / (aExist?.score != null ? 2 : 1));
+                
+                const bTech = b.data.technical_score;
+                const bExist = b.data.existing_score;
+                const bBlended = Math.round((bTech.score + (bExist?.score != null ? bExist.score : 0)) / (bExist?.score != null ? 2 : 1));
+                
+                let valA = 0, valB = 0;
+                if (sortConfig.key === "symbol") { valA = a.symbol; valB = b.symbol; }
+                else if (sortConfig.key === "blended") { valA = aBlended; valB = bBlended; }
+                else if (sortConfig.key === "technical") { valA = aTech.score; valB = bTech.score; }
+                else if (sortConfig.key === "confidence") { valA = aTech.confidence; valB = bTech.confidence; }
+                else if (sortConfig.key === "direction") { valA = aTech.direction; valB = bTech.direction; }
+                
+                if (valA < valB) return sortConfig.dir === "asc" ? -1 : 1;
+                if (valA > valB) return sortConfig.dir === "asc" ? 1 : -1;
+                return 0;
+              });
+              
+              const handleSort = (k) => {
+                if (sortConfig.key === k) setSortConfig({ key: k, dir: sortConfig.dir === "asc" ? "desc" : "asc" });
+                else setSortConfig({ key: k, dir: "desc" });
+              };
+              const SortIcon = ({ k }) => <span style={{ opacity: sortConfig.key === k ? 1 : 0.2, marginLeft: 4 }}>{sortConfig.key === k && sortConfig.dir === "asc" ? "↑" : "↓"}</span>;
+
+              return (
+                <>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                      <thead>
+                        <tr style={{ background: "rgba(0,0,0,0.06)", textAlign: "left" }}>
+                          <th title="Ticker symbol of the stock being analyzed" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("symbol")}>Symbol <SortIcon k="symbol" /></th>
+                          <th title="A weighted combination of the Option Score and the True Composite Technical Score" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("blended")}>Blended <SortIcon k="blended" /></th>
+                          <th title="True Composite Technical Score (Avg. of 1m, 2m, 5m, 10m, and 15m intervals)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("technical")}>Technical <SortIcon k="technical" /></th>
+                          <th title="Overall Technical Direction based purely on indicators (Price Action / Momentum)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("direction")}>Direction <SortIcon k="direction" /></th>
+                          <th title="Current stock LTP" style={{ padding: "10px 8px" }}>LTP</th>
+                          <th title={`Quick target derived from LTP using ${QUICK_TARGET_PCT * 100}%, adjusted for signal direction`} style={{ padding: "10px 8px" }}>Target</th>
+                          <th title={`Quick stop-loss derived from LTP using ${QUICK_STOP_LOSS_PCT * 100}%, adjusted for signal direction`} style={{ padding: "10px 8px" }}>Stop Loss</th>
+                          <th title="Underlying Technical Triggers: 🎯 Supertrend, 🟢/🔴 Ichimoku, ⚡ Divergence" style={{ padding: "10px 8px" }}>Signals</th>
+                          <th title="Market Regime: TREND is directional movement (ADX > 25), RANGE is choppy movement (ADX < 25)" style={{ padding: "10px 8px" }}>Regime</th>
+                          <th title="Probability of the setup succeeding computed from indicator confluence" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("confidence")}>Confidence <SortIcon k="confidence" /></th>
+                          <th title="Trade options and detailed symbol view" style={{ padding: "10px 8px" }}>Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sorted.map((b, idx) => {
+                           const bTech = b.data.technical_score;
+                           const bExist = b.data.existing_score;
+                           const bHasExist = bExist?.score != null;
+                           const bBlended = Math.round((bTech.score + (bHasExist ? bExist.score : 0)) / (bHasExist ? 2 : 1));
+                           
+                           const scanRow = scanMap[b.symbol];
+                           const ltp = Number(scanRow?.ltp || 0);
+                           const hasLtp = Number.isFinite(ltp) && ltp > 0;
+                           const isBear = bTech.direction === "BEARISH";
+                           const target = hasLtp ? ltp * (isBear ? (1 - QUICK_TARGET_PCT) : (1 + QUICK_TARGET_PCT)) : null;
+                           const stopLoss = hasLtp ? ltp * (isBear ? (1 + QUICK_STOP_LOSS_PCT) : (1 - QUICK_STOP_LOSS_PCT)) : null;
+
+                           const inds = bTech.indicators || {};
+                           const st = inds.supertrend?.signal;
+                           const ichi = inds.ichimoku?.signal;
+                           const div = inds.divergence?.signal;
+                           const isTrending = inds.adx?.adx >= 25;
+                          const isBest = idx === 0 && bTech.score >= 70 && bTech.confidence >= 0.7;
+
+                          return (
+                            <tr key={b.symbol} style={{ 
+                              borderBottom: `1px solid ${theme.border}`, 
+                              background: isBest ? "rgba(234,179,8,0.05)" : "transparent",
+                              transition: "background 0.2s" 
+                            }}>
+                              <td style={{ padding: "8px" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                  <b>{b.symbol}</b>
+                                  {isBest && <span title="Best Trend Detected" style={{ color: "#eab308" }}>👑</span>}
+                                </div>
+                              </td>
+                              <td style={{ padding: "8px" }}>
+                                <span style={{ 
+                                  fontWeight: 800, 
+                                  color: isBest ? "#eab308" : signalColor(bBlended > 50 ? "BULLISH" : "BEARISH") 
+                                }}>{bBlended}</span>
+                              </td>
+                              <td style={{ padding: "8px", opacity: 0.8 }}>{bTech.score}</td>
+                                <td style={{ padding: "8px" }}>
+                                  <span style={{ 
+                                    color: signalColor(bTech.direction), fontWeight: 700, fontSize: 10,
+                                    background: signalBg(bTech.direction), padding: "2px 6px", borderRadius: 4
+                                  }}>
+                                    {bTech.direction}
+                                  </span>
+                                </td>
+                                <td style={{ padding: "8px" }}>{hasLtp ? `₹${fmt(ltp, 2)}` : "—"}</td>
+                                <td style={{ padding: "8px", color: "#22c55e", fontWeight: 700 }}>{target ? `₹${fmt(target, 2)}` : "—"}</td>
+                                <td style={{ padding: "8px", color: "#ef4444", fontWeight: 700 }}>{stopLoss ? `₹${fmt(stopLoss, 2)}` : "—"}</td>
+                                <td style={{ padding: "8px" }}>
+                                  <div style={{ display: "flex", gap: 6, fontSize: 14 }}>
+                                    <span title="Supertrend" style={{ opacity: st ? 1 : 0.2 }}>{st === "BULLISH" ? "🎯" : st === "BEARISH" ? "⭕" : "🎯"}</span>
+                                    <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{ichi === "BULLISH" ? "🟢" : ichi === "BEARISH" ? "🔴" : "⚪"}</span>
+                                    <span title="Divergence" style={{ opacity: div && div !== "NEUTRAL" ? 1 : 0.2 }}>{div === "BULLISH" ? "⚡" : div === "BEARISH" ? "⛈️" : "⚡"}</span>
+                                </div>
+                              </td>
+                              <td style={{ padding: "8px" }}>
+                                <span style={{ 
+                                  fontSize: 9, fontWeight: 700, color: isTrending ? "#6366f1" : theme.muted,
+                                  border: `1px solid ${isTrending ? "#6366f144" : theme.border}`,
+                                  padding: "1px 5px", borderRadius: 4
+                                }}>
+                                  {isTrending ? "📈 TREND" : "↔️ RANGE"}
+                                </span>
+                              </td>
+                              <td style={{ padding: "8px" }}>{fmt(bTech.confidence * 100, 0)}%</td>
+                              <td style={{ padding: "8px" }}>
+                                <button 
+                                  onClick={() => { analyse(b.symbol); window.scrollTo({ top: 0, behavior: 'smooth' }); }} 
+                                  style={{ 
+                                    padding: "4px 10px", borderRadius: 6, 
+                                    border: `1px solid ${isBest ? "#eab308" : theme.border}`,
+                                    background: isBest ? "#eab308" : theme.bg, 
+                                    color: isBest ? "#fff" : theme.text, 
+                                    fontSize: 10, fontWeight: 700, cursor: "pointer",
+                                    transition: "all 0.2s"
+                                  }}
+                                >
+                                  {isBest ? "★ Analyse" : "View"}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div style={{ marginTop: 10, fontSize: 10, color: theme.muted, lineHeight: 1.6 }}>
+                    <div><b>Blended:</b> average of Technical score and existing scanner score (when available).</div>
+                    <div><b>Technical:</b> true composite indicator score computed from multi-timeframe technicals.</div>
+                    <div><b>Confidence:</b> indicator confluence confidence from the technical model.</div>
+                    <div><b>Target / Stop Loss:</b> quick reference from LTP using {QUICK_TARGET_PCT * 100}% target and {QUICK_STOP_LOSS_PCT * 100}% stop loss, applied in signal direction.</div>
+                  </div>
+                </>
+              );
+            })()}
+          </Card>
+
           {/* Loading */}
           {loading && <Loader theme={theme} />}
 
@@ -1233,194 +1433,22 @@ export default function TechnicalScoreTab({ theme, scanData }) {
 
       {activeTab === "batch" && (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
-          {/* Batch Actions */}
-          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+          <Card theme={theme} style={{ textAlign: "center", padding: 30 }}>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>📍</div>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Market Scan table moved to 🔍 Analysis</div>
+            <div style={{ fontSize: 11, color: theme.muted, marginBottom: 12 }}>
+              Start the scan and review symbol rankings directly in the Analysis tab.
+            </div>
             <button
-              onClick={loadAll}
-              disabled={batchLoading}
+              onClick={() => setActiveTab("analysis")}
               style={{
-                padding: "8px 20px", borderRadius: 6, background: theme.accent, color: "#fff", border: "none", cursor: "pointer", fontWeight: 700
+                padding: "8px 14px", borderRadius: 6, border: `1px solid ${theme.border}`,
+                background: theme.bg, color: theme.text, cursor: "pointer", fontWeight: 700
               }}
             >
-              {batchLoading ? `⚡ Scanning (${batchProgress}/${POPULAR_SYMBOLS.length})...` : "⚡ Start Market Scan"}
+              Go to 🔍 Analysis
             </button>
-          </div>
-
-          {batchResults.length > 0 && (() => {
-            const sorted = [...batchResults].filter(b => b.data?.technical_score?.score != null).sort((a, b) => {
-              const aTech = a.data.technical_score;
-              const aExist = a.data.existing_score;
-              const aBlended = Math.round((aTech.score + (aExist?.score != null ? aExist.score : 0)) / (aExist?.score != null ? 2 : 1));
-              const aRow = scanMap[a.symbol];
-              const aScanSig = aRow?.signal || aTech.direction;
-              
-              const bTech = b.data.technical_score;
-              const bExist = b.data.existing_score;
-              const bBlended = Math.round((bTech.score + (bExist?.score != null ? bExist.score : 0)) / (bExist?.score != null ? 2 : 1));
-              const bRow = scanMap[b.symbol];
-              const bScanSig = bRow?.signal || bTech.direction;
-              
-              let valA = 0, valB = 0;
-              if (sortConfig.key === "symbol") { valA = a.symbol; valB = b.symbol; }
-              else if (sortConfig.key === "blended") { valA = aBlended; valB = bBlended; }
-              else if (sortConfig.key === "technical") { valA = aTech.score; valB = bTech.score; }
-              else if (sortConfig.key === "confidence") { valA = aTech.confidence; valB = bTech.confidence; }
-              else if (sortConfig.key === "direction") { valA = aTech.direction; valB = bTech.direction; }
-              else if (sortConfig.key === "scan_sig") { valA = aScanSig; valB = bScanSig; }
-              
-              if (valA < valB) return sortConfig.dir === "asc" ? -1 : 1;
-              if (valA > valB) return sortConfig.dir === "asc" ? 1 : -1;
-              return 0;
-            });
-            
-            const handleSort = (k) => {
-              if (sortConfig.key === k) setSortConfig({ key: k, dir: sortConfig.dir === "asc" ? "desc" : "asc" });
-              else setSortConfig({ key: k, dir: "desc" });
-            };
-            const SortIcon = ({ k }) => <span style={{ opacity: sortConfig.key === k ? 1 : 0.2, marginLeft: 4 }}>{sortConfig.key === k && sortConfig.dir === "asc" ? "↑" : "↓"}</span>;
-
-            return (
-              <Card theme={theme}>
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-                    <thead>
-                      <tr style={{ background: "rgba(0,0,0,0.06)", textAlign: "left" }}>
-                        <th title="Ticker symbol of the stock being analyzed" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("symbol")}>Symbol <SortIcon k="symbol" /></th>
-                        <th title="A weighted combination of the Option Score and the True Composite Technical Score" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("blended")}>Blended <SortIcon k="blended" /></th>
-                        <th title="True Composite Technical Score (Avg. of 1m, 2m, 5m, 10m, and 15m intervals)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("technical")}>Technical <SortIcon k="technical" /></th>
-                        <th title="Overall Technical Direction based purely on indicators (Price Action / Momentum)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("direction")}>Direction <SortIcon k="direction" /></th>
-                        <th title="Overall Options Market Analysis showing the option chain bias (IV, OI, Greeks)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("scan_sig")}>Scan Signal <SortIcon k="scan_sig" /></th>
-                        <th title="Highest probability options strike recommended for paper trading based on current signal" style={{ padding: "10px 8px" }}>Top Pick</th>
-                        <th title="Underlying Technical Triggers: 🎯 Supertrend, 🟢/🔴 Ichimoku, ⚡ Divergence" style={{ padding: "10px 8px" }}>Signals</th>
-                        <th title="Market Regime: TREND is directional movement (ADX > 25), RANGE is choppy movement (ADX < 25" style={{ padding: "10px 8px" }}>Regime</th>
-                        <th title="Probability of the setup succeeding computed from indicator confluence" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("confidence")}>Confidence <SortIcon k="confidence" /></th>
-                        <th title="Trade options and detailed symbol view" style={{ padding: "10px 8px" }}>Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sorted.map((b, idx) => {
-                         const bTech = b.data.technical_score;
-                         const bExist = b.data.existing_score;
-                         const bHasExist = bExist?.score != null;
-                         const bBlended = Math.round((bTech.score + (bHasExist ? bExist.score : 0)) / (bHasExist ? 2 : 1));
-                         
-                         const scanRow = scanMap[b.symbol];
-                         const scanSignal = scanRow?.signal || bTech.direction;
-                         const topPick = scanRow?.top_picks?.find(p => {
-                           if (scanSignal === "BULLISH") return p.type === "CE";
-                           if (scanSignal === "BEARISH") return p.type === "PE";
-                           return true;
-                         }) || scanRow?.top_picks?.[0];
-                         const topPickLabel = topPick
-                           ? `${topPick.strike} ${topPick.type} @ ₹${fmt(topPick.ltp, 1)} • ${Math.round(topPick.score || 0)} pts`
-                           : "—";
-                         const topPickColor = topPick ? signalColor(topPick.type === "CE" ? "BULLISH" : "BEARISH") : theme.muted;
-                         const topPickBg = topPick ? signalBg(topPick.type === "CE" ? "BULLISH" : "BEARISH") : "transparent";
-
-                         const inds = bTech.indicators || {};
-                         const st = inds.supertrend?.signal;
-                         const ichi = inds.ichimoku?.signal;
-                         const div = inds.divergence?.signal;
-                         const isTrending = inds.adx?.adx >= 25;
-                        const isBest = idx === 0 && bTech.score >= 70 && bTech.confidence >= 0.7;
-
-                        return (
-                          <tr key={b.symbol} style={{ 
-                            borderBottom: `1px solid ${theme.border}`, 
-                            background: isBest ? "rgba(234,179,8,0.05)" : "transparent",
-                            transition: "background 0.2s" 
-                          }}>
-                            <td style={{ padding: "8px" }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                <b>{b.symbol}</b>
-                                {isBest && <span title="Best Trend Detected" style={{ color: "#eab308" }}>👑</span>}
-                              </div>
-                            </td>
-                            <td style={{ padding: "8px" }}>
-                              <span style={{ 
-                                fontWeight: 800, 
-                                color: isBest ? "#eab308" : signalColor(bBlended > 50 ? "BULLISH" : "BEARISH") 
-                              }}>{bBlended}</span>
-                            </td>
-                            <td style={{ padding: "8px", opacity: 0.8 }}>{bTech.score}</td>
-                              <td style={{ padding: "8px" }}>
-                                <span style={{ 
-                                  color: signalColor(bTech.direction), fontWeight: 700, fontSize: 10,
-                                  background: signalBg(bTech.direction), padding: "2px 6px", borderRadius: 4
-                                }}>
-                                  {bTech.direction}
-                                </span>
-                              </td>
-                              <td style={{ padding: "8px" }}>
-                                <span title={`Options Market Consensus: ${scanSignal}`} style={{
-                                  color: signalColor(scanSignal), fontWeight: 700, fontSize: 10,
-                                  background: signalBg(scanSignal), padding: "2px 6px", borderRadius: 4
-                                }}>
-                                  {scanSignal}
-                                </span>
-                              </td>
-                              <td style={{ padding: "8px" }}>
-                                <div title={`Best Strike Choice: ${topPickLabel}`} style={{
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  gap: 6,
-                                  background: topPickBg,
-                                  padding: "4px 8px",
-                                  borderRadius: 6,
-                                  border: `1px solid ${topPick ? topPickColor + "55" : theme.border}`
-                                }}>
-                                  <span style={{ color: topPickColor, fontWeight: 800 }}>{topPick ? "★" : "—"}</span>
-                                  <div style={{ lineHeight: 1.3 }}>
-                                    <div style={{ fontWeight: 700, color: topPickColor }}>{topPickLabel}</div>
-                                    {scanRow?.signal_reasons?.length > 0 && (
-                                      <div style={{ fontSize: 9, color: theme.muted }} title={scanRow.signal_reasons.join(" • ")}>
-                                        {scanRow.signal_reasons.slice(0, 2).join(" • ")}
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                              </td>
-                              <td style={{ padding: "8px" }}>
-                                <div style={{ display: "flex", gap: 6, fontSize: 14 }}>
-                                  <span title="Supertrend" style={{ opacity: st ? 1 : 0.2 }}>{st === "BULLISH" ? "🎯" : st === "BEARISH" ? "⭕" : "🎯"}</span>
-                                  <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{ichi === "BULLISH" ? "🟢" : ichi === "BEARISH" ? "🔴" : "⚪"}</span>
-                                  <span title="Divergence" style={{ opacity: div && div !== "NEUTRAL" ? 1 : 0.2 }}>{div === "BULLISH" ? "⚡" : div === "BEARISH" ? "⛈️" : "⚡"}</span>
-                              </div>
-                            </td>
-                            <td style={{ padding: "8px" }}>
-                              <span style={{ 
-                                fontSize: 9, fontWeight: 700, color: isTrending ? "#6366f1" : theme.muted,
-                                border: `1px solid ${isTrending ? "#6366f144" : theme.border}`,
-                                padding: "1px 5px", borderRadius: 4
-                              }}>
-                                {isTrending ? "📈 TREND" : "↔️ RANGE"}
-                              </span>
-                            </td>
-                            <td style={{ padding: "8px" }}>{fmt(bTech.confidence * 100, 0)}%</td>
-                            <td style={{ padding: "8px" }}>
-                              <button 
-                                onClick={() => { setActiveTab("analysis"); analyse(b.symbol); window.scrollTo({ top: 0, behavior: 'smooth' }); }} 
-                                style={{ 
-                                  padding: "4px 10px", borderRadius: 6, 
-                                  border: `1px solid ${isBest ? "#eab308" : theme.border}`,
-                                  background: isBest ? "#eab308" : theme.bg, 
-                                  color: isBest ? "#fff" : theme.text, 
-                                  fontSize: 10, fontWeight: 700, cursor: "pointer",
-                                  transition: "all 0.2s"
-                                }}
-                              >
-                                {isBest ? "★ Analyse" : "View"}
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </Card>
-            );
-          })()}
+          </Card>
         </div>
       )}
 
