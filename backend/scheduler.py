@@ -519,106 +519,66 @@ async def technical_snapshot_loop():
                     db.save_technical_score_snapshots(records)
                     log.info(f"Saved {len(records)} tech snapshots.")
                     
-                    # ── Telegram Highlights ──
-                    if _send_telegram_fn:
-                        # Pick Top 5 Bullish and Top 5 Bearish based on 15m score/confidence
-                        rel = [r for r in records if r["timeframe"] == "15m"]
-                        bulls = sorted([r for r in rel if r["direction"] == "BULLISH"], key=lambda x: (x["score"], x["confidence"]), reverse=True)[:5]
-                        bears = sorted([r for r in rel if r["direction"] == "BEARISH"], key=lambda x: (x["score"], x["confidence"]), reverse=False)[:5] # Low score is more bearish for indexing, but raw_score was inverted? No, sub_scores are 0-100 logic.
-                        # Wait, sub_scores 0-100 means high is more BULLISH if direction is BULLISH.
-                        # For BEARISH, score is also 0-100 where high is more BEARISH conviction.
-                        # Let's double check scoring_technical logic. 
-                        # Line 376: sub_scores[name] = max(0.0, min(100.0, 50 - raw * 50)) for BEARISH.
-                        # So high score = high conviction for that direction.
-                        
-                        bears = sorted([r for r in rel if r["direction"] == "BEARISH"], key=lambda x: (x["score"], x["confidence"]), reverse=True)[:5]
+                    # ── Technical Auto-Trading Trigger (Score >= 70) ──
+                    rel = [r for r in records if r["timeframe"] == "15m"]
+                    # Previous periodic highlight alerts are intentionally removed.
+                    # Notifications are now sent only for good-entry executions.
 
-                        if bulls or bears:
-                            # ── Top Picks Enrichment ──
-                            # For the top technical setups, fetch their option chain "top picks"
-                            async def enrich_with_picks(setup_list, pick_type):
-                                enriched = []
-                                for r in setup_list:
-                                    try:
-                                        if _scan_symbol_fn:
-                                            full_stats = await _scan_symbol_fn(r["symbol"])
-                                            if full_stats and "top_picks" in full_stats:
-                                                # Filter picks to match the setup direction
-                                                picks = [p for p in full_stats["top_picks"] if p["type"] == pick_type]
-                                                if picks:
-                                                    r["picks"] = picks[:1] # Take the best one
-                                    except Exception as e:
-                                        log.warning(f"Failed to enrich picks for {r['symbol']}: {e}")
-                                    enriched.append(r)
-                                return enriched
+                    # Process all 15m records, not just the top 5
+                    # Enhanced with ADX and direction strength filters for higher accuracy
+                    tech_70_plus = [r for r in rel if r["score"] >= 70]
+                    if tech_70_plus:
+                        log.info(f"Checking auto-trade for {len(tech_70_plus)} symbols with score >= 70")
+                        for r in tech_70_plus:
+                            try:
+                                # Apply quality filters for auto-trading:
+                                # 1. ADX >= 25 (trending market only)
+                                # 2. Direction strength must be STRONG (not WEAK)
+                                adx_val = r.get("adx", 0)
+                                direction_strength = r.get("direction_strength", "UNKNOWN")
 
-                            enriched_bulls = await enrich_with_picks(bulls, "CE")
-                            enriched_bears = await enrich_with_picks(bears, "PE")
+                                if adx_val < 25:
+                                    log.info(f"Skipping {r['symbol']} auto-trade: ADX {adx_val:.1f} < 25 (ranging market)")
+                                    continue
 
-                            lines = ["⚡ *Technical Highlights (5-Min Scan)*\n"]
-                            if enriched_bulls:
-                                lines.append("🟢 *Top Bullish Setups:*")
-                                for r in enriched_bulls:
-                                    pick_str = ""
-                                    if "picks" in r:
-                                        p = r["picks"][0]
-                                        pick_str = f" → *{p['type']} {p['strike']}* (₹{p['ltp']})"
-                                    lines.append(f"• {r['symbol']} | Score: *{r['score']}*{pick_str}")
-                            
-                            if enriched_bears:
-                                lines.append("\n🔴 *Top Bearish Setups:*")
-                                for r in enriched_bears:
-                                    pick_str = ""
-                                    if "picks" in r:
-                                        p = r["picks"][0]
-                                        pick_str = f" → *{p['type']} {p['strike']}* (₹{p['ltp']})"
-                                    lines.append(f"• {r['symbol']} | Score: *{r['score']}*{pick_str}")
-                            
-                            lines.append(f"\n_Next update in 5 minutes_")
-                            await _send_telegram_fn("\n".join(lines))
+                                if direction_strength != "STRONG":
+                                    log.info(f"Skipping {r['symbol']} auto-trade: Direction strength is {direction_strength} (need STRONG)")
+                                    continue
 
-                        # ── Technical Auto-Trading Trigger (Score >= 70) ──
-                        # Process all 15m records, not just the top 5
-                        # Enhanced with ADX and direction strength filters for higher accuracy
-                        tech_70_plus = [r for r in rel if r["score"] >= 70]
-                        if tech_70_plus:
-                            log.info(f"Checking auto-trade for {len(tech_70_plus)} symbols with score >= 70")
-                            for r in tech_70_plus:
-                                try:
-                                    # Apply quality filters for auto-trading:
-                                    # 1. ADX >= 25 (trending market only)
-                                    # 2. Direction strength must be STRONG (not WEAK)
-                                    adx_val = r.get("adx", 0)
-                                    direction_strength = r.get("direction_strength", "UNKNOWN")
-
-                                    if adx_val < 25:
-                                        log.info(f"Skipping {r['symbol']} auto-trade: ADX {adx_val:.1f} < 25 (ranging market)")
-                                        continue
-
-                                    if direction_strength != "STRONG":
-                                        log.info(f"Skipping {r['symbol']} auto-trade: Direction strength is {direction_strength} (need STRONG)")
-                                        continue
-
-                                    # Always get fresh full stats for trade execution
-                                    if _scan_symbol_fn:
-                                        full = await _scan_symbol_fn(r["symbol"])
-                                        if full and "top_picks" in full:
-                                            # Find pick matching direction
-                                            target_type = "CE" if r["direction"] == "BULLISH" else "PE"
-                                            picks = [p for p in full["top_picks"] if p["type"] == target_type]
-                                            if picks:
-                                                p = picks[0]
-                                                db.add_trade(
-                                                    symbol=r["symbol"],
-                                                    opt_type=p["type"],
-                                                    strike=p["strike"],
-                                                    entry_price=p["ltp"],
-                                                    reason=f"Auto: Technical Score {r['score']}% ({r['direction']}/{direction_strength}, ADX {adx_val:.0f})",
-                                                    entry_score=r["score"]
-                                                )
+                                # Always get fresh full stats for trade execution
+                                if _scan_symbol_fn:
+                                    full = await _scan_symbol_fn(r["symbol"])
+                                    if full and "top_picks" in full:
+                                        # Find pick matching direction
+                                        target_type = "CE" if r["direction"] == "BULLISH" else "PE"
+                                        picks = [p for p in full["top_picks"] if p["type"] == target_type]
+                                        if picks:
+                                            p = picks[0]
+                                            created = db.add_trade(
+                                                symbol=r["symbol"],
+                                                opt_type=p["type"],
+                                                strike=p["strike"],
+                                                entry_price=p["ltp"],
+                                                reason=f"Auto: Technical Score {r['score']}% ({r['direction']}/{direction_strength}, ADX {adx_val:.0f})",
+                                                entry_score=r["score"]
+                                            )
+                                            if created:
                                                 log.info(f"✓ Auto-trade executed: {r['symbol']} {target_type} (Score {r['score']}%, {direction_strength}, ADX {adx_val:.0f})")
-                                except Exception as te:
-                                    log.error(f"Auto-trade trigger failed for {r['symbol']}: {te}")
+                                                if _send_telegram_fn:
+                                                    uid = f"technical-entry-{r['symbol']}-{p['type']}-{p['strike']}-{date.today().isoformat()}"
+                                                    if not db.is_notified(uid):
+                                                        db.mark_notified(uid)
+                                                        await _send_telegram_fn(
+                                                            "\n".join([
+                                                                f"🎯 *Good Entry Found*: *{r['symbol']}*",
+                                                                f"Direction: *{r['direction']}* ({direction_strength})",
+                                                                f"Technical Score: *{r['score']}* | Confidence: *{round(r.get('confidence', 0) * 100, 1)}%*",
+                                                                f"Best Pick: *{p['strike']} {p['type']}* @ ₹{round(p['ltp'], 2)}",
+                                                                f"ADX: *{round(adx_val, 1)}*",
+                                                            ])
+                                                        )
+                            except Exception as te:
+                                log.error(f"Auto-trade trigger failed for {r['symbol']}: {te}")
 
                 else:
                     log.warning("No technical score records generated.")
@@ -755,8 +715,7 @@ async def start_all():
     # asyncio.create_task(accuracy_sampler_loop())
     # asyncio.create_task(accuracy_price_updater_loop())
     asyncio.create_task(technical_snapshot_loop())
-    asyncio.create_task(technical_report_loop())
+    # Previous periodic technical Telegram report disabled in favor of good-entry alerts only.
+    # asyncio.create_task(technical_report_loop())
     asyncio.create_task(ml_retrain_loop())
     log.info("Scheduler started (scanner/trade loops disabled).")
-
-
