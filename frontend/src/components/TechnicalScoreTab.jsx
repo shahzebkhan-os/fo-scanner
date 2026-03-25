@@ -209,6 +209,23 @@ function getDivergenceEmoji(typeOrSignal) {
   return "⚡";
 }
 
+function nextIstTimeLabel(stepMinutes = 5) {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const hhPart = Number(parts.find((p) => p.type === "hour")?.value || 0);
+  const mmPart = Number(parts.find((p) => p.type === "minute")?.value || 0);
+  const totalMinutes = hhPart * 60 + mmPart;
+  const nextMinutes = Math.ceil((totalMinutes + 1) / stepMinutes) * stepMinutes;
+  const hh = String(Math.floor(nextMinutes / 60) % 24).padStart(2, "0");
+  const mm = String(nextMinutes % 60).padStart(2, "0");
+  return `${hh}:${mm} IST`;
+}
+
 function deriveTargetStopFromIndicators(ltp, technicalScore) {
   const price = Number(ltp);
   if (!Number.isFinite(price) || price <= 0 || !technicalScore) {
@@ -253,15 +270,15 @@ function getBestEntryWindow(technicalScore) {
   const rsi = Number(inds.rsi?.value || 50);
   const confidence = Number(technicalScore.confidence || 0);
 
-  if (technicalScore.direction === "NEUTRAL") return "Wait • No edge";
+  if (technicalScore.direction === "NEUTRAL") return `Wait till ${nextIstTimeLabel(15)} • No edge`;
   if (adx >= STRONG_TREND_ADX_THRESHOLD && technicalScore.direction_strength === "STRONG" && confidence >= 0.75) return "Now • Momentum";
-  if (adx < 20) return "Wait • 15m breakout";
+  if (adx < 20) return `Wait till ${nextIstTimeLabel(15)} • 15m breakout`;
 
   const overExtendedBull = technicalScore.direction === "BULLISH" && rsi >= OVEREXTENDED_RSI_BULL;
   const overExtendedBear = technicalScore.direction === "BEARISH" && rsi <= OVEREXTENDED_RSI_BEAR;
-  if (overExtendedBull || overExtendedBear) return "Wait • Pullback";
+  if (overExtendedBull || overExtendedBear) return `Wait till ${nextIstTimeLabel(5)} • Pullback`;
 
-  return "Staggered entry";
+  return `Wait till ${nextIstTimeLabel(10)} • Staggered`;
 }
 
 // ── Score Gauge ──────────────────────────────────────────────────────────────
@@ -462,13 +479,16 @@ function TimeframeConsensus({ consensus, theme }) {
   const strength = consensus.consensus_strength;
   const majorityDir = consensus.majority_direction;
 
-  const bgColor = allAgree
+  const bearishMajority = majorityDir === "BEARISH";
+  const bgColor = bearishMajority
+    ? "rgba(239,68,68,0.12)"
+    : allAgree
     ? "rgba(34,197,94,0.1)"
     : strength >= 0.66
     ? "rgba(251,146,60,0.1)"
     : "rgba(239,68,68,0.1)";
 
-  const borderColor = allAgree ? "#22c55e" : strength >= 0.66 ? "#f59e0b" : "#ef4444";
+  const borderColor = bearishMajority ? "#ef4444" : allAgree ? "#22c55e" : strength >= 0.66 ? "#f59e0b" : "#ef4444";
   const icon = allAgree ? "✓✓✓" : strength >= 0.66 ? "⚠" : "✗";
   const signalColor = majorityDir === "BULLISH" ? "#22c55e" : majorityDir === "BEARISH" ? "#ef4444" : "#94a3b8";
 
@@ -838,6 +858,8 @@ export default function TechnicalScoreTab({ theme, scanData }) {
   const [sortConfig, setSortConfig] = useState({ key: "blended", dir: "desc" });
   const [localScanMap, setLocalScanMap] = useState(null);
   const [showScanInfo, setShowScanInfo] = useState(false);
+  const [tablePage, setTablePage] = useState(1);
+  const pageSize = 10;
 
   const [accuracySummary, setAccuracySummary] = useState(null);
   const scanMap = useMemo(() => {
@@ -955,8 +977,13 @@ export default function TechnicalScoreTab({ theme, scanData }) {
     await scanPromise;
     
     setBatchResults(results);
+    setTablePage(prev => {
+      const pages = Math.max(1, Math.ceil(results.length / pageSize));
+      if (prev >= pages) return 1; // intentional wrap-around auto paging
+      return prev + 1;
+    });
     setBatchLoading(false);
-  }, [batchLoading]);
+  }, [batchLoading, pageSize]);
 
   // Auto-refresh every 5 minutes
   useEffect(() => {
@@ -1040,6 +1067,270 @@ export default function TechnicalScoreTab({ theme, scanData }) {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  const renderMarketScanCard = () => (
+    <Card theme={theme} style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12, fontWeight: 700 }}>⚡ Market Scan Table</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            onClick={() => setShowScanInfo(v => !v)}
+            title="What is this scan?"
+            style={{
+              width: 26, height: 26, borderRadius: "50%",
+              border: `1px solid ${theme.border}`, background: theme.bg, color: theme.text,
+              fontWeight: 800, cursor: "pointer"
+            }}
+          >
+            i
+          </button>
+          <button
+            onClick={loadAll}
+            disabled={batchLoading}
+            style={{
+              padding: "8px 16px", borderRadius: 6, background: theme.accent, color: "#fff",
+              border: "none", cursor: "pointer", fontWeight: 700
+            }}
+          >
+            {batchLoading ? `⚡ Scanning (${batchProgress}/${POPULAR_SYMBOLS.length})...` : "⚡ Start Market Scan"}
+          </button>
+        </div>
+      </div>
+
+      {showScanInfo && (
+        <div style={{
+          marginBottom: 12, padding: "10px 12px", borderRadius: 6,
+          background: "rgba(99,102,241,0.08)", border: `1px solid ${theme.border}`, fontSize: 11, lineHeight: 1.5
+        }}>
+          This table quickly scans popular symbols and ranks them by combined technical + options context.
+          Use <b>View</b> to open full indicator analysis for any row.
+        </div>
+      )}
+
+      {batchResults.length > 0 && (() => {
+        const sorted = [...batchResults].filter(b => b.data?.technical_score?.score != null).sort((a, b) => {
+          const aTech = a.data.technical_score;
+          const aExist = a.data.existing_score;
+          const aBlended = Math.round((aTech.score + (aExist?.score != null ? aExist.score : 0)) / (aExist?.score != null ? 2 : 1));
+          
+          const bTech = b.data.technical_score;
+          const bExist = b.data.existing_score;
+          const bBlended = Math.round((bTech.score + (bExist?.score != null ? bExist.score : 0)) / (bExist?.score != null ? 2 : 1));
+          const aScanRow = scanMap[a.symbol];
+          const bScanRow = scanMap[b.symbol];
+          const aLtp = Number(aScanRow?.ltp || 0);
+          const bLtp = Number(bScanRow?.ltp || 0);
+          const aBestEntry = getBestEntryWindow(aTech);
+          const bBestEntry = getBestEntryWindow(bTech);
+          const aTargetStop = deriveTargetStopFromIndicators(aLtp, aTech);
+          const bTargetStop = deriveTargetStopFromIndicators(bLtp, bTech);
+          const aTarget = Number(aTargetStop.target || 0);
+          const bTarget = Number(bTargetStop.target || 0);
+          const aStop = Number(aTargetStop.stopLoss || 0);
+          const bStop = Number(bTargetStop.stopLoss || 0);
+          const aIsTrending = Number(aTech.indicators?.adx?.adx || 0) >= 25;
+          const bIsTrending = Number(bTech.indicators?.adx?.adx || 0) >= 25;
+          const aSignalStrength = Number(aTech.directional_edge || 0);
+          const bSignalStrength = Number(bTech.directional_edge || 0);
+          const aIsBest = aTech.score >= 70 && (aTech.confidence || 0) >= 0.7;
+          const bIsBest = bTech.score >= 70 && (bTech.confidence || 0) >= 0.7;
+          
+          let valA = 0, valB = 0;
+          if (sortConfig.key === "symbol") { valA = a.symbol; valB = b.symbol; }
+          else if (sortConfig.key === "blended") { valA = aBlended; valB = bBlended; }
+          else if (sortConfig.key === "technical") { valA = aTech.score; valB = bTech.score; }
+          else if (sortConfig.key === "confidence") { valA = aTech.confidence; valB = bTech.confidence; }
+          else if (sortConfig.key === "direction") { valA = aTech.direction; valB = bTech.direction; }
+          else if (sortConfig.key === "ltp") { valA = aLtp; valB = bLtp; }
+          else if (sortConfig.key === "target") { valA = aTarget; valB = bTarget; }
+          else if (sortConfig.key === "stopLoss") { valA = aStop; valB = bStop; }
+          else if (sortConfig.key === "bestEntry") { valA = aBestEntry; valB = bBestEntry; }
+          else if (sortConfig.key === "regime") { valA = aIsTrending ? "TREND" : "RANGE"; valB = bIsTrending ? "TREND" : "RANGE"; }
+          else if (sortConfig.key === "signals") { valA = aSignalStrength; valB = bSignalStrength; }
+          else if (sortConfig.key === "bestPick") { valA = aIsBest ? 1 : 0; valB = bIsBest ? 1 : 0; }
+          
+          if (valA < valB) return sortConfig.dir === "asc" ? -1 : 1;
+          if (valA > valB) return sortConfig.dir === "asc" ? 1 : -1;
+          return 0;
+        });
+
+        const handleSort = (k) => {
+          if (sortConfig.key === k) setSortConfig({ key: k, dir: sortConfig.dir === "asc" ? "desc" : "asc" });
+          else setSortConfig({ key: k, dir: "desc" });
+        };
+        const SortIcon = ({ k }) => <span style={{ opacity: sortConfig.key === k ? 1 : 0.2, marginLeft: 4 }}>{sortConfig.key === k && sortConfig.dir === "asc" ? "↑" : "↓"}</span>;
+
+        const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+        const safePage = Math.min(tablePage, totalPages);
+        const pageRows = sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+        return (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8, marginBottom: 10 }}>
+              <div style={{ background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.22)", borderRadius: 6, padding: "8px 10px" }}>
+                <div style={{ fontSize: 10, color: theme.muted }}>Bullish</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: "#22c55e" }}>{batchSummary.bullish}</div>
+              </div>
+              <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.22)", borderRadius: 6, padding: "8px 10px" }}>
+                <div style={{ fontSize: 10, color: theme.muted }}>Bearish</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: "#ef4444" }}>{batchSummary.bearish}</div>
+              </div>
+              <div style={{ background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.3)", borderRadius: 6, padding: "8px 10px" }}>
+                <div style={{ fontSize: 10, color: theme.muted }}>Best Picks</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: "#eab308" }}>{sorted.filter(r => r.data?.technical_score?.score >= 70 && (r.data?.technical_score?.confidence || 0) >= 0.7).length}</div>
+              </div>
+            </div>
+            <div style={{ marginBottom: 8, fontSize: 10, color: theme.muted }}>
+              Signals: 🎯 Bullish Supertrend, ⭕ Bearish Supertrend, 🟢 Above Cloud, 🔴 Below Cloud, ⚡ Bullish Divergence, ⛈️ Bearish Divergence
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, border: `1px solid ${theme.border}`, borderRadius: 8 }}>
+                <thead>
+                  <tr style={{ background: theme.bg, textAlign: "left" }}>
+                    <th title="Ticker symbol of the stock being analyzed" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("symbol")}>Symbol <SortIcon k="symbol" /></th>
+                    <th title="High quality row candidate (score >=70 and confidence >=70%)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("bestPick")}>Best Pick <SortIcon k="bestPick" /></th>
+                    <th title="A weighted combination of the Option Score and the True Composite Technical Score" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("blended")}>Blended <SortIcon k="blended" /></th>
+                    <th title="True Composite Technical Score (Avg. of 1m, 2m, 5m, 10m, and 15m intervals)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("technical")}>Technical <SortIcon k="technical" /></th>
+                    <th title="Overall Technical Direction based purely on indicators (Price Action / Momentum)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("direction")}>Direction <SortIcon k="direction" /></th>
+                    <th title="Current stock LTP" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("ltp")}>LTP <SortIcon k="ltp" /></th>
+                    <th title="Dynamic target derived from Supertrend/volatility and trend regime" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("target")}>Target <SortIcon k="target" /></th>
+                    <th title="Dynamic stop-loss derived from Supertrend/volatility and trend regime" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("stopLoss")}>Stop Loss <SortIcon k="stopLoss" /></th>
+                    <th title="Best timing to enter based on trend strength, ADX, confidence, and momentum state" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("bestEntry")}>Best Entry <SortIcon k="bestEntry" /></th>
+                    <th title="Underlying Technical Triggers: 🎯/⭕ Supertrend, 🟢/🔴 Ichimoku, ⚡/⛈️ Divergence" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("signals")}>Signals <SortIcon k="signals" /></th>
+                    <th title="Market Regime: TREND is directional movement (ADX > 25), RANGE is choppy movement (ADX < 25)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("regime")}>Regime <SortIcon k="regime" /></th>
+                    <th title="Probability of the setup succeeding computed from indicator confluence" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("confidence")}>Confidence <SortIcon k="confidence" /></th>
+                    <th title="Trade options and detailed symbol view" style={{ padding: "10px 8px" }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageRows.map((b, idx) => {
+                     const bTech = b.data.technical_score;
+                     const bExist = b.data.existing_score;
+                     const bHasExist = bExist?.score != null;
+                     const bBlended = Math.round((bTech.score + (bHasExist ? bExist.score : 0)) / (bHasExist ? 2 : 1));
+                     
+                     const scanRow = scanMap[b.symbol];
+                     const ltp = Number(scanRow?.ltp || 0);
+                     const hasLtp = Number.isFinite(ltp) && ltp > 0;
+                     const { target, stopLoss, targetPct, stopPct } = deriveTargetStopFromIndicators(ltp, bTech);
+                     const bestEntry = getBestEntryWindow(bTech);
+
+                     const inds = bTech.indicators || {};
+                     const st = inds.supertrend?.direction || inds.supertrend?.signal;
+                     const ichi = inds.ichimoku?.position || inds.ichimoku?.signal;
+                     const div = inds.divergence?.type || inds.divergence?.signal;
+                     const isTrending = inds.adx?.adx >= 25;
+                     const isBest = bTech.score >= 70 && bTech.confidence >= 0.7;
+
+                    return (
+                      <tr key={b.symbol} style={{ 
+                         borderBottom: `1px solid ${theme.border}`, 
+                          background: isBest ? "rgba(234,179,8,0.05)" : idx % 2 ? "rgba(148,163,184,0.04)" : "transparent",
+                         transition: "background 0.2s" 
+                       }}>
+                        <td style={{ padding: "8px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <b>{b.symbol}</b>
+                            {isBest && <span title="Best Trend Detected" style={{ color: "#eab308" }}>👑</span>}
+                          </div>
+                        </td>
+                        <td style={{ padding: "8px", fontSize: 15 }}>{isBest ? "⭐" : "—"}</td>
+                        <td style={{ padding: "8px" }}>
+                          <span style={{ 
+                            fontWeight: 800, 
+                            color: isBest ? "#eab308" : signalColor(bBlended > 50 ? "BULLISH" : "BEARISH") 
+                          }}>{bBlended}</span>
+                        </td>
+                        <td style={{ padding: "8px", opacity: 0.8 }}>{bTech.score}</td>
+                          <td style={{ padding: "8px" }}>
+                            <span style={{ 
+                              color: signalColor(bTech.direction), fontWeight: 700, fontSize: 10,
+                              background: signalBg(bTech.direction), padding: "2px 6px", borderRadius: 4
+                            }}>
+                              {bTech.direction}
+                            </span>
+                          </td>
+                          <td style={{ padding: "8px" }}>{hasLtp ? `₹${fmt(ltp, 2)}` : "—"}</td>
+                          <td style={{ padding: "8px", color: "#22c55e", fontWeight: 700 }} title={target ? `Target ${fmt(targetPct * 100, 1)}%` : undefined}>{target ? `₹${fmt(target, 2)}` : "—"}</td>
+                          <td style={{ padding: "8px", color: "#ef4444", fontWeight: 700 }} title={stopLoss ? `Stop ${fmt(stopPct * 100, 1)}%` : undefined}>{stopLoss ? `₹${fmt(stopLoss, 2)}` : "—"}</td>
+                          <td style={{ padding: "8px", fontSize: 10, fontWeight: 700 }}>{bestEntry}</td>
+                          <td style={{ padding: "8px" }}>
+                            <div style={{ display: "flex", gap: 6, fontSize: 14 }}>
+                              <span title="Supertrend" style={{ opacity: st ? 1 : 0.2 }}>{st === "BULLISH" ? "🎯" : st === "BEARISH" ? "⭕" : "🎯"}</span>
+                              <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{getIchimokuEmoji(ichi)}</span>
+                              <span title="Divergence" style={{ opacity: div && div !== "none" && div !== "NEUTRAL" ? 1 : 0.2 }}>{getDivergenceEmoji(div)}</span>
+                          </div>
+                        </td>
+                        <td style={{ padding: "8px" }}>
+                          <span style={{ 
+                            fontSize: 9, fontWeight: 700, color: isTrending ? "#6366f1" : theme.muted,
+                            border: `1px solid ${isTrending ? "#6366f144" : theme.border}`,
+                            padding: "1px 5px", borderRadius: 4
+                          }}>
+                            {isTrending ? "📈 TREND" : "↔️ RANGE"}
+                          </span>
+                        </td>
+                        <td style={{ padding: "8px" }}>{fmt(bTech.confidence * 100, 0)}%</td>
+                        <td style={{ padding: "8px" }}>
+                          <button 
+                            onClick={() => { analyse(b.symbol); window.scrollTo({ top: 0, behavior: 'smooth' }); }} 
+                            style={{ 
+                              padding: "4px 10px", borderRadius: 6, 
+                              border: `1px solid ${isBest ? "#eab308" : theme.border}`,
+                              background: isBest ? "#eab308" : theme.bg, 
+                              color: isBest ? "#fff" : theme.text, 
+                              fontSize: 10, fontWeight: 700, cursor: "pointer",
+                              transition: "all 0.2s"
+                            }}
+                          >
+                            {isBest ? "★ Analyse" : "View"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, gap: 8, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 10, color: theme.muted }}>
+                Page {safePage} / {totalPages} • Auto-pages after each 5-min refresh
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  onClick={() => setTablePage(p => Math.max(1, p - 1))}
+                  disabled={safePage <= 1}
+                  style={{
+                    padding: "4px 8px", fontSize: 10, borderRadius: 5, border: `1px solid ${theme.border}`,
+                    background: safePage <= 1 ? theme.border : theme.bg, color: theme.text, cursor: safePage <= 1 ? "not-allowed" : "pointer"
+                  }}
+                >
+                  ◀ Prev
+                </button>
+                <button
+                  onClick={() => setTablePage(p => Math.min(totalPages, p + 1))}
+                  disabled={safePage >= totalPages}
+                  style={{
+                    padding: "4px 8px", fontSize: 10, borderRadius: 5, border: `1px solid ${theme.border}`,
+                    background: safePage >= totalPages ? theme.border : theme.bg, color: theme.text, cursor: safePage >= totalPages ? "not-allowed" : "pointer"
+                  }}
+                >
+                  Next ▶
+                </button>
+              </div>
+            </div>
+            <div style={{ marginTop: 10, fontSize: 10, color: theme.muted, lineHeight: 1.6 }}>
+              <div><b>Blended:</b> average of Technical score and existing scanner score (when available).</div>
+              <div><b>Technical:</b> true composite indicator score computed from multi-timeframe technicals.</div>
+              <div><b>Confidence:</b> indicator confluence confidence from the technical model.</div>
+              <div><b>Target / Stop Loss:</b> adaptive levels from Supertrend and volatility regime (not fixed percentages).</div>
+              <div><b>Best Entry:</b> timing cue from ADX trend strength, direction quality, confidence, and RSI extension.</div>
+            </div>
+          </>
+        );
+      })()}
+    </Card>
+  );
 
   return (
     <div style={{ animation: "fadeIn 0.3s ease" }}>
@@ -1227,211 +1518,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
             </Card>
           )}
 
-          {/* Market Scan (rendered below Multi-Timeframe Trend) */}
-          <Card theme={theme} style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
-              <div style={{ fontSize: 12, fontWeight: 700 }}>⚡ Market Scan Table</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <button
-                  onClick={() => setShowScanInfo(v => !v)}
-                  title="What is this scan?"
-                  style={{
-                    width: 26, height: 26, borderRadius: "50%",
-                    border: `1px solid ${theme.border}`, background: theme.bg, color: theme.text,
-                    fontWeight: 800, cursor: "pointer"
-                  }}
-                >
-                  i
-                </button>
-                <button
-                  onClick={loadAll}
-                  disabled={batchLoading}
-                  style={{
-                    padding: "8px 16px", borderRadius: 6, background: theme.accent, color: "#fff",
-                    border: "none", cursor: "pointer", fontWeight: 700
-                  }}
-                >
-                  {batchLoading ? `⚡ Scanning (${batchProgress}/${POPULAR_SYMBOLS.length})...` : "⚡ Start Market Scan"}
-                </button>
-              </div>
-            </div>
-
-            {showScanInfo && (
-              <div style={{
-                marginBottom: 12, padding: "10px 12px", borderRadius: 6,
-                background: "rgba(99,102,241,0.08)", border: `1px solid ${theme.border}`, fontSize: 11, lineHeight: 1.5
-              }}>
-                This table quickly scans popular symbols and ranks them by combined technical + options context.
-                Use <b>View</b> to open full indicator analysis for any row.
-              </div>
-            )}
-
-            {batchResults.length > 0 && (() => {
-              const sorted = [...batchResults].filter(b => b.data?.technical_score?.score != null).sort((a, b) => {
-                const aTech = a.data.technical_score;
-                const aExist = a.data.existing_score;
-                const aBlended = Math.round((aTech.score + (aExist?.score != null ? aExist.score : 0)) / (aExist?.score != null ? 2 : 1));
-                
-                const bTech = b.data.technical_score;
-                const bExist = b.data.existing_score;
-                const bBlended = Math.round((bTech.score + (bExist?.score != null ? bExist.score : 0)) / (bExist?.score != null ? 2 : 1));
-                
-                let valA = 0, valB = 0;
-                if (sortConfig.key === "symbol") { valA = a.symbol; valB = b.symbol; }
-                else if (sortConfig.key === "blended") { valA = aBlended; valB = bBlended; }
-                else if (sortConfig.key === "technical") { valA = aTech.score; valB = bTech.score; }
-                else if (sortConfig.key === "confidence") { valA = aTech.confidence; valB = bTech.confidence; }
-                else if (sortConfig.key === "direction") { valA = aTech.direction; valB = bTech.direction; }
-                
-                if (valA < valB) return sortConfig.dir === "asc" ? -1 : 1;
-                if (valA > valB) return sortConfig.dir === "asc" ? 1 : -1;
-                return 0;
-              });
-
-              const handleSort = (k) => {
-                if (sortConfig.key === k) setSortConfig({ key: k, dir: sortConfig.dir === "asc" ? "desc" : "asc" });
-                else setSortConfig({ key: k, dir: "desc" });
-              };
-              const SortIcon = ({ k }) => <span style={{ opacity: sortConfig.key === k ? 1 : 0.2, marginLeft: 4 }}>{sortConfig.key === k && sortConfig.dir === "asc" ? "↑" : "↓"}</span>;
-
-              return (
-                <>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8, marginBottom: 10 }}>
-                    <div style={{ background: theme.bg, border: `1px solid ${theme.border}`, borderRadius: 6, padding: "8px 10px" }}>
-                      <div style={{ fontSize: 10, color: theme.muted }}>Scanned Symbols</div>
-                      <div style={{ fontSize: 16, fontWeight: 800 }}>{batchSummary.total}</div>
-                    </div>
-                    <div style={{ background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.22)", borderRadius: 6, padding: "8px 10px" }}>
-                      <div style={{ fontSize: 10, color: theme.muted }}>Bullish</div>
-                      <div style={{ fontSize: 16, fontWeight: 800, color: "#22c55e" }}>{batchSummary.bullish}</div>
-                    </div>
-                    <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.22)", borderRadius: 6, padding: "8px 10px" }}>
-                      <div style={{ fontSize: 10, color: theme.muted }}>Bearish</div>
-                      <div style={{ fontSize: 16, fontWeight: 800, color: "#ef4444" }}>{batchSummary.bearish}</div>
-                    </div>
-                    <div style={{ background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.3)", borderRadius: 6, padding: "8px 10px" }}>
-                      <div style={{ fontSize: 10, color: theme.muted }}>High Conviction</div>
-                      <div style={{ fontSize: 16, fontWeight: 800, color: "#eab308" }}>{batchSummary.highConviction}</div>
-                    </div>
-                  </div>
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, border: `1px solid ${theme.border}`, borderRadius: 8 }}>
-                      <thead>
-                        <tr style={{ background: theme.bg, textAlign: "left" }}>
-                          <th title="Ticker symbol of the stock being analyzed" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("symbol")}>Symbol <SortIcon k="symbol" /></th>
-                          <th title="A weighted combination of the Option Score and the True Composite Technical Score" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("blended")}>Blended <SortIcon k="blended" /></th>
-                          <th title="True Composite Technical Score (Avg. of 1m, 2m, 5m, 10m, and 15m intervals)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("technical")}>Technical <SortIcon k="technical" /></th>
-                          <th title="Overall Technical Direction based purely on indicators (Price Action / Momentum)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("direction")}>Direction <SortIcon k="direction" /></th>
-                          <th title="Current stock LTP" style={{ padding: "10px 8px" }}>LTP</th>
-                          <th title="Dynamic target derived from Supertrend/volatility and trend regime" style={{ padding: "10px 8px" }}>Target</th>
-                          <th title="Dynamic stop-loss derived from Supertrend/volatility and trend regime" style={{ padding: "10px 8px" }}>Stop Loss</th>
-                          <th title="Best timing to enter based on trend strength, ADX, confidence, and momentum state" style={{ padding: "10px 8px" }}>Best Entry</th>
-                          <th title="Underlying Technical Triggers: 🎯 Supertrend, 🟢/🔴 Ichimoku, ⚡ Divergence" style={{ padding: "10px 8px" }}>Signals</th>
-                          <th title="Market Regime: TREND is directional movement (ADX > 25), RANGE is choppy movement (ADX < 25)" style={{ padding: "10px 8px" }}>Regime</th>
-                          <th title="Probability of the setup succeeding computed from indicator confluence" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("confidence")}>Confidence <SortIcon k="confidence" /></th>
-                          <th title="Trade options and detailed symbol view" style={{ padding: "10px 8px" }}>Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {sorted.map((b, idx) => {
-                           const bTech = b.data.technical_score;
-                           const bExist = b.data.existing_score;
-                           const bHasExist = bExist?.score != null;
-                           const bBlended = Math.round((bTech.score + (bHasExist ? bExist.score : 0)) / (bHasExist ? 2 : 1));
-                           
-                           const scanRow = scanMap[b.symbol];
-                           const ltp = Number(scanRow?.ltp || 0);
-                           const hasLtp = Number.isFinite(ltp) && ltp > 0;
-                           const { target, stopLoss, targetPct, stopPct } = deriveTargetStopFromIndicators(ltp, bTech);
-                           const bestEntry = getBestEntryWindow(bTech);
-
-                           const inds = bTech.indicators || {};
-                           const st = inds.supertrend?.direction || inds.supertrend?.signal;
-                           const ichi = inds.ichimoku?.position || inds.ichimoku?.signal;
-                           const div = inds.divergence?.type || inds.divergence?.signal;
-                           const isTrending = inds.adx?.adx >= 25;
-                          const isBest = idx === 0 && bTech.score >= 70 && bTech.confidence >= 0.7;
-
-                          return (
-                            <tr key={b.symbol} style={{ 
-                               borderBottom: `1px solid ${theme.border}`, 
-                               background: isBest ? "rgba(234,179,8,0.05)" : idx % 2 ? "rgba(148,163,184,0.04)" : "transparent",
-                               transition: "background 0.2s" 
-                             }}>
-                              <td style={{ padding: "8px" }}>
-                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                  <b>{b.symbol}</b>
-                                  {isBest && <span title="Best Trend Detected" style={{ color: "#eab308" }}>👑</span>}
-                                </div>
-                              </td>
-                              <td style={{ padding: "8px" }}>
-                                <span style={{ 
-                                  fontWeight: 800, 
-                                  color: isBest ? "#eab308" : signalColor(bBlended > 50 ? "BULLISH" : "BEARISH") 
-                                }}>{bBlended}</span>
-                              </td>
-                              <td style={{ padding: "8px", opacity: 0.8 }}>{bTech.score}</td>
-                                <td style={{ padding: "8px" }}>
-                                  <span style={{ 
-                                    color: signalColor(bTech.direction), fontWeight: 700, fontSize: 10,
-                                    background: signalBg(bTech.direction), padding: "2px 6px", borderRadius: 4
-                                  }}>
-                                    {bTech.direction}
-                                  </span>
-                                </td>
-                                <td style={{ padding: "8px" }}>{hasLtp ? `₹${fmt(ltp, 2)}` : "—"}</td>
-                                <td style={{ padding: "8px", color: "#22c55e", fontWeight: 700 }} title={target ? `Target ${fmt(targetPct * 100, 1)}%` : undefined}>{target ? `₹${fmt(target, 2)}` : "—"}</td>
-                                <td style={{ padding: "8px", color: "#ef4444", fontWeight: 700 }} title={stopLoss ? `Stop ${fmt(stopPct * 100, 1)}%` : undefined}>{stopLoss ? `₹${fmt(stopLoss, 2)}` : "—"}</td>
-                                <td style={{ padding: "8px", fontSize: 10, fontWeight: 700 }}>{bestEntry}</td>
-                                <td style={{ padding: "8px" }}>
-                                  <div style={{ display: "flex", gap: 6, fontSize: 14 }}>
-                                    <span title="Supertrend" style={{ opacity: st ? 1 : 0.2 }}>{st === "BULLISH" ? "🎯" : st === "BEARISH" ? "⭕" : "🎯"}</span>
-                                    <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{getIchimokuEmoji(ichi)}</span>
-                                    <span title="Divergence" style={{ opacity: div && div !== "none" && div !== "NEUTRAL" ? 1 : 0.2 }}>{getDivergenceEmoji(div)}</span>
-                                </div>
-                              </td>
-                              <td style={{ padding: "8px" }}>
-                                <span style={{ 
-                                  fontSize: 9, fontWeight: 700, color: isTrending ? "#6366f1" : theme.muted,
-                                  border: `1px solid ${isTrending ? "#6366f144" : theme.border}`,
-                                  padding: "1px 5px", borderRadius: 4
-                                }}>
-                                  {isTrending ? "📈 TREND" : "↔️ RANGE"}
-                                </span>
-                              </td>
-                              <td style={{ padding: "8px" }}>{fmt(bTech.confidence * 100, 0)}%</td>
-                              <td style={{ padding: "8px" }}>
-                                <button 
-                                  onClick={() => { analyse(b.symbol); window.scrollTo({ top: 0, behavior: 'smooth' }); }} 
-                                  style={{ 
-                                    padding: "4px 10px", borderRadius: 6, 
-                                    border: `1px solid ${isBest ? "#eab308" : theme.border}`,
-                                    background: isBest ? "#eab308" : theme.bg, 
-                                    color: isBest ? "#fff" : theme.text, 
-                                    fontSize: 10, fontWeight: 700, cursor: "pointer",
-                                    transition: "all 0.2s"
-                                  }}
-                                >
-                                  {isBest ? "★ Analyse" : "View"}
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div style={{ marginTop: 10, fontSize: 10, color: theme.muted, lineHeight: 1.6 }}>
-                    <div><b>Blended:</b> average of Technical score and existing scanner score (when available).</div>
-                    <div><b>Technical:</b> true composite indicator score computed from multi-timeframe technicals.</div>
-                    <div><b>Confidence:</b> indicator confluence confidence from the technical model.</div>
-                    <div><b>Target / Stop Loss:</b> adaptive levels from Supertrend and volatility regime (not fixed percentages).</div>
-                    <div><b>Best Entry:</b> timing cue from ADX trend strength, direction quality, confidence, and RSI extension.</div>
-                  </div>
-                </>
-              );
-            })()}
-          </Card>
+          {!result && renderMarketScanCard()}
 
           {/* Results */}
           {result && tech && (
@@ -1530,6 +1617,8 @@ export default function TechnicalScoreTab({ theme, scanData }) {
               </div>
             </div>
           )}
+
+          {result && renderMarketScanCard()}
 
           {/* Empty state */}
           {!loading && !error && !result && (

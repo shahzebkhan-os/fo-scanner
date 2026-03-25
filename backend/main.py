@@ -138,6 +138,10 @@ def _timestamp_suffix() -> str:
     return datetime.now(IST).strftime("%Y%m%d_%H%M%S")
 
 
+def _exit_notification_uid(trade_id: int, reason_suffix: str) -> str:
+    return f"paper-exit-{trade_id}-{reason_suffix}"
+
+
 import httpx, uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -403,6 +407,19 @@ async def paper_trade_manager():
                                 current_price = trade.get("current_price") or trade.get("entry_price")
                                 db.update_trade(trade["id"], current_price,
                                               exit_flag=True, reason="Failed Price Updates (3x)")
+                                entry_price = trade.get("entry_price")
+                                pnl_pct = None
+                                if entry_price and entry_price > 0 and current_price is not None:
+                                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                                uid = _exit_notification_uid(trade["id"], "failed")
+                                if not db.is_notified(uid):
+                                    db.mark_notified(uid)
+                                    pnl_text = f"{pnl_pct:+.1f}%" if pnl_pct is not None else "N/A"
+                                    asyncio.create_task(send_telegram_alert(
+                                        f"🚪 Exit Alert: *{sym}* {trade['type']} {trade['strike']}\n"
+                                        f"Reason: Failed Price Updates (3x)\n"
+                                        f"P&L: *{pnl_text}*"
+                                    ))
                         continue
 
                     records = chain.get("records", {}).get("data", [])
@@ -447,6 +464,14 @@ async def paper_trade_manager():
                     if now.time() >= dtime(15, 15):
                         db.update_trade(trade["id"], current_price,
                                         exit_flag=True, reason="EOD Square Off")
+                        uid = _exit_notification_uid(trade["id"], "eod")
+                        if not db.is_notified(uid):
+                            db.mark_notified(uid)
+                            asyncio.create_task(send_telegram_alert(
+                                f"🚪 Exit Alert: *{sym}* {trade['type']} {trade['strike']}\n"
+                                f"Reason: EOD Square Off\n"
+                                f"P&L: *{pnl_pct:+.1f}%*"
+                            ))
                         continue
 
                     # Determine SL and TP thresholds based on option price
@@ -470,11 +495,27 @@ async def paper_trade_manager():
                     if pnl_pct <= sl_pct:
                         db.update_trade(trade["id"], current_price,
                                         exit_flag=True, reason=f"Stop Loss ({sl_pct:.0f}%)")
+                        uid = _exit_notification_uid(trade["id"], "sl")
+                        if not db.is_notified(uid):
+                            db.mark_notified(uid)
+                            asyncio.create_task(send_telegram_alert(
+                                f"🚪 Exit Alert: *{sym}* {trade['type']} {trade['strike']}\n"
+                                f"Reason: Stop Loss ({sl_pct:.0f}%)\n"
+                                f"P&L: *{pnl_pct:+.1f}%*"
+                            ))
                         continue
 
                     if pnl_pct >= tp_pct:
                         db.update_trade(trade["id"], current_price,
                                         exit_flag=True, reason=f"Take Profit (+{tp_pct:.0f}%)")
+                        uid = _exit_notification_uid(trade["id"], "tp")
+                        if not db.is_notified(uid):
+                            db.mark_notified(uid)
+                            asyncio.create_task(send_telegram_alert(
+                                f"🚪 Exit Alert: *{sym}* {trade['type']} {trade['strike']}\n"
+                                f"Reason: Take Profit (+{tp_pct:.0f}%)\n"
+                                f"P&L: *{pnl_pct:+.1f}%*"
+                            ))
                         continue
 
             await asyncio.sleep(60)
@@ -1013,11 +1054,32 @@ async def _execute_suggestions_auto_trade(scan_results: list):
 #   #9  Stock score and option score conflated at same threshold
 
 @app.get("/api/scan")
-async def scan_all(limit: int = Query(90, ge=1, le=500)):
+async def scan_all(
+    limit: int = Query(90, ge=1, le=500),
+    enable_alerts: bool = Query(True, description="Send scan-driven Telegram alerts"),
+):
     """
     Unified scan endpoint with caching and request coalescing.
     If multiple requests hit this while a scan is running, they share the result.
     """
+    # When alerts are disabled (UI polling/refresh), return cached data only to avoid
+    # triggering a new scan cycle that could emit alerts.
+    if not enable_alerts:
+        for candidate_limit in (limit, 500, 300, 200, 120, 100, 90):
+            cached_result = await cache.get(cache.cache_key("scan_result", "all", candidate_limit))
+            if cached_result:
+                return cached_result
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "_fetched_at": datetime.now(IST).isoformat(),
+            "market_status": market_status(),
+            "count": 0,
+            "data": [],
+            "stale": True,
+            "stale_count": None,
+            "message": "No cached scan available yet. Trigger a normal scan first.",
+        }
+
     # 1. Fast Cache Check
     cache_key = cache.cache_key("scan_result", "all", limit)
     cached = await cache.get(cache_key)
@@ -1027,25 +1089,26 @@ async def scan_all(limit: int = Query(90, ge=1, le=500)):
     # 2. Coalescing: Check if a scan is already running for this limit
     global _scan_inflight_tasks
     # Use a task check that's robust to type-hint confusion
-    inflight = _scan_inflight_tasks.get(limit)
+    inflight_key = limit
+    inflight = _scan_inflight_tasks.get(inflight_key)
     if not inflight or not hasattr(inflight, "done") or inflight.done():
         # Start a new scan task
-        _scan_inflight_tasks[limit] = asyncio.create_task(_do_full_scan(limit))
-        log.info(f"=== SCAN: Starting new scan task for limit={limit} ===")
+        _scan_inflight_tasks[inflight_key] = asyncio.create_task(_do_full_scan(limit, enable_alerts=enable_alerts))
+        log.info(f"=== SCAN: Starting new scan task for limit={limit}, alerts={enable_alerts} ===")
     else:
-        log.info(f"=== SCAN: Coalescing with existing inflight scan for limit={limit} ===")
+        log.info(f"=== SCAN: Coalescing with existing inflight scan for limit={limit}, alerts={enable_alerts} ===")
 
     try:
-        return await _scan_inflight_tasks[limit]
+        return await _scan_inflight_tasks[inflight_key]
     except Exception as e:
         log.error(f"Inflight scan failed: {e}")
         # If the task failed, remove it so the next request can retry
-        _scan_inflight_tasks.pop(limit, None)
+        _scan_inflight_tasks.pop(inflight_key, None)
         raise
 
 _scan_inflight_tasks = {}
 
-async def _do_full_scan(limit: int) -> dict:
+async def _do_full_scan(limit: int, enable_alerts: bool = True) -> dict:
     """The actual heavy lifting of scanning all symbols."""
     all_symbols = INDEX_SYMBOLS + FO_STOCKS
     log.info(f"=== SCAN: {len(all_symbols)} symbols (limit={limit}) ===")
@@ -1201,7 +1264,7 @@ async def _do_full_scan(limit: int) -> dict:
                 stock_score = stats.get("score", 0)
 
                 # ── Telegram alerts  (Bug 9 fixed: separate thresholds) ───────
-                if stock_score >= 70 and signal != "NEUTRAL":
+                if enable_alerts and stock_score >= 70 and signal != "NEUTRAL":
                     for pick in top_picks:
                         # Same direction guard as trade entry
                         if signal == "BULLISH" and pick["type"] != "CE":
@@ -1279,7 +1342,7 @@ async def _do_full_scan(limit: int) -> dict:
     log.info(f"=== SCAN DONE: {len(result)} stocks ===")
     
     # ── Dispatch Batched Telegram Alert CSV ─────────────────
-    if batch_alerts_csv_rows:
+    if enable_alerts and batch_alerts_csv_rows:
         headers = "Symbol,Signal,Stock_Score,Contract,Option_Score,LTP,PCR,Vol_Spike,Reasons"
         csv_content = headers + "\n" + "\n".join(batch_alerts_csv_rows)
         filename = f"high_confidence_alerts_{_timestamp_suffix()}.csv"
