@@ -906,11 +906,15 @@ export default function TechnicalScoreTab({ theme, scanData }) {
   const blendedDenominator = hasExistingScore ? 2 : 1;
   const blendedScore = tech ? Math.round((tech.score + (hasExistingScore ? existing.score : 0)) / blendedDenominator) : null;
   const batchSummary = useMemo(() => {
-    const valid = batchResults.filter((b) => b.data?.technical_score);
-    const bullish = valid.filter((b) => b.data.technical_score.direction === "BULLISH").length;
-    const bearish = valid.filter((b) => b.data.technical_score.direction === "BEARISH").length;
-    const highConviction = valid.filter((b) => b.data.technical_score.score >= 70 && (b.data.technical_score.confidence || 0) >= 0.7).length;
-    return { total: valid.length, bullish, bearish, highConviction };
+    return batchResults.reduce((acc, row) => {
+      const techScore = row.data?.technical_score;
+      if (!techScore) return acc;
+      acc.total += 1;
+      if (techScore.direction === "BULLISH") acc.bullish += 1;
+      if (techScore.direction === "BEARISH") acc.bearish += 1;
+      if (techScore.score >= 70 && (techScore.confidence || 0) >= 0.7) acc.highConviction += 1;
+      return acc;
+    }, { total: 0, bullish: 0, bearish: 0, highConviction: 0 });
   }, [batchResults]);
 
   const loadAll = useCallback(async (isAuto = false) => {
