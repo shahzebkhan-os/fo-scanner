@@ -905,6 +905,17 @@ export default function TechnicalScoreTab({ theme, scanData }) {
     : indicatorEntries;
   const blendedDenominator = hasExistingScore ? 2 : 1;
   const blendedScore = tech ? Math.round((tech.score + (hasExistingScore ? existing.score : 0)) / blendedDenominator) : null;
+  const batchSummary = useMemo(() => {
+    return batchResults.reduce((acc, row) => {
+      const techScore = row.data?.technical_score;
+      if (!techScore) return acc;
+      acc.total += 1;
+      if (techScore.direction === "BULLISH") acc.bullish += 1;
+      if (techScore.direction === "BEARISH") acc.bearish += 1;
+      if (techScore.score >= 70 && (techScore.confidence || 0) >= 0.7) acc.highConviction += 1;
+      return acc;
+    }, { total: 0, bullish: 0, bearish: 0, highConviction: 0 });
+  }, [batchResults]);
 
   const loadAll = useCallback(async (isAuto = false) => {
     if (batchLoading) return;
@@ -1043,15 +1054,17 @@ export default function TechnicalScoreTab({ theme, scanData }) {
       </div>
 
       {/* Sub-Tab Navigation */}
-      <div style={{ display: "flex", gap: 20, borderBottom: `1px solid ${theme.border}`, marginBottom: 20 }}>
+      <div style={{ display: "flex", gap: 8, borderBottom: `1px solid ${theme.border}`, marginBottom: 20, flexWrap: "wrap", paddingBottom: 10 }}>
         {["analysis", "batch", "backtest"].map(tab => (
           <div
             key={tab}
             onClick={() => setActiveTab(tab)}
             style={{
-              padding: "10px 4px", fontSize: 13, fontWeight: 700, cursor: "pointer",
-              color: activeTab === tab ? theme.accent : theme.muted,
-              borderBottom: activeTab === tab ? `3px solid ${theme.accent}` : "3px solid transparent",
+              padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer",
+              color: activeTab === tab ? "#fff" : theme.muted,
+              border: `1px solid ${activeTab === tab ? theme.accent : theme.border}`,
+              borderRadius: 999,
+              background: activeTab === tab ? theme.accent : theme.card,
               transition: "all 0.2s", textTransform: "uppercase", letterSpacing: 0.5
             }}
           >
@@ -1190,7 +1203,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
           {result && result.timeframes && (
             <Card theme={theme} style={{ padding: "16px 20px", marginBottom: 16 }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 16 }}>MULTI-TIMEFRAME TREND</div>
-              <div style={{ display: "flex", gap: 12, justifyContent: "space-around", flexWrap: "wrap", overflowX: "auto" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 12 }}>
                 {["1m", "2m", "5m", "10m", "15m"].map(tf => {
                   const d = result.timeframes[tf];
                   if (!d) return null;
@@ -1283,10 +1296,28 @@ export default function TechnicalScoreTab({ theme, scanData }) {
 
               return (
                 <>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8, marginBottom: 10 }}>
+                    <div style={{ background: theme.bg, border: `1px solid ${theme.border}`, borderRadius: 6, padding: "8px 10px" }}>
+                      <div style={{ fontSize: 10, color: theme.muted }}>Scanned Symbols</div>
+                      <div style={{ fontSize: 16, fontWeight: 800 }}>{batchSummary.total}</div>
+                    </div>
+                    <div style={{ background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.22)", borderRadius: 6, padding: "8px 10px" }}>
+                      <div style={{ fontSize: 10, color: theme.muted }}>Bullish</div>
+                      <div style={{ fontSize: 16, fontWeight: 800, color: "#22c55e" }}>{batchSummary.bullish}</div>
+                    </div>
+                    <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.22)", borderRadius: 6, padding: "8px 10px" }}>
+                      <div style={{ fontSize: 10, color: theme.muted }}>Bearish</div>
+                      <div style={{ fontSize: 16, fontWeight: 800, color: "#ef4444" }}>{batchSummary.bearish}</div>
+                    </div>
+                    <div style={{ background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.3)", borderRadius: 6, padding: "8px 10px" }}>
+                      <div style={{ fontSize: 10, color: theme.muted }}>High Conviction</div>
+                      <div style={{ fontSize: 16, fontWeight: 800, color: "#eab308" }}>{batchSummary.highConviction}</div>
+                    </div>
+                  </div>
                   <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, border: `1px solid ${theme.border}`, borderRadius: 8 }}>
                       <thead>
-                        <tr style={{ background: "rgba(0,0,0,0.06)", textAlign: "left" }}>
+                        <tr style={{ background: theme.bg, textAlign: "left" }}>
                           <th title="Ticker symbol of the stock being analyzed" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("symbol")}>Symbol <SortIcon k="symbol" /></th>
                           <th title="A weighted combination of the Option Score and the True Composite Technical Score" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("blended")}>Blended <SortIcon k="blended" /></th>
                           <th title="True Composite Technical Score (Avg. of 1m, 2m, 5m, 10m, and 15m intervals)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("technical")}>Technical <SortIcon k="technical" /></th>
@@ -1323,10 +1354,10 @@ export default function TechnicalScoreTab({ theme, scanData }) {
 
                           return (
                             <tr key={b.symbol} style={{ 
-                              borderBottom: `1px solid ${theme.border}`, 
-                              background: isBest ? "rgba(234,179,8,0.05)" : "transparent",
-                              transition: "background 0.2s" 
-                            }}>
+                               borderBottom: `1px solid ${theme.border}`, 
+                               background: isBest ? "rgba(234,179,8,0.05)" : idx % 2 ? "rgba(148,163,184,0.04)" : "transparent",
+                               transition: "background 0.2s" 
+                             }}>
                               <td style={{ padding: "8px" }}>
                                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                                   <b>{b.symbol}</b>
@@ -1434,7 +1465,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
               )}
 
               {/* Row 1: Key metrics */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 16 }}>
                 <Card theme={theme} style={{ textAlign: "center", padding: 16, display: "flex", flexDirection: "column", justifyContent: "center", background: `linear-gradient(135deg, ${signalBg(tech.direction)} 0%, transparent 100%)` }}>
                   <div style={{ fontSize: 11, fontWeight: 800, color: theme.muted, marginBottom: 8 }}>TRUE COMPOSITE (1m-15m)</div>
                   <div style={{ fontSize: 46, fontWeight: 900, color: signalColor(tech.direction), textShadow: "0px 2px 10px rgba(0,0,0,0.1)" }}>{tech.score}</div>
@@ -1460,7 +1491,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
               </div>
 
               {/* Charts row */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginBottom: 16 }}>
                 <Card theme={theme}>
                   <div style={{ fontSize: 11, color: theme.muted, marginBottom: 8, fontWeight: 600 }}>INDICATOR RADAR</div>
                   <ResponsiveContainer width="100%" height={280}>
@@ -1492,7 +1523,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
               </div>
 
               {/* Indicator details */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 }}>
                 {sortedIndicatorEntries.map(([name, subScore]) => (
                   <IndicatorCard key={name} name={name} data={tech.indicators[name]} subScore={subScore} theme={theme} />
                 ))}
