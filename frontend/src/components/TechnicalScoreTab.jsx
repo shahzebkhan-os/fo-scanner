@@ -184,8 +184,57 @@ const WEIGHT_LABELS = {
   supertrend: "9%", divergence: "10%", ichimoku: "7%",
 };
 
-const QUICK_TARGET_PCT = 0.02;
-const QUICK_STOP_LOSS_PCT = 0.01;
+const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+
+function deriveTargetStopFromIndicators(ltp, technicalScore) {
+  const price = Number(ltp);
+  if (!Number.isFinite(price) || price <= 0 || !technicalScore) {
+    return { target: null, stopLoss: null, targetPct: 0, stopPct: 0 };
+  }
+
+  const isBear = technicalScore.direction === "BEARISH";
+  const inds = technicalScore.indicators || {};
+  const supertrendValue = Number(inds.supertrend?.value);
+  const adx = Number(inds.adx?.adx || 0);
+  const bbUpper = Number(inds.bollinger?.upper);
+  const bbLower = Number(inds.bollinger?.lower);
+
+  const supertrendRiskPct = Number.isFinite(supertrendValue) && supertrendValue > 0
+    ? Math.abs(price - supertrendValue) / price
+    : 0;
+  const bollingerWidthPct = Number.isFinite(bbUpper) && Number.isFinite(bbLower)
+    ? Math.abs(bbUpper - bbLower) / price
+    : 0;
+
+  const stopPct = clamp(Math.max(supertrendRiskPct, bollingerWidthPct * 0.25, 0.0075), 0.0075, 0.03);
+  const rewardRisk = adx >= 25 ? 2 : 1.4;
+  const targetPct = clamp(stopPct * rewardRisk, 0.012, 0.06);
+
+  return {
+    target: price * (isBear ? 1 - targetPct : 1 + targetPct),
+    stopLoss: price * (isBear ? 1 + stopPct : 1 - stopPct),
+    targetPct,
+    stopPct,
+  };
+}
+
+function getBestEntryWindow(technicalScore) {
+  if (!technicalScore) return "—";
+  const inds = technicalScore.indicators || {};
+  const adx = Number(inds.adx?.adx || 0);
+  const rsi = Number(inds.rsi?.value || 50);
+  const confidence = Number(technicalScore.confidence || 0);
+
+  if (technicalScore.direction === "NEUTRAL") return "Wait • No edge";
+  if (adx >= 25 && technicalScore.direction_strength === "STRONG" && confidence >= 0.75) return "Now • Momentum";
+  if (adx < 20) return "Wait • 15m breakout";
+
+  const overExtendedBull = technicalScore.direction === "BULLISH" && rsi >= 65;
+  const overExtendedBear = technicalScore.direction === "BEARISH" && rsi <= 35;
+  if (overExtendedBull || overExtendedBear) return "Wait • Pullback";
+
+  return "Staggered entry";
+}
 
 // ── Score Gauge ──────────────────────────────────────────────────────────────
 function ScoreGauge({ score, direction, confidence, theme }) {
@@ -1098,7 +1147,46 @@ export default function TechnicalScoreTab({ theme, scanData }) {
             })}
           </div>
 
-          {/* Market Scan (moved from Market Scan tab) */}
+          {/* Loading */}
+          {loading && <Loader theme={theme} />}
+
+          {/* Error */}
+          {error && (
+            <Card theme={theme} style={{ textAlign: "center", padding: 24, color: theme.red || "#ef4444" }}>
+              <div style={{ fontSize: 20, marginBottom: 6 }}>⚠</div>
+              <div style={{ fontWeight: 600 }}>{error}</div>
+            </Card>
+          )}
+
+          {/* Multi-Timeframe UI */}
+          {result && result.timeframes && (
+            <Card theme={theme} style={{ padding: "16px 20px", marginBottom: 16 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 16 }}>MULTI-TIMEFRAME TREND</div>
+              <div style={{ display: "flex", gap: 12, justifyContent: "space-around", flexWrap: "wrap", overflowX: "auto" }}>
+                {["1m", "2m", "5m", "10m", "15m"].map(tf => {
+                  const d = result.timeframes[tf];
+                  if (!d) return null;
+                  const isSel = selectedTF === tf;
+                  return (
+                    <div key={tf} 
+                      onClick={() => setSelectedTF(tf)}
+                      style={{
+                        flex: 1, minWidth: 90, textAlign: "center", padding: "12px", 
+                        borderRadius: 8, border: `2px solid ${isSel ? theme.accent : theme.border}`,
+                        background: isSel ? "rgba(99,102,241,.05)" : theme.bg,
+                        cursor: "pointer", transition: "all 0.15s"
+                      }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: theme.muted }}>{tf} TIMEFRAME</div>
+                      <div style={{ fontSize: 22, fontWeight: 800, color: signalColor(d.direction), margin: "6px 0" }}>{d.score}</div>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: signalColor(d.direction), background: signalBg(d.direction), display: "inline-block", padding: "2px 8px", borderRadius: 12 }}>{d.direction}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          )}
+
+          {/* Market Scan (rendered below Multi-Timeframe Trend) */}
           <Card theme={theme} style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
               <div style={{ fontSize: 12, fontWeight: 700 }}>⚡ Market Scan Table</div>
@@ -1158,7 +1246,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                 if (valA > valB) return sortConfig.dir === "asc" ? 1 : -1;
                 return 0;
               });
-              
+
               const handleSort = (k) => {
                 if (sortConfig.key === k) setSortConfig({ key: k, dir: sortConfig.dir === "asc" ? "desc" : "asc" });
                 else setSortConfig({ key: k, dir: "desc" });
@@ -1176,8 +1264,9 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                           <th title="True Composite Technical Score (Avg. of 1m, 2m, 5m, 10m, and 15m intervals)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("technical")}>Technical <SortIcon k="technical" /></th>
                           <th title="Overall Technical Direction based purely on indicators (Price Action / Momentum)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("direction")}>Direction <SortIcon k="direction" /></th>
                           <th title="Current stock LTP" style={{ padding: "10px 8px" }}>LTP</th>
-                          <th title={`Quick target derived from LTP using ${QUICK_TARGET_PCT * 100}%, adjusted for signal direction`} style={{ padding: "10px 8px" }}>Target</th>
-                          <th title={`Quick stop-loss derived from LTP using ${QUICK_STOP_LOSS_PCT * 100}%, adjusted for signal direction`} style={{ padding: "10px 8px" }}>Stop Loss</th>
+                          <th title="Dynamic target derived from Supertrend/volatility and trend regime" style={{ padding: "10px 8px" }}>Target</th>
+                          <th title="Dynamic stop-loss derived from Supertrend/volatility and trend regime" style={{ padding: "10px 8px" }}>Stop Loss</th>
+                          <th title="Best timing to enter based on trend strength, ADX, confidence, and momentum state" style={{ padding: "10px 8px" }}>Best Entry</th>
                           <th title="Underlying Technical Triggers: 🎯 Supertrend, 🟢/🔴 Ichimoku, ⚡ Divergence" style={{ padding: "10px 8px" }}>Signals</th>
                           <th title="Market Regime: TREND is directional movement (ADX > 25), RANGE is choppy movement (ADX < 25)" style={{ padding: "10px 8px" }}>Regime</th>
                           <th title="Probability of the setup succeeding computed from indicator confluence" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("confidence")}>Confidence <SortIcon k="confidence" /></th>
@@ -1194,14 +1283,13 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                            const scanRow = scanMap[b.symbol];
                            const ltp = Number(scanRow?.ltp || 0);
                            const hasLtp = Number.isFinite(ltp) && ltp > 0;
-                           const isBear = bTech.direction === "BEARISH";
-                           const target = hasLtp ? ltp * (isBear ? (1 - QUICK_TARGET_PCT) : (1 + QUICK_TARGET_PCT)) : null;
-                           const stopLoss = hasLtp ? ltp * (isBear ? (1 + QUICK_STOP_LOSS_PCT) : (1 - QUICK_STOP_LOSS_PCT)) : null;
+                           const { target, stopLoss, targetPct, stopPct } = deriveTargetStopFromIndicators(ltp, bTech);
+                           const bestEntry = getBestEntryWindow(bTech);
 
                            const inds = bTech.indicators || {};
-                           const st = inds.supertrend?.signal;
-                           const ichi = inds.ichimoku?.signal;
-                           const div = inds.divergence?.signal;
+                           const st = inds.supertrend?.direction;
+                           const ichi = inds.ichimoku?.position;
+                           const div = inds.divergence?.type;
                            const isTrending = inds.adx?.adx >= 25;
                           const isBest = idx === 0 && bTech.score >= 70 && bTech.confidence >= 0.7;
 
@@ -1233,13 +1321,14 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                                   </span>
                                 </td>
                                 <td style={{ padding: "8px" }}>{hasLtp ? `₹${fmt(ltp, 2)}` : "—"}</td>
-                                <td style={{ padding: "8px", color: "#22c55e", fontWeight: 700 }}>{target ? `₹${fmt(target, 2)}` : "—"}</td>
-                                <td style={{ padding: "8px", color: "#ef4444", fontWeight: 700 }}>{stopLoss ? `₹${fmt(stopLoss, 2)}` : "—"}</td>
+                                <td style={{ padding: "8px", color: "#22c55e", fontWeight: 700 }} title={target ? `Target ${fmt(targetPct * 100, 1)}%` : undefined}>{target ? `₹${fmt(target, 2)}` : "—"}</td>
+                                <td style={{ padding: "8px", color: "#ef4444", fontWeight: 700 }} title={stopLoss ? `Stop ${fmt(stopPct * 100, 1)}%` : undefined}>{stopLoss ? `₹${fmt(stopLoss, 2)}` : "—"}</td>
+                                <td style={{ padding: "8px", fontSize: 10, fontWeight: 700 }}>{bestEntry}</td>
                                 <td style={{ padding: "8px" }}>
                                   <div style={{ display: "flex", gap: 6, fontSize: 14 }}>
                                     <span title="Supertrend" style={{ opacity: st ? 1 : 0.2 }}>{st === "BULLISH" ? "🎯" : st === "BEARISH" ? "⭕" : "🎯"}</span>
-                                    <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{ichi === "BULLISH" ? "🟢" : ichi === "BEARISH" ? "🔴" : "⚪"}</span>
-                                    <span title="Divergence" style={{ opacity: div && div !== "NEUTRAL" ? 1 : 0.2 }}>{div === "BULLISH" ? "⚡" : div === "BEARISH" ? "⛈️" : "⚡"}</span>
+                                    <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{ichi === "above_cloud" ? "🟢" : ichi === "below_cloud" ? "🔴" : "⚪"}</span>
+                                    <span title="Divergence" style={{ opacity: div && div !== "none" ? 1 : 0.2 }}>{div?.includes("bullish") ? "⚡" : div?.includes("bearish") ? "⛈️" : "⚡"}</span>
                                 </div>
                               </td>
                               <td style={{ padding: "8px" }}>
@@ -1277,51 +1366,13 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                     <div><b>Blended:</b> average of Technical score and existing scanner score (when available).</div>
                     <div><b>Technical:</b> true composite indicator score computed from multi-timeframe technicals.</div>
                     <div><b>Confidence:</b> indicator confluence confidence from the technical model.</div>
-                    <div><b>Target / Stop Loss:</b> quick reference from LTP using {QUICK_TARGET_PCT * 100}% target and {QUICK_STOP_LOSS_PCT * 100}% stop loss, applied in signal direction.</div>
+                    <div><b>Target / Stop Loss:</b> adaptive levels from Supertrend and volatility regime (not fixed percentages).</div>
+                    <div><b>Best Entry:</b> timing cue from ADX trend strength, direction quality, confidence, and RSI extension.</div>
                   </div>
                 </>
               );
             })()}
           </Card>
-
-          {/* Loading */}
-          {loading && <Loader theme={theme} />}
-
-          {/* Error */}
-          {error && (
-            <Card theme={theme} style={{ textAlign: "center", padding: 24, color: theme.red || "#ef4444" }}>
-              <div style={{ fontSize: 20, marginBottom: 6 }}>⚠</div>
-              <div style={{ fontWeight: 600 }}>{error}</div>
-            </Card>
-          )}
-
-          {/* Multi-Timeframe UI */}
-          {result && result.timeframes && (
-            <Card theme={theme} style={{ padding: "16px 20px", marginBottom: 16 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, marginBottom: 16 }}>MULTI-TIMEFRAME TREND</div>
-              <div style={{ display: "flex", gap: 12, justifyContent: "space-around", flexWrap: "wrap", overflowX: "auto" }}>
-                {["1m", "2m", "5m", "10m", "15m"].map(tf => {
-                  const d = result.timeframes[tf];
-                  if (!d) return null;
-                  const isSel = selectedTF === tf;
-                  return (
-                    <div key={tf} 
-                      onClick={() => setSelectedTF(tf)}
-                      style={{
-                        flex: 1, minWidth: 90, textAlign: "center", padding: "12px", 
-                        borderRadius: 8, border: `2px solid ${isSel ? theme.accent : theme.border}`,
-                        background: isSel ? "rgba(99,102,241,.05)" : theme.bg,
-                        cursor: "pointer", transition: "all 0.15s"
-                      }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: theme.muted }}>{tf} TIMEFRAME</div>
-                      <div style={{ fontSize: 22, fontWeight: 800, color: signalColor(d.direction), margin: "6px 0" }}>{d.score}</div>
-                      <div style={{ fontSize: 10, fontWeight: 700, color: signalColor(d.direction), background: signalBg(d.direction), display: "inline-block", padding: "2px 8px", borderRadius: 12 }}>{d.direction}</div>
-                    </div>
-                  );
-                })}
-              </div>
-            </Card>
-          )}
 
           {/* Results */}
           {result && tech && (
