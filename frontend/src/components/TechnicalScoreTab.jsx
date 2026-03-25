@@ -185,6 +185,29 @@ const WEIGHT_LABELS = {
 };
 
 const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+const STRONG_TREND_ADX_THRESHOLD = 25;
+const BB_WIDTH_STOP_FACTOR = 0.25;
+const MIN_STOP_PCT = 0.0075;
+const MAX_STOP_PCT = 0.03;
+const MIN_TARGET_PCT = 0.012;
+const MAX_TARGET_PCT = 0.06;
+const TRENDING_RR_RATIO = 2;
+const RANGING_RR_RATIO = 1.4;
+const OVEREXTENDED_RSI_BULL = 65;
+const OVEREXTENDED_RSI_BEAR = 35;
+
+function getIchimokuEmoji(positionOrSignal) {
+  if (positionOrSignal === "above_cloud" || positionOrSignal === "BULLISH") return "🟢";
+  if (positionOrSignal === "below_cloud" || positionOrSignal === "BEARISH") return "🔴";
+  return "⚪";
+}
+
+function getDivergenceEmoji(typeOrSignal) {
+  const normalized = String(typeOrSignal || "").toLowerCase();
+  if (normalized.includes("bullish")) return "⚡";
+  if (normalized.includes("bearish")) return "⛈️";
+  return "⚡";
+}
 
 function deriveTargetStopFromIndicators(ltp, technicalScore) {
   const price = Number(ltp);
@@ -193,22 +216,27 @@ function deriveTargetStopFromIndicators(ltp, technicalScore) {
   }
 
   const isBear = technicalScore.direction === "BEARISH";
+  const isBull = technicalScore.direction === "BULLISH";
   const inds = technicalScore.indicators || {};
   const supertrendValue = Number(inds.supertrend?.value);
-  const adx = Number(inds.adx?.adx || 0);
+  const adxValue = Number(inds.adx?.adx || 0);
   const bbUpper = Number(inds.bollinger?.upper);
   const bbLower = Number(inds.bollinger?.lower);
 
-  const supertrendRiskPct = Number.isFinite(supertrendValue) && supertrendValue > 0
-    ? Math.abs(price - supertrendValue) / price
-    : 0;
+  let directionalSupertrendGap = 0;
+  if (Number.isFinite(supertrendValue) && supertrendValue > 0) {
+    if (isBear) directionalSupertrendGap = (supertrendValue - price) / price;
+    else if (isBull) directionalSupertrendGap = (price - supertrendValue) / price;
+    else directionalSupertrendGap = Math.abs(price - supertrendValue) / price;
+  }
+  const supertrendRiskPct = Math.max(0, directionalSupertrendGap);
   const bollingerWidthPct = Number.isFinite(bbUpper) && Number.isFinite(bbLower)
     ? Math.abs(bbUpper - bbLower) / price
     : 0;
 
-  const stopPct = clamp(Math.max(supertrendRiskPct, bollingerWidthPct * 0.25, 0.0075), 0.0075, 0.03);
-  const rewardRisk = adx >= 25 ? 2 : 1.4;
-  const targetPct = clamp(stopPct * rewardRisk, 0.012, 0.06);
+  const stopPct = clamp(Math.max(supertrendRiskPct, bollingerWidthPct * BB_WIDTH_STOP_FACTOR, MIN_STOP_PCT), MIN_STOP_PCT, MAX_STOP_PCT);
+  const rewardRisk = adxValue >= STRONG_TREND_ADX_THRESHOLD ? TRENDING_RR_RATIO : RANGING_RR_RATIO;
+  const targetPct = clamp(stopPct * rewardRisk, MIN_TARGET_PCT, MAX_TARGET_PCT);
 
   return {
     target: price * (isBear ? 1 - targetPct : 1 + targetPct),
@@ -226,11 +254,11 @@ function getBestEntryWindow(technicalScore) {
   const confidence = Number(technicalScore.confidence || 0);
 
   if (technicalScore.direction === "NEUTRAL") return "Wait • No edge";
-  if (adx >= 25 && technicalScore.direction_strength === "STRONG" && confidence >= 0.75) return "Now • Momentum";
+  if (adx >= STRONG_TREND_ADX_THRESHOLD && technicalScore.direction_strength === "STRONG" && confidence >= 0.75) return "Now • Momentum";
   if (adx < 20) return "Wait • 15m breakout";
 
-  const overExtendedBull = technicalScore.direction === "BULLISH" && rsi >= 65;
-  const overExtendedBear = technicalScore.direction === "BEARISH" && rsi <= 35;
+  const overExtendedBull = technicalScore.direction === "BULLISH" && rsi >= OVEREXTENDED_RSI_BULL;
+  const overExtendedBear = technicalScore.direction === "BEARISH" && rsi <= OVEREXTENDED_RSI_BEAR;
   if (overExtendedBull || overExtendedBear) return "Wait • Pullback";
 
   return "Staggered entry";
@@ -1287,9 +1315,9 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                            const bestEntry = getBestEntryWindow(bTech);
 
                            const inds = bTech.indicators || {};
-                           const st = inds.supertrend?.direction;
-                           const ichi = inds.ichimoku?.position;
-                           const div = inds.divergence?.type;
+                           const st = inds.supertrend?.direction || inds.supertrend?.signal;
+                           const ichi = inds.ichimoku?.position || inds.ichimoku?.signal;
+                           const div = inds.divergence?.type || inds.divergence?.signal;
                            const isTrending = inds.adx?.adx >= 25;
                           const isBest = idx === 0 && bTech.score >= 70 && bTech.confidence >= 0.7;
 
@@ -1327,8 +1355,8 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                                 <td style={{ padding: "8px" }}>
                                   <div style={{ display: "flex", gap: 6, fontSize: 14 }}>
                                     <span title="Supertrend" style={{ opacity: st ? 1 : 0.2 }}>{st === "BULLISH" ? "🎯" : st === "BEARISH" ? "⭕" : "🎯"}</span>
-                                    <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{ichi === "above_cloud" ? "🟢" : ichi === "below_cloud" ? "🔴" : "⚪"}</span>
-                                    <span title="Divergence" style={{ opacity: div && div !== "none" ? 1 : 0.2 }}>{div?.includes("bullish") ? "⚡" : div?.includes("bearish") ? "⛈️" : "⚡"}</span>
+                                    <span title="Ichimoku" style={{ opacity: ichi ? 1 : 0.2 }}>{getIchimokuEmoji(ichi)}</span>
+                                    <span title="Divergence" style={{ opacity: div && div !== "none" && div !== "NEUTRAL" ? 1 : 0.2 }}>{getDivergenceEmoji(div)}</span>
                                 </div>
                               </td>
                               <td style={{ padding: "8px" }}>
