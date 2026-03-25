@@ -138,6 +138,10 @@ def _timestamp_suffix() -> str:
     return datetime.now(IST).strftime("%Y%m%d_%H%M%S")
 
 
+def _exit_notification_uid(trade_id: int, reason_suffix: str) -> str:
+    return f"paper-exit-{trade_id}-{reason_suffix}"
+
+
 import httpx, uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -403,14 +407,18 @@ async def paper_trade_manager():
                                 current_price = trade.get("current_price") or trade.get("entry_price")
                                 db.update_trade(trade["id"], current_price,
                                               exit_flag=True, reason="Failed Price Updates (3x)")
-                                pnl_pct = (((current_price or 0) - (trade.get("entry_price") or 0)) / (trade.get("entry_price") or 1)) * 100
-                                uid = f"paper-exit-{trade['id']}-failed"
+                                entry_price = trade.get("entry_price")
+                                pnl_pct = None
+                                if entry_price and entry_price > 0 and current_price is not None:
+                                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                                uid = _exit_notification_uid(trade["id"], "failed")
                                 if not db.is_notified(uid):
                                     db.mark_notified(uid)
+                                    pnl_text = f"{pnl_pct:+.1f}%" if pnl_pct is not None else "N/A"
                                     asyncio.create_task(send_telegram_alert(
                                         f"🚪 Exit Alert: *{sym}* {trade['type']} {trade['strike']}\n"
                                         f"Reason: Failed Price Updates (3x)\n"
-                                        f"P&L: *{pnl_pct:+.1f}%*"
+                                        f"P&L: *{pnl_text}*"
                                     ))
                         continue
 
@@ -456,7 +464,7 @@ async def paper_trade_manager():
                     if now.time() >= dtime(15, 15):
                         db.update_trade(trade["id"], current_price,
                                         exit_flag=True, reason="EOD Square Off")
-                        uid = f"paper-exit-{trade['id']}-eod"
+                        uid = _exit_notification_uid(trade["id"], "eod")
                         if not db.is_notified(uid):
                             db.mark_notified(uid)
                             asyncio.create_task(send_telegram_alert(
@@ -487,7 +495,7 @@ async def paper_trade_manager():
                     if pnl_pct <= sl_pct:
                         db.update_trade(trade["id"], current_price,
                                         exit_flag=True, reason=f"Stop Loss ({sl_pct:.0f}%)")
-                        uid = f"paper-exit-{trade['id']}-sl"
+                        uid = _exit_notification_uid(trade["id"], "sl")
                         if not db.is_notified(uid):
                             db.mark_notified(uid)
                             asyncio.create_task(send_telegram_alert(
@@ -500,7 +508,7 @@ async def paper_trade_manager():
                     if pnl_pct >= tp_pct:
                         db.update_trade(trade["id"], current_price,
                                         exit_flag=True, reason=f"Take Profit (+{tp_pct:.0f}%)")
-                        uid = f"paper-exit-{trade['id']}-tp"
+                        uid = _exit_notification_uid(trade["id"], "tp")
                         if not db.is_notified(uid):
                             db.mark_notified(uid)
                             asyncio.create_task(send_telegram_alert(
@@ -1054,8 +1062,26 @@ async def scan_all(
     Unified scan endpoint with caching and request coalescing.
     If multiple requests hit this while a scan is running, they share the result.
     """
+    # When alerts are disabled (UI polling/refresh), return cached data only to avoid
+    # triggering a new scan cycle that could emit alerts.
+    if not enable_alerts:
+        for candidate_limit in (limit, 500, 300, 200, 120, 100, 90):
+            cached_result = await cache.get(cache.cache_key("scan_result", "all", candidate_limit))
+            if cached_result:
+                return cached_result
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "_fetched_at": datetime.now(IST).isoformat(),
+            "market_status": market_status(),
+            "count": 0,
+            "data": [],
+            "stale": True,
+            "stale_count": None,
+            "message": "No cached scan available yet. Trigger a normal scan first.",
+        }
+
     # 1. Fast Cache Check
-    cache_key = cache.cache_key("scan_result", "all", limit, int(enable_alerts))
+    cache_key = cache.cache_key("scan_result", "all", limit)
     cached = await cache.get(cache_key)
     if cached:
         return cached
@@ -1063,7 +1089,7 @@ async def scan_all(
     # 2. Coalescing: Check if a scan is already running for this limit
     global _scan_inflight_tasks
     # Use a task check that's robust to type-hint confusion
-    inflight_key = (limit, bool(enable_alerts))
+    inflight_key = limit
     inflight = _scan_inflight_tasks.get(inflight_key)
     if not inflight or not hasattr(inflight, "done") or inflight.done():
         # Start a new scan task

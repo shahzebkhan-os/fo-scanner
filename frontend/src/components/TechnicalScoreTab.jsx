@@ -211,8 +211,15 @@ function getDivergenceEmoji(typeOrSignal) {
 
 function nextIstTimeLabel(stepMinutes = 5) {
   const now = new Date();
-  const istNow = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-  const totalMinutes = istNow.getHours() * 60 + istNow.getMinutes();
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const hhPart = Number(parts.find((p) => p.type === "hour")?.value || 0);
+  const mmPart = Number(parts.find((p) => p.type === "minute")?.value || 0);
+  const totalMinutes = hhPart * 60 + mmPart;
   const nextMinutes = Math.ceil((totalMinutes + 1) / stepMinutes) * stepMinutes;
   const hh = String(Math.floor(nextMinutes / 60) % 24).padStart(2, "0");
   const mm = String(nextMinutes % 60).padStart(2, "0");
@@ -941,7 +948,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
     const results = [];
     
     // Fetch latest scan data in parallel with technical fetches
-    const scanPromise = apiFetch("/api/scan?limit=500&enable_alerts=false")
+    const scanPromise = apiFetch("/api/scan?limit=500")
       .then((scanRes) => {
         const smap = {};
         (scanRes.data || []).forEach(r => { smap[r.symbol] = r; });
@@ -972,7 +979,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
     setBatchResults(results);
     setTablePage(prev => {
       const pages = Math.max(1, Math.ceil(results.length / pageSize));
-      if (prev >= pages) return 1;
+      if (prev >= pages) return 1; // intentional wrap-around auto paging
       return prev + 1;
     });
     setBatchLoading(false);

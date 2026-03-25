@@ -13,7 +13,7 @@ Tasks:
 import asyncio
 import logging
 import os
-from datetime import datetime, time as dtime, date
+from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
 from . import db
@@ -565,7 +565,7 @@ async def technical_snapshot_loop():
                                             if created:
                                                 log.info(f"✓ Auto-trade executed: {r['symbol']} {target_type} (Score {r['score']}%, {direction_strength}, ADX {adx_val:.0f})")
                                                 if _send_telegram_fn:
-                                                    uid = f"technical-entry-{r['symbol']}-{p['type']}-{p['strike']}-{date.today().isoformat()}"
+                                                    uid = f"technical-entry-{r['symbol']}-{p['type']}-{p['strike']}-{r['score']}-{datetime.now(IST).date().isoformat()}"
                                                     if not db.is_notified(uid):
                                                         db.mark_notified(uid)
                                                         await _send_telegram_fn(
