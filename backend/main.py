@@ -1013,7 +1013,7 @@ async def _execute_suggestions_auto_trade(scan_results: list):
 #   #9  Stock score and option score conflated at same threshold
 
 @app.get("/api/scan")
-async def scan_all(limit: int = Query(90, ge=1, le=200)):
+async def scan_all(limit: int = Query(90, ge=1, le=500)):
     """
     Unified scan endpoint with caching and request coalescing.
     If multiple requests hit this while a scan is running, they share the result.
@@ -1324,7 +1324,7 @@ async def _do_full_scan(limit: int) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/scan-stream")
-async def scan_stream(limit: int = Query(90, ge=1, le=200)):
+async def scan_stream(limit: int = Query(90, ge=1, le=500)):
     """
     Server-Sent Events endpoint that streams scan results one stock at a time.
     Each result is sent as an SSE 'result' event as soon as the symbol is processed.
@@ -2785,6 +2785,8 @@ async def score_technical_endpoint(symbol: str):
 
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
 
     # ── Lightweight data-quality watchdog ─────────────────────────────────────
     data_quality = {"missing_pct": 0.0, "stale_minutes": 0.0, "ltp_fallback_used": False, "low_liquidity": False}
@@ -3275,9 +3277,9 @@ async def get_technical_backtest_run_details(run_id: int):
 
 
 @app.get("/api/technical-backtest/accuracy-summary")
-    async def get_technical_accuracy_summary():
-        """
-        Get a summary of technical signal accuracy across all backtests.
+async def get_technical_accuracy_summary():
+    """
+    Get a summary of technical signal accuracy across all backtests.
 
     Returns aggregated metrics:
     - Average win rate across all runs

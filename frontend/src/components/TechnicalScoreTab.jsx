@@ -755,15 +755,18 @@ export default function TechnicalScoreTab({ theme, scanData }) {
   const [batchProgress, setBatchProgress] = useState(0);
   const [batchResults, setBatchResults] = useState([]);
   const [selectedTF, setSelectedTF] = useState("15m");
+  const [sortConfig, setSortConfig] = useState({ key: "blended", dir: "desc" });
+  const [localScanMap, setLocalScanMap] = useState(null);
 
   const [accuracySummary, setAccuracySummary] = useState(null);
   const scanMap = useMemo(() => {
+    if (localScanMap) return localScanMap;
     const map = {};
     (scanData || []).forEach((row) => {
       map[row.symbol] = row;
     });
     return map;
-  }, [scanData]);
+  }, [scanData, localScanMap]);
 
   const fetchAccuracySummary = useCallback(async () => {
     try {
@@ -830,6 +833,14 @@ export default function TechnicalScoreTab({ theme, scanData }) {
     setBatchProgress(0);
     const results = [];
     
+    // Fetch latest scan data for Top Picks & Signals
+    try {
+      const scanRes = await apiFetch("/api/scan?limit=500");
+      const smap = {};
+      (scanRes.data || []).forEach(r => smap[r.symbol] = r);
+      setLocalScanMap(smap);
+    } catch(e) { console.warn("Failed to fetch fresh scan map", e); }
+
     for (let i = 0; i < POPULAR_SYMBOLS.length; i++) {
       const sym = POPULAR_SYMBOLS[i];
       try {
@@ -1236,26 +1247,54 @@ export default function TechnicalScoreTab({ theme, scanData }) {
           </div>
 
           {batchResults.length > 0 && (() => {
-            const sorted = [...batchResults]
-              .filter(b => b.data?.technical_score?.score != null)
-              .sort((a, b) => (b.data.technical_score.score * b.data.technical_score.confidence) - (a.data.technical_score.score * a.data.technical_score.confidence));
+            const sorted = [...batchResults].filter(b => b.data?.technical_score?.score != null).sort((a, b) => {
+              const aTech = a.data.technical_score;
+              const aExist = a.data.existing_score;
+              const aBlended = Math.round((aTech.score + (aExist?.score != null ? aExist.score : 0)) / (aExist?.score != null ? 2 : 1));
+              const aRow = scanMap[a.symbol];
+              const aScanSig = aRow?.signal || aTech.direction;
+              
+              const bTech = b.data.technical_score;
+              const bExist = b.data.existing_score;
+              const bBlended = Math.round((bTech.score + (bExist?.score != null ? bExist.score : 0)) / (bExist?.score != null ? 2 : 1));
+              const bRow = scanMap[b.symbol];
+              const bScanSig = bRow?.signal || bTech.direction;
+              
+              let valA = 0, valB = 0;
+              if (sortConfig.key === "symbol") { valA = a.symbol; valB = b.symbol; }
+              else if (sortConfig.key === "blended") { valA = aBlended; valB = bBlended; }
+              else if (sortConfig.key === "technical") { valA = aTech.score; valB = bTech.score; }
+              else if (sortConfig.key === "confidence") { valA = aTech.confidence; valB = bTech.confidence; }
+              else if (sortConfig.key === "direction") { valA = aTech.direction; valB = bTech.direction; }
+              else if (sortConfig.key === "scan_sig") { valA = aScanSig; valB = bScanSig; }
+              
+              if (valA < valB) return sortConfig.dir === "asc" ? -1 : 1;
+              if (valA > valB) return sortConfig.dir === "asc" ? 1 : -1;
+              return 0;
+            });
             
+            const handleSort = (k) => {
+              if (sortConfig.key === k) setSortConfig({ key: k, dir: sortConfig.dir === "asc" ? "desc" : "asc" });
+              else setSortConfig({ key: k, dir: "desc" });
+            };
+            const SortIcon = ({ k }) => <span style={{ opacity: sortConfig.key === k ? 1 : 0.2, marginLeft: 4 }}>{sortConfig.key === k && sortConfig.dir === "asc" ? "↑" : "↓"}</span>;
+
             return (
               <Card theme={theme}>
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
                     <thead>
                       <tr style={{ background: "rgba(0,0,0,0.06)", textAlign: "left" }}>
-                        <th style={{ padding: "10px 8px" }}>Symbol</th>
-                        <th style={{ padding: "10px 8px" }}>Blended</th>
-                        <th style={{ padding: "10px 8px" }}>Technical</th>
-                        <th style={{ padding: "10px 8px" }}>Direction</th>
-                        <th style={{ padding: "10px 8px" }}>Scan Signal</th>
-                        <th style={{ padding: "10px 8px" }}>Top Pick</th>
-                        <th style={{ padding: "10px 8px" }}>Signals</th>
-                        <th style={{ padding: "10px 8px" }}>Regime</th>
-                        <th style={{ padding: "10px 8px" }}>Confidence</th>
-                        <th style={{ padding: "10px 8px" }}>Action</th>
+                        <th title="Ticker symbol of the stock being analyzed" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("symbol")}>Symbol <SortIcon k="symbol" /></th>
+                        <th title="A weighted combination of the Option Score and the True Composite Technical Score" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("blended")}>Blended <SortIcon k="blended" /></th>
+                        <th title="True Composite Technical Score (Avg. of 1m, 2m, 5m, 10m, and 15m intervals)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("technical")}>Technical <SortIcon k="technical" /></th>
+                        <th title="Overall Technical Direction based purely on indicators (Price Action / Momentum)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("direction")}>Direction <SortIcon k="direction" /></th>
+                        <th title="Overall Options Market Analysis showing the option chain bias (IV, OI, Greeks)" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("scan_sig")}>Scan Signal <SortIcon k="scan_sig" /></th>
+                        <th title="Highest probability options strike recommended for paper trading based on current signal" style={{ padding: "10px 8px" }}>Top Pick</th>
+                        <th title="Underlying Technical Triggers: 🎯 Supertrend, 🟢/🔴 Ichimoku, ⚡ Divergence" style={{ padding: "10px 8px" }}>Signals</th>
+                        <th title="Market Regime: TREND is directional movement (ADX > 25), RANGE is choppy movement (ADX < 25" style={{ padding: "10px 8px" }}>Regime</th>
+                        <th title="Probability of the setup succeeding computed from indicator confluence" style={{ padding: "10px 8px", cursor: "pointer" }} onClick={() => handleSort("confidence")}>Confidence <SortIcon k="confidence" /></th>
+                        <th title="Trade options and detailed symbol view" style={{ padding: "10px 8px" }}>Action</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1313,7 +1352,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                                 </span>
                               </td>
                               <td style={{ padding: "8px" }}>
-                                <span style={{
+                                <span title={`Options Market Consensus: ${scanSignal}`} style={{
                                   color: signalColor(scanSignal), fontWeight: 700, fontSize: 10,
                                   background: signalBg(scanSignal), padding: "2px 6px", borderRadius: 4
                                 }}>
@@ -1321,7 +1360,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                                 </span>
                               </td>
                               <td style={{ padding: "8px" }}>
-                                <div style={{
+                                <div title={`Best Strike Choice: ${topPickLabel}`} style={{
                                   display: "inline-flex",
                                   alignItems: "center",
                                   gap: 6,
