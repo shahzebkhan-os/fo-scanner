@@ -2909,7 +2909,7 @@ async def score_technical_endpoint(symbol: str):
                 if ltp_val:
                     latest_time = df.index.max() if len(df.index) else datetime.now()
                     patch_ts = latest_time + pd.Timedelta(minutes=1)
-                    # Use a robust way to add the row to avoid MultiIndex/column alignment crashes
+                # Use a robust way to add the row to avoid MultiIndex/column alignment crashes
                     new_row = pd.DataFrame([{
                         "Open": ltp_val, "High": ltp_val, "Low": ltp_val, "Close": ltp_val, "Volume": 0
                     }], index=[patch_ts])
@@ -2917,6 +2917,11 @@ async def score_technical_endpoint(symbol: str):
                     data_quality["ltp_fallback_used"] = True
             except Exception as exc:
                 log.warning(f"  ⚠️ LTP fallback failed for {symbol}: {exc}")
+
+        # Ensure Volume exists and is numeric before resampling
+        if "Volume" not in df.columns:
+            df["Volume"] = 0
+        df["Volume"] = pd.to_numeric(df["Volume"], errors='coerce').fillna(0)
 
         # 3. Resample and Compute Indicators
         # Data validation before resampling
@@ -2927,10 +2932,10 @@ async def score_technical_endpoint(symbol: str):
         def _get_first(x): return x.iloc[0] if len(x) > 0 else np.nan
         def _get_last(x): return x.iloc[-1] if len(x) > 0 else np.nan
 
-        df_2m = df.resample('2min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna()
-        df_5m = df.resample('5min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna()
-        df_10m = df.resample('10min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna()
-        df_15m = df.resample('15min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna()
+        df_2m = df.resample('2min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna(subset=['Close'])
+        df_5m = df.resample('5min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna(subset=['Close'])
+        df_10m = df.resample('10min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna(subset=['Close'])
+        df_15m = df.resample('15min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna(subset=['Close'])
 
         def _to_list(series_or_df):
             if hasattr(series_or_df, "tolist"): return series_or_df.tolist()
