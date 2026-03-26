@@ -723,11 +723,14 @@ async def _fetch_nse_market_watch(symbols: list) -> dict:
                     for item in r.json().get("data", []):
                         sym = item.get("symbol", "")
                         if sym in symbols:
-                            results[sym] = {
-                                "ltp":    item.get("lastPrice", 0),
-                                "volume": item.get("totalTradedVolume", 0),
-                                "change": item.get("pChange", 0),
-                            }
+                            try:
+                                results[sym] = {
+                                    "ltp":    float(str(item.get("lastPrice", 0)).replace(",", "")),
+                                    "volume": int(item.get("totalTradedVolume", 0)),
+                                    "change": float(item.get("pChange", 0)),
+                                }
+                            except (ValueError, TypeError):
+                                log.warning(f"  ⚠️ Could not cast NSE data for {sym}")
             except Exception as e:
                 log.warning(f"NSE FO stocks fetch error: {e}")
 
@@ -743,11 +746,14 @@ async def _fetch_nse_market_watch(symbols: list) -> dict:
                 if r.status_code == 200:
                     data = r.json()
                     meta = data.get("metadata", {})
-                    results[sym] = {
-                        "ltp":    meta.get("last", 0),
-                        "volume": 0,
-                        "change": meta.get("percChange", 0),
-                    }
+                    try:
+                        results[sym] = {
+                            "ltp":    float(str(meta.get("last", 0)).replace(",", "")),
+                            "volume": 0,
+                            "change": float(meta.get("percChange", 0)),
+                        }
+                    except (ValueError, TypeError):
+                        log.warning(f"  ⚠️ Could not cast NSE index data for {sym}")
             except Exception as e:
                 log.warning(f"NSE index {sym} fetch error: {e}")
 
@@ -2937,11 +2943,15 @@ async def score_technical_endpoint(symbol: str):
             return lst
 
         def _extract(data):
-            c = _flatten(_to_list(data.get("Close", pd.Series()).dropna()))
-            h = _flatten(_to_list(data.get("High", pd.Series()).dropna()))
-            l = _flatten(_to_list(data.get("Low", pd.Series()).dropna()))
-            v = _flatten(_to_list(data.get("Volume", pd.Series()).dropna()))
-            return c, h, l, v
+            def _get_clean_list(col_name):
+                s = data.get(col_name, pd.Series())
+                # Handle MultiIndex DataFrame if it slipped through
+                if hasattr(s, "iloc") and len(s.shape) > 1: s = s.iloc[:, 0]
+                # Cast to numeric and drop NaNs
+                s = pd.to_numeric(s, errors='coerce').dropna()
+                return _flatten(_to_list(s))
+            
+            return _get_clean_list("Close"), _get_clean_list("High"), _get_clean_list("Low"), _get_clean_list("Volume")
 
         c1, h1, l1, v1 = _extract(df)
         c2, h2, l2, v2 = _extract(df_2m)
