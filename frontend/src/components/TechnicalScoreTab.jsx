@@ -854,6 +854,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchProgress, setBatchProgress] = useState(0);
   const [batchResults, setBatchResults] = useState([]);
+  const [batchFailures, setBatchFailures] = useState([]);
   const [selectedTF, setSelectedTF] = useState("15m");
   const [sortConfig, setSortConfig] = useState({ key: "blended", dir: "desc" });
   const [localScanMap, setLocalScanMap] = useState(null);
@@ -943,7 +944,9 @@ export default function TechnicalScoreTab({ theme, scanData }) {
     
     setBatchLoading(true);
     setBatchProgress(0);
+    setBatchFailures([]);
     const results = [];
+    const failures = [];
     
     // Fetch latest scan data in parallel with technical fetches
     const scanPromise = apiFetch("/api/scan?limit=500")
@@ -961,9 +964,14 @@ export default function TechnicalScoreTab({ theme, scanData }) {
       await Promise.allSettled(chunk.map(async (sym) => {
         try {
           const data = await apiFetch(`/api/score-technical/${sym}`);
+          const hasMissingTechnicalScore = data?.technical_score?.score === null || data?.technical_score?.score === undefined;
+          if (data?.error || hasMissingTechnicalScore) {
+            failures.push({ symbol: sym, reason: data?.error || "Missing technical score value" });
+            return;
+          }
           results.push({ symbol: sym, data });
         } catch (e) {
-          console.error(`Failed to load ${sym}:`, e);
+          failures.push({ symbol: sym, reason: e?.message || "Network request failed" });
         } finally {
           processed += 1;
           setBatchProgress(processed);
@@ -975,6 +983,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
     await scanPromise;
     
     setBatchResults(results);
+    setBatchFailures(failures);
     setBatchLoading(false);
   }, [batchLoading]);
 
@@ -1097,6 +1106,16 @@ export default function TechnicalScoreTab({ theme, scanData }) {
         }}>
           This table quickly scans popular symbols and ranks them by combined technical + options context.
           Use <b>View</b> to open full indicator analysis for any row.
+        </div>
+      )}
+
+      {!batchLoading && batchFailures.length > 0 && (
+        <div style={{
+          marginBottom: 12, padding: "8px 10px", borderRadius: 6,
+          background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.35)",
+          fontSize: 11, color: theme.text
+        }}>
+          {batchFailures.length} symbol{batchFailures.length > 1 ? "s" : ""} failed during scan and were skipped.
         </div>
       )}
 
