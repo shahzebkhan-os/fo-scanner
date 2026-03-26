@@ -19,8 +19,11 @@ Required input: OHLCV price bars (at least 60 bars for all indicators to warm up
 from __future__ import annotations
 
 import math
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -215,11 +218,12 @@ def compute_technical_score(
     TechnicalScore
     """
     if not closes or len(closes) < 20:
+        log.warning(f"  ⚠️ Insufficient price data for technical score (need ≥20 bars, got {len(closes) if closes else 0})")
         return TechnicalScore(
             score=0,
             direction="NEUTRAL",
             confidence=0.0,
-            reasons=["Insufficient price data (need ≥20 bars)"],
+            reasons=[f"Insufficient price data (need ≥20 bars, got {len(closes) if closes else 0})"],
         )
 
     highs = highs if highs and len(highs) == len(closes) else closes

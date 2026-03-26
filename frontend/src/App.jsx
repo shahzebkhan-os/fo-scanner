@@ -15,6 +15,7 @@ import PaperTradingTab from "./components/PaperTradingTab";
 import TechnicalScoreTab from "./components/TechnicalScoreTab";
 import AccuracyTab from "./components/AccuracyTab";
 import UnifiedEvaluationTab from "./components/UnifiedEvaluationTab";
+import AlertTrackerTab from "./components/AlertTrackerTab";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const API = "http://localhost:8000";   // same-origin; set to http://localhost:8000 for dev
@@ -25,6 +26,7 @@ const TABS = [
   { id: "suggestions", label: "Suggestions", icon: "💡", disabled: true },
   { id: "fotrade", label: "F&O Trade", icon: "🎯", disabled: true },
   { id: "paper", label: "Paper Trade", icon: "📝" },
+  { id: "alerts", label: "Alert Tracker", icon: "🔔" },
   { id: "chain", label: "Chain", icon: "🔗" },
   { id: "greeks", label: "Greeks", icon: "Δ" },
   { id: "heatmap", label: "OI Map", icon: "🌡" },
@@ -285,6 +287,7 @@ export default function App() {
         {tab === "straddle" && <StraddleTab theme={theme} />}
         {tab === "ml" && <MLTab theme={theme} />}
         {tab === "techscore" && <TechnicalScoreTab theme={theme} scanData={scanData} />}
+        {tab === "alerts" && <AlertTrackerTab theme={theme} />}
         {tab === "accuracy" && <AccuracyTab theme={theme} />}
         {tab === "backtest" && <BacktestTab theme={theme} />}
         {tab === "settings" && <SettingsTab theme={theme} />}

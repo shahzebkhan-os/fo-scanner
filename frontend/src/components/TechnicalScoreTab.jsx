@@ -858,8 +858,6 @@ export default function TechnicalScoreTab({ theme, scanData }) {
   const [sortConfig, setSortConfig] = useState({ key: "blended", dir: "desc" });
   const [localScanMap, setLocalScanMap] = useState(null);
   const [showScanInfo, setShowScanInfo] = useState(false);
-  const [tablePage, setTablePage] = useState(1);
-  const pageSize = 10;
 
   const [accuracySummary, setAccuracySummary] = useState(null);
   const scanMap = useMemo(() => {
@@ -977,13 +975,8 @@ export default function TechnicalScoreTab({ theme, scanData }) {
     await scanPromise;
     
     setBatchResults(results);
-    setTablePage(prev => {
-      const pages = Math.max(1, Math.ceil(results.length / pageSize));
-      if (prev >= pages) return 1; // intentional wrap-around auto paging
-      return prev + 1;
-    });
     setBatchLoading(false);
-  }, [batchLoading, pageSize]);
+  }, [batchLoading]);
 
   // Auto-refresh every 5 minutes
   useEffect(() => {
@@ -1160,10 +1153,6 @@ export default function TechnicalScoreTab({ theme, scanData }) {
         };
         const SortIcon = ({ k }) => <span style={{ opacity: sortConfig.key === k ? 1 : 0.2, marginLeft: 4 }}>{sortConfig.key === k && sortConfig.dir === "asc" ? "↑" : "↓"}</span>;
 
-        const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
-        const safePage = Math.min(tablePage, totalPages);
-        const pageRows = sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
-
         return (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8, marginBottom: 10 }}>
@@ -1203,7 +1192,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {pageRows.map((b, idx) => {
+                  {sorted.map((b, idx) => {
                      const bTech = b.data.technical_score;
                      const bExist = b.data.existing_score;
                      const bHasExist = bExist?.score != null;
@@ -1291,33 +1280,6 @@ export default function TechnicalScoreTab({ theme, scanData }) {
                   })}
                 </tbody>
               </table>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, gap: 8, flexWrap: "wrap" }}>
-              <div style={{ fontSize: 10, color: theme.muted }}>
-                Page {safePage} / {totalPages} • Auto-pages after each 5-min refresh
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button
-                  onClick={() => setTablePage(p => Math.max(1, p - 1))}
-                  disabled={safePage <= 1}
-                  style={{
-                    padding: "4px 8px", fontSize: 10, borderRadius: 5, border: `1px solid ${theme.border}`,
-                    background: safePage <= 1 ? theme.border : theme.bg, color: theme.text, cursor: safePage <= 1 ? "not-allowed" : "pointer"
-                  }}
-                >
-                  ◀ Prev
-                </button>
-                <button
-                  onClick={() => setTablePage(p => Math.min(totalPages, p + 1))}
-                  disabled={safePage >= totalPages}
-                  style={{
-                    padding: "4px 8px", fontSize: 10, borderRadius: 5, border: `1px solid ${theme.border}`,
-                    background: safePage >= totalPages ? theme.border : theme.bg, color: theme.text, cursor: safePage >= totalPages ? "not-allowed" : "pointer"
-                  }}
-                >
-                  Next ▶
-                </button>
-              </div>
             </div>
             <div style={{ marginTop: 10, fontSize: 10, color: theme.muted, lineHeight: 1.6 }}>
               <div><b>Blended:</b> average of Technical score and existing scanner score (when available).</div>
@@ -1449,7 +1411,7 @@ export default function TechnicalScoreTab({ theme, scanData }) {
               } : scanData?.find(r => r.symbol === s);
               
               const sig = sData?.signal || "NEUTRAL";
-              const conf = sData?.confidence ? `${fmt(sData.confidence * 100, 0)}%` : "";
+              const conf = (sData?.confidence !== undefined && sData?.confidence !== null) ? `${fmt(sData.confidence * 100, 0)}%` : "";
               const isBull = sig === "BULLISH";
               const isBear = sig === "BEARISH";
               const btnColor = isBull ? (theme.green || "#22c55e") : isBear ? (theme.red || "#ef4444") : theme.muted;

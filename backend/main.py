@@ -180,7 +180,11 @@ async def get_http_client() -> httpx.AsyncClient:
         if _http_client is None or _http_client.is_closed:
             _http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(15.0, connect=5.0),
-                headers={"User-Agent": "FO-Scanner/4.0"}
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
             )
     return _http_client
 
@@ -191,6 +195,7 @@ async def send_telegram_alert(message: str):
     client = await get_http_client()
     try:
         await client.post(url, json=payload, timeout=5)
+        log.info(f"📤 Telegram Alert Sent: {message[:50]}...")
     except Exception as e:
         log.error(f"Telegram Alert Failed: {e}")
 
@@ -202,7 +207,9 @@ async def send_telegram_document(filename: str, content: str, caption: str = "")
     client = await get_http_client()
     try:
         r = await client.post(url, data=data, files=files, timeout=10)
-        if r.status_code != 200:
+        if r.status_code == 200:
+            log.info(f"📤 Telegram Document Sent: {filename} {caption[:30]}...")
+        else:
             log.error(f"Telegram Document Alert Failed: {r.text}")
     except Exception as e:
         log.error(f"Telegram Document Alert Failed: {e}")
@@ -677,110 +684,76 @@ async def fetch_nse_chain(symbol: str) -> dict:
 
 async def fetch_indstocks_ltp(symbols: list) -> dict:
     """
-    Fetch live LTP, volume, and % change for all symbols.
-    Primary: NSE market watch (no token needed).
-    Fallback: IndStocks API (if token is configured).
+    Fetch live LTP and volume for symbols.
+    Primary: NSE market watch API.
     """
     results = await _fetch_nse_market_watch(symbols)
     if results:
         return results
 
-    # Fallback to IndStocks
-    if INDSTOCKS_TOKEN and INDSTOCKS_TOKEN not in ("", "PASTE_YOUR_NEW_TOKEN_HERE"):
-        results = await _fetch_indstocks_ltp_v1(symbols)
-
+    # If NSE failed or returned incomplete data, we could use yfinance as a last resort
+    # but for batches (30+ symbols), it's too slow.
+    log.warning(f"  ⚠️ NSE market watch returned 0 results for {len(symbols)} symbols")
     return results
 
 
 async def _fetch_nse_market_watch(symbols: list) -> dict:
     """Fetch live quotes from NSE market watch — no auth required."""
-    # NSE market watch accepts comma-separated symbols
-    INDEX_MAP = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK", "FINNIFTY": "NIFTY FIN SERVICE"}
+    INDEX_MAP = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK", "FINNIFTY": "NIFTY FIN SERVICE", "MIDCPNIFTY": "NIFTY MIDCAP SELECT"}
     results = {}
 
     try:
-        # Use the shared HTTP client with NSE cookies pre-seeded
+        # Use headers that actually bypass Akamai/403
         client = await get_http_client()
-        # Seed NSE cookies first (re-seeding is fine, httpx handles cookie persistence if client is shared)
-        # Note: NSE usually expects a fresh landing page visit to get certain session cookies.
         try:
+            # Seed NSE cookies
             await client.get("https://www.nseindia.com", timeout=6)
-        except Exception as e:
-            log.warning(f"NSE cookie seeding failed: {e}")
+        except Exception: pass
 
-            # Fetch equity market watch (FO stocks)
-            fo_symbols = [s for s in symbols if s not in INDEX_MAP]
-            if fo_symbols:
-                try:
-                    r = await client.get(
-                        "https://www.nseindia.com/api/equity-stockIndices",
-                        params={"index": "SECURITIES IN F&O"},
-                        timeout=8,
-                    )
-                    if r.status_code == 200:
-                        for item in r.json().get("data", []):
-                            sym = item.get("symbol", "")
-                            if sym in symbols:
-                                results[sym] = {
-                                    "ltp":    item.get("lastPrice", 0),
-                                    "volume": item.get("totalTradedVolume", 0),
-                                    "change": item.get("pChange", 0),
-                                }
-                        log.info(f"NSE market watch: {len(results)} FO stock prices")
-                except Exception as e:
-                    log.warning(f"NSE FO stocks fetch error: {e}")
+        # Fetch equity market watch (FO stocks)
+        fo_symbols = [s for s in symbols if s not in INDEX_MAP]
+        if fo_symbols:
+            try:
+                r = await client.get(
+                    "https://www.nseindia.com/api/equity-stockIndices",
+                    params={"index": "SECURITIES IN F&O"},
+                    timeout=8,
+                )
+                if r.status_code == 200:
+                    for item in r.json().get("data", []):
+                        sym = item.get("symbol", "")
+                        if sym in symbols:
+                            results[sym] = {
+                                "ltp":    item.get("lastPrice", 0),
+                                "volume": item.get("totalTradedVolume", 0),
+                                "change": item.get("pChange", 0),
+                            }
+            except Exception as e:
+                log.warning(f"NSE FO stocks fetch error: {e}")
 
-            # Fetch index quotes
-            for sym, index_name in INDEX_MAP.items():
-                if sym not in symbols:
-                    continue
-                try:
-                    r = await client.get(
-                        "https://www.nseindia.com/api/equity-stockIndices",
-                        params={"index": index_name},
-                        timeout=6,
-                    )
-                    if r.status_code == 200:
-                        data = r.json()
-                        meta = data.get("metadata", {})
-                        results[sym] = {
-                            "ltp":    meta.get("last", 0),
-                            "volume": 0,
-                            "change": meta.get("percChange", 0),
-                        }
-                except Exception as e:
-                    log.warning(f"NSE index {sym} fetch error: {e}")
+        # Fetch index quotes
+        for sym, index_name in INDEX_MAP.items():
+            if sym not in symbols: continue
+            try:
+                r = await client.get(
+                    "https://www.nseindia.com/api/equity-stockIndices",
+                    params={"index": index_name},
+                    timeout=6,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    meta = data.get("metadata", {})
+                    results[sym] = {
+                        "ltp":    meta.get("last", 0),
+                        "volume": 0,
+                        "change": meta.get("percChange", 0),
+                    }
+            except Exception as e:
+                log.warning(f"NSE index {sym} fetch error: {e}")
 
     except Exception as e:
         log.warning(f"NSE market watch error: {e}")
 
-    return results
-
-
-async def _fetch_indstocks_ltp_v1(symbols: list) -> dict:
-    """Fallback: IndStocks API (kept for backwards compatibility)."""
-    headers = {"Authorization": f"Bearer {INDSTOCKS_TOKEN}"}
-    results = {}
-    async with httpx.AsyncClient(timeout=12) as client:
-        for i in range(0, len(symbols), 50):
-            batch = [f"NSE_{s}" for s in symbols[i:i+50]]
-            try:
-                r = await client.get(
-                    f"{INDSTOCKS_BASE}/market/quotes/full",
-                    params={"scrip-codes": ",".join(batch)},
-                    headers=headers,
-                )
-                r.raise_for_status()
-                for item in r.json().get("data", []):
-                    code = item.get("scripCode", "").replace("NSE_", "")
-                    results[code] = {
-                        "ltp":    item.get("lastPrice", 0),
-                        "volume": item.get("totalTradedVolume", 0),
-                        "change": item.get("pChange", 0),
-                    }
-                log.info(f"IndStocks: {len(results)} prices")
-            except Exception as e:
-                log.debug(f"IndStocks fallback error: {e}")
     return results
 
 
@@ -2809,6 +2782,23 @@ def _compute_timeframe_consensus(tf_results: dict) -> dict:
     }
 
 
+# Global cache for technical backtester to avoid re-init lock issues
+_tech_backtester = None
+
+def get_tech_backtester():
+    global _tech_backtester
+    if _tech_backtester is None:
+        from backend.technical_backtest import TechnicalBacktester
+        _tech_backtester = TechnicalBacktester()
+    return _tech_backtester
+
+
+def _normalize(wdict):
+    """Normalize a dictionary of weights to sum to 1.0."""
+    total = sum(wdict.values())
+    return {k: v / total for k, v in wdict.items()} if total else wdict
+
+
 @app.get("/api/score-technical/{symbol}")
 async def score_technical_endpoint(symbol: str):
     """Return the experimental technical-indicator score for *symbol*.
@@ -2825,227 +2815,215 @@ async def score_technical_endpoint(symbol: str):
     try:
         import yfinance as yf
         import numpy as np
+        import pandas as pd
     except ImportError:
-        raise HTTPException(status_code=500, detail="yfinance or numpy is not installed")
+        raise HTTPException(status_code=500, detail="yfinance, numpy, or pandas is not installed")
 
     # Map NSE symbols to yfinance tickers
     ticker = YFINANCE_TICKER_MAP.get(symbol, f"{symbol}.NS")
 
     try:
-        import pandas as pd
-        df = await asyncio.to_thread(
-            lambda: yf.download(ticker, period="5d", interval="1m", progress=False)
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch price data: {exc}")
-
-    if df is None or df.empty:
-        raise HTTPException(status_code=404, detail=f"No price data for {symbol}")
-
-    # Flatten columns if MultiIndex (common in newer yfinance versions for single tickers)
-    if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
-        df.columns = df.columns.get_level_values(0)
-
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index)
-    if df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
-
-    # ── Lightweight data-quality watchdog ─────────────────────────────────────
-    data_quality = {"missing_pct": 0.0, "stale_minutes": 0.0, "ltp_fallback_used": False, "low_liquidity": False}
-    if len(df.index) > 1:
-        ts_min, ts_max = df.index.min(), df.index.max()
-        expected_bars = int(((ts_max - ts_min).total_seconds() // 60) + 1)
-        data_quality["missing_pct"] = max(0.0, 1 - (len(df) / expected_bars)) if expected_bars > 0 else 0.0
-        data_quality["stale_minutes"] = float((datetime.now() - ts_max).total_seconds() / 60)
-
-    needs_ltp_patch = data_quality["stale_minutes"] > 10 or data_quality["missing_pct"] > 0.10
-    if needs_ltp_patch:
+        # 1. Fetch price data
         try:
-            ltp_map = await fetch_indstocks_ltp([symbol])
-            ltp_val = ltp_map.get(symbol, {}).get("ltp")
-            if ltp_val:
-                latest_time = df.index.max() if len(df.index) else datetime.now()
-                patch_ts = latest_time + pd.Timedelta(minutes=1)
-                df.loc[patch_ts] = {
-                    "Open": ltp_val,
-                    "High": ltp_val,
-                    "Low": ltp_val,
-                    "Close": ltp_val,
-                    "Volume": 0,
-                }
-                df = df.sort_index()
-                data_quality["ltp_fallback_used"] = True
+            df = await asyncio.to_thread(
+                lambda: yf.download(ticker, period="5d", interval="1m", progress=False)
+            )
         except Exception as exc:
-            log.warning(f"  ⚠️ LTP fallback failed for {symbol}: {exc}")
+            log.error(f"  ❌ yfinance fetch error for {symbol} ({ticker}): {exc}")
+            raise HTTPException(status_code=502, detail=f"Failed to fetch price data: {exc}")
 
-    df_2m = df.resample('2min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
-    df_5m = df.resample('5min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
-    df_10m = df.resample('10min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
-    df_15m = df.resample('15min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
+        if df is None or df.empty:
+            log.warning(f"  ⚠️ No price data returned for {symbol} ({ticker})")
+            raise HTTPException(status_code=404, detail=f"No price data for {symbol}")
 
-    # Ensure we get Series, not DataFrames (in case of duplicate columns or remaining MultiIndex)
-    def _to_list(series_or_df):
-        if hasattr(series_or_df, "tolist"):
-            return series_or_df.tolist()
-        # If it's still a DataFrame, take the first column
-        if hasattr(series_or_df, "iloc"):
-            return series_or_df.iloc[:, 0].tolist()
-        return list(series_or_df)
+        # 2. Robust MultiIndex Handling (ensure we have single-level OHLCV)
+        if isinstance(df.columns, pd.MultiIndex):
+            # If it's MultiIndex, it likely has [Price, Ticker] or [Ticker, Price]
+            # We explicitly extract the ticker's columns to get a clean single-level DF
+            if ticker in df.columns.get_level_values(1):
+                df = df.xs(ticker, axis=1, level=1)
+            elif ticker in df.columns.get_level_values(0):
+                df = df.xs(ticker, axis=1, level=0)
+            else:
+                # Fallback: Flatten if we can't find the ticker explicitly
+                if "Close" in df.columns.get_level_values(0):
+                    df.columns = df.columns.get_level_values(0)
+                else:
+                    df.columns = df.columns.get_level_values(1)
+        
+        # Final safety check for columns
+        required = ["Open", "High", "Low", "Close"]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            log.error(f"  ❌ {symbol}: Missing OHLC columns even after flattening: {missing}")
+            # Try one more fallback: if there's only 5-6 columns, just rename them
+            if len(df.columns) >= 5:
+                log.info(f"  ℹ️ Attempting column rename fallback for {symbol}")
+                # common order: Open, High, Low, Close, Adj Close, Volume
+                new_cols = list(df.columns)
+                for i, col in enumerate(new_cols):
+                    for r in required:
+                        if r.lower() in str(col).lower(): new_cols[i] = r
+                df.columns = new_cols
 
-    def _flatten(lst):
-        if lst and isinstance(lst[0], (list, tuple, np.ndarray)):
-            return [x[0] if hasattr(x, "__len__") and len(x) > 0 else x for x in lst]
-        return lst
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
 
-    def _extract(data):
-        c = _flatten(_to_list(data["Close"].dropna()))
-        h = _flatten(_to_list(data["High"].dropna()))
-        l = _flatten(_to_list(data["Low"].dropna()))
-        v = _flatten(_to_list(data["Volume"].dropna()))
-        return c, h, l, v
+        # ── Lightweight data-quality watchdog ─────────────────────────────────────
+        data_quality = {"missing_pct": 0.0, "stale_minutes": 0.0, "ltp_fallback_used": False, "low_liquidity": False}
+        if len(df.index) > 1:
+            ts_min, ts_max = df.index.min(), df.index.max()
+            expected_bars = int(((ts_max - ts_min).total_seconds() // 60) + 1)
+            data_quality["missing_pct"] = max(0.0, 1 - (len(df) / expected_bars)) if expected_bars > 0 else 0.0
 
-    c1, h1, l1, v1 = _extract(df)
-    c2, h2, l2, v2 = _extract(df_2m)
-    c5, h5, l5, v5 = _extract(df_5m)
-    c10, h10, l10, v10 = _extract(df_10m)
-    c15, h15, l15, v15 = _extract(df_15m)
+            # Market-aware staleness
+            now_ist = datetime.now(IST)
+            ref_now = datetime.now()
+            
+            is_weekend = now_ist.weekday() >= 5
+            is_after_close = now_ist.time() > dtime(15, 30)
+            is_before_open = now_ist.time() < dtime(9, 15)
 
-    res_1m = compute_technical_score(c1, h1, l1, v1)
-    res_2m = compute_technical_score(c2, h2, l2, v2)
-    res_5m = compute_technical_score(c5, h5, l5, v5)
-    res_10m = compute_technical_score(c10, h10, l10, v10)
-    res_15m = compute_technical_score(c15, h15, l15, v15)
+            if is_weekend or is_after_close or is_before_open:
+                if ts_max.date() == now_ist.date() and is_after_close:
+                    ref_now = now_ist.replace(hour=15, minute=30, second=0, microsecond=0).replace(tzinfo=None)
+                elif ts_max.date() < now_ist.date():
+                    ref_now = ts_max.replace(hour=15, minute=30, second=0, microsecond=0)
+                    if ref_now < ts_max: ref_now = ts_max
 
-    # Compute timeframe consensus
-    timeframe_consensus = _compute_timeframe_consensus({
-        "1m": res_1m.to_dict(),
-        "2m": res_2m.to_dict(),
-        "5m": res_5m.to_dict(),
-        "10m": res_10m.to_dict(),
-        "15m": res_15m.to_dict()
-    })
+            data_quality["stale_minutes"] = max(0.0, float((ref_now - ts_max).total_seconds() / 60))
 
-    # --- Compute True Composite Technical Score ---
-    # Determine session reliability (favor slower frames when liquidity is thin or data is stale)
-    recent_volumes = v1[-30:] if v1 else []
-    avg_recent_vol = sum(recent_volumes) / len(recent_volumes) if recent_volumes else 0
-    low_liquidity = avg_recent_vol < 10_000
-    data_quality["low_liquidity"] = bool(low_liquidity)
+        needs_ltp_patch = data_quality["stale_minutes"] > 10 or data_quality["missing_pct"] > 0.10
+        if needs_ltp_patch:
+            try:
+                ltp_map = await fetch_indstocks_ltp([symbol])
+                ltp_val = ltp_map.get(symbol, {}).get("ltp")
+                if ltp_val:
+                    latest_time = df.index.max() if len(df.index) else datetime.now()
+                    patch_ts = latest_time + pd.Timedelta(minutes=1)
+                    # Use a robust way to add the row to avoid MultiIndex/column alignment crashes
+                    new_row = pd.DataFrame([{
+                        "Open": ltp_val, "High": ltp_val, "Low": ltp_val, "Close": ltp_val, "Volume": 0
+                    }], index=[patch_ts])
+                    df = pd.concat([df, new_row]).sort_index()
+                    data_quality["ltp_fallback_used"] = True
+            except Exception as exc:
+                log.warning(f"  ⚠️ LTP fallback failed for {symbol}: {exc}")
 
-    base_weights = {"1m": 0.10, "2m": 0.10, "5m": 0.20, "10m": 0.25, "15m": 0.35}
-    low_liq_weights = {"1m": 0.05, "2m": 0.10, "5m": 0.15, "10m": 0.25, "15m": 0.45}
-    weights = low_liq_weights if low_liquidity else base_weights
+        # 3. Resample and Compute Indicators
+        # Data validation before resampling
+        if len(df) < 5:
+             raise ValueError(f"Insufficient data for resampling: {len(df)} bars")
 
-    # Downweight noisy short frames when data quality issues detected
-    if data_quality["missing_pct"] > 0.05 or data_quality["stale_minutes"] > 5:
-        weights = {
-            "1m": weights["1m"] * 0.5,
-            "2m": weights["2m"] * 0.75,
-            "5m": weights["5m"],
-            "10m": weights["10m"] * 1.05,
-            "15m": weights["15m"] * 1.1,
+        # Use robust lambdas for first/last to avoid pandas string mapping conflicts with NDFrame methods
+        def _get_first(x): return x.iloc[0] if len(x) > 0 else np.nan
+        def _get_last(x): return x.iloc[-1] if len(x) > 0 else np.nan
+
+        df_2m = df.resample('2min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna()
+        df_5m = df.resample('5min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna()
+        df_10m = df.resample('10min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna()
+        df_15m = df.resample('15min').agg({'Open': _get_first, 'High': 'max', 'Low': 'min', 'Close': _get_last, 'Volume': 'sum'}).dropna()
+
+        def _to_list(series_or_df):
+            if hasattr(series_or_df, "tolist"): return series_or_df.tolist()
+            if hasattr(series_or_df, "iloc"): return series_or_df.iloc[:, 0].tolist()
+            return list(series_or_df)
+
+        def _flatten(lst):
+            if lst and isinstance(lst[0], (list, tuple, np.ndarray)):
+                return [x[0] if hasattr(x, "__len__") and len(x) > 0 else x for x in lst]
+            return lst
+
+        def _extract(data):
+            c = _flatten(_to_list(data.get("Close", pd.Series()).dropna()))
+            h = _flatten(_to_list(data.get("High", pd.Series()).dropna()))
+            l = _flatten(_to_list(data.get("Low", pd.Series()).dropna()))
+            v = _flatten(_to_list(data.get("Volume", pd.Series()).dropna()))
+            return c, h, l, v
+
+        c1, h1, l1, v1 = _extract(df)
+        c2, h2, l2, v2 = _extract(df_2m)
+        c5, h5, l5, v5 = _extract(df_5m)
+        c10, h10, l10, v10 = _extract(df_10m)
+        c15, h15, l15, v15 = _extract(df_15m)
+
+        res_1m = compute_technical_score(c1, h1, l1, v1)
+        res_2m = compute_technical_score(c2, h2, l2, v2)
+        res_5m = compute_technical_score(c5, h5, l5, v5)
+        res_10m = compute_technical_score(c10, h10, l10, v10)
+        res_15m = compute_technical_score(c15, h15, l15, v15)
+
+        timeframe_consensus = _compute_timeframe_consensus({
+            "1m": res_1m.to_dict(), "2m": res_2m.to_dict(), "5m": res_5m.to_dict(),
+            "10m": res_10m.to_dict(), "15m": res_15m.to_dict()
+        })
+
+        # --- Weighted Composite Score ---
+        recent_volumes = v1[-30:] if v1 else []
+        avg_recent_vol = sum(recent_volumes) / len(recent_volumes) if recent_volumes else 0
+        low_liquidity = avg_recent_vol < 10_000
+        data_quality["low_liquidity"] = bool(low_liquidity)
+
+        base_weights = {"1m": 0.10, "2m": 0.10, "5m": 0.20, "10m": 0.25, "15m": 0.35}
+        weights = _normalize(base_weights) # helper _normalize should be defined or we use a lambda
+
+        # Simple weighted average
+        scores_weighted = (res_1m.score * weights["1m"] + res_2m.score * weights["2m"] + res_5m.score * weights["5m"] + res_10m.score * weights["10m"] + res_15m.score * weights["15m"])
+        confidences_weighted = (res_1m.confidence * weights["1m"] + res_2m.confidence * weights["2m"] + res_5m.confidence * weights["5m"] + res_10m.confidence * weights["10m"] + res_15m.confidence * weights["15m"])
+
+        # Direction consensus
+        dir_score = 0
+        for tf, res in [("1m", res_1m), ("2m", res_2m), ("5m", res_5m), ("10m", res_10m), ("15m", res_15m)]:
+            if res.direction == "BULLISH": dir_score += weights[tf]
+            elif res.direction == "BEARISH": dir_score -= weights[tf]
+        avg_direction = "BULLISH" if dir_score > 0.05 else "BEARISH" if dir_score < -0.05 else "NEUTRAL"
+
+        composite_tech = res_15m.to_dict()
+        composite_tech.update({
+            "score": round(scores_weighted, 1),
+            "direction": avg_direction,
+            "confidence": round(confidences_weighted, 3),
+            "is_composite": True
+        })
+
+        # Comparison Score
+        existing_score = None
+        if symbol in SLUG_MAP:
+            try:
+                cj = await fetch_nse_chain(symbol)
+                if cj and "records" in cj:
+                    spot_val = cj.get("records", {}).get("underlyingValue", 0)
+                    if spot_val:
+                        stats = compute_stock_score(cj, float(spot_val), symbol)
+                        existing_score = {"score": stats.get("score", 0), "signal": stats.get("signal", "NEUTRAL"), "confidence": stats.get("confidence", 0)}
+            except Exception as e:
+                log.error(f"  ❌ {symbol}: Error computing comparison score: {e}")
+
+        momentum_metrics = {"1h": 0, "1d": 0}
+        try: momentum_metrics = db.get_technical_momentum(symbol, "15m")
+        except: pass
+
+        try: recommended_thresholds = get_tech_backtester().get_recommended_thresholds()
+        except: recommended_thresholds = {"min_score": 75, "min_confidence": 0.65}
+
+        return {
+            "symbol": symbol, "technical_score": composite_tech,
+            "timeframes": {"1m": res_1m.to_dict(), "2m": res_2m.to_dict(), "5m": res_5m.to_dict(), "10m": res_10m.to_dict(), "15m": res_15m.to_dict()},
+            "timeframe_consensus": timeframe_consensus, "existing_score": existing_score,
+            "momentum": momentum_metrics, "data_quality": data_quality,
+            "recommended_thresholds": recommended_thresholds, "bars_used": len(c5),
         }
 
-    def _normalize(wdict):
-        total = sum(wdict.values())
-        return {k: v / total for k, v in wdict.items()} if total else wdict
+    except Exception as e:
+        log.error(f"  ❌ CRITICAL: score_technical_endpoint error for {symbol}: {e}", exc_info=True)
+        return {
+            "symbol": symbol,
+            "error": str(e),
+            "technical_score": {"score": 0, "direction": "NEUTRAL", "confidence": 0, "reasons": [f"Backend error: {str(e)}"]}
+        }
 
-    weights = _normalize(weights)
-
-    scores_weighted = (
-        res_1m.score * weights["1m"] +
-        res_2m.score * weights["2m"] +
-        res_5m.score * weights["5m"] +
-        res_10m.score * weights["10m"] +
-        res_15m.score * weights["15m"]
-    )
-
-    confidences_weighted = (
-        res_1m.confidence * weights["1m"] +
-        res_2m.confidence * weights["2m"] +
-        res_5m.confidence * weights["5m"] +
-        res_10m.confidence * weights["10m"] +
-        res_15m.confidence * weights["15m"]
-    )
-
-    directions = {
-        "1m": res_1m.direction,
-        "2m": res_2m.direction,
-        "5m": res_5m.direction,
-        "10m": res_10m.direction,
-        "15m": res_15m.direction,
-    }
-    dir_score = 0
-    for tf, dir_val in directions.items():
-        if dir_val == "BULLISH":
-            dir_score += weights[tf]
-        elif dir_val == "BEARISH":
-            dir_score -= weights[tf]
-    avg_direction = "BULLISH" if dir_score > 0.05 else "BEARISH" if dir_score < -0.05 else "NEUTRAL"
-
-    strength_map = {"WEAK": 1, "MODERATE": 2, "STRONG": 3}
-    strengths_weighted = (
-        strength_map.get(res_1m.direction_strength, 1) * weights["1m"] +
-        strength_map.get(res_2m.direction_strength, 1) * weights["2m"] +
-        strength_map.get(res_5m.direction_strength, 1) * weights["5m"] +
-        strength_map.get(res_10m.direction_strength, 1) * weights["10m"] +
-        strength_map.get(res_15m.direction_strength, 1) * weights["15m"]
-    )
-    avg_strength = "STRONG" if strengths_weighted >= 2.5 else "MODERATE" if strengths_weighted >= 1.5 else "WEAK"
-
-    composite_tech = res_15m.to_dict()
-    composite_tech["score"] = round(scores_weighted, 1)
-    composite_tech["direction"] = avg_direction
-    composite_tech["confidence"] = round(confidences_weighted, 3)
-    composite_tech["direction_strength"] = avg_strength
-    composite_tech["is_composite"] = True
-    composite_tech["weights"] = weights
-
-    # Also compute the existing OI-based score for comparison if it's an F&O symbol
-    existing_score = None
-    if symbol in SLUG_MAP:
-        try:
-            cj = await fetch_nse_chain(symbol)
-            if cj and "records" in cj:
-                spot_val = cj.get("records", {}).get("underlyingValue", 0)
-                if spot_val:
-                    stats = compute_stock_score(cj, float(spot_val), symbol)
-                    existing_score = {
-                        "score": stats.get("score", 0),
-                        "signal": stats.get("signal", "NEUTRAL"),
-                        "confidence": stats.get("confidence", 0),
-                    }
-                    log.info(f"  ✅ Computed comparison OI score for {symbol}: {existing_score['score']}")
-                else:
-                    log.warning(f"  ⚠️ No spot price found for {symbol} in chain")
-            else:
-                log.warning(f"  ⚠️ No valid chain for {symbol} comparison")
-        except Exception as e:
-            log.error(f"  ❌ Error computing comparison score for {symbol}: {e}")
-    else:
-        log.info(f"  ℹ️ Skipping comparison score: {symbol} not in SLUG_MAP")
-
-    # Fetch momentum from database history
-    momentum_metrics = db.get_technical_momentum(symbol, "15m")
-
-    return {
-        "symbol": symbol,
-        "technical_score": composite_tech,
-        "timeframes": {
-            "1m": res_1m.to_dict(),
-            "2m": res_2m.to_dict(),
-            "5m": res_5m.to_dict(),
-            "10m": res_10m.to_dict(),
-            "15m": res_15m.to_dict(),
-        },
-        "timeframe_consensus": timeframe_consensus,
-        "existing_score": existing_score,
-        "momentum": momentum_metrics,
-        "data_quality": data_quality,
-        "recommended_thresholds": TechnicalBacktester().get_recommended_thresholds(),
-        "bars_used": len(c5),
-    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════

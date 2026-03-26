@@ -128,16 +128,33 @@ class TechnicalBacktester:
     - Track performance by multiple dimensions (direction, strength, regime)
     """
 
-    def __init__(self, db_path: str = None):
+    _tables_ensured = False
+
+    def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
-            db_path = Path(__file__).parent / "scanner.db"
-        self.db_path = str(db_path)
-        self._ensure_tables()
+            db_path_obj = Path(__file__).parent / "scanner.db"
+            self.db_path = str(db_path_obj)
+        else:
+            self.db_path = db_path
+        
+        if not TechnicalBacktester._tables_ensured:
+            self._ensure_tables()
+            TechnicalBacktester._tables_ensured = True
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Get a thread-safe connection with reasonable timeout and WAL mode."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass # Already in WAL or locked
+        return conn
 
     def _ensure_tables(self):
         """Create tables for technical backtest results."""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
+        with self._get_conn() as conn:
+            c = conn.cursor()
 
         # Backtest runs
         c.execute("""

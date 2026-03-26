@@ -58,8 +58,20 @@ else
 fi
 BACKEND_PID=$!
 
-# Wait a brief moment for backend to initialize
-sleep 2
+# Wait for backend to be ready
+echo "Waiting for backend to initialize on port 8000..."
+MAX_RETRIES=30
+COUNT=0
+while ! curl -s http://localhost:8000/health > /dev/null; do
+    sleep 1
+    COUNT=$((COUNT+1))
+    if [ $COUNT -ge $MAX_RETRIES ]; then
+        echo "❌ ERROR: Backend failed to start within $MAX_RETRIES seconds."
+        kill $BACKEND_PID 2>/dev/null
+        exit 1
+    fi
+done
+echo "✅ Backend is ready!"
 
 # Start Frontend
 echo "[5/5] Starting Vite React Frontend..."

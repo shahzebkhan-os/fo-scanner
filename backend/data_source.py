@@ -113,8 +113,9 @@ async def fetch_indstocks_ltp(symbols: list, token: str = "") -> dict:
     if results:
         return results
 
-    if token and token not in ("", "PASTE_YOUR_NEW_TOKEN_HERE"):
-        results = await _fetch_indstocks_ltp_v1(symbols, token)
+    # Commented out dead IndStocks API to prevent 404s
+    # if token and token not in ("", "PASTE_YOUR_NEW_TOKEN_HERE"):
+    #     results = await _fetch_indstocks_ltp_v1(symbols, token)
     return results
 
 async def _fetch_nse_market_watch(symbols: list) -> dict:

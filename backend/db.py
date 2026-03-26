@@ -1064,6 +1064,7 @@ def save_technical_score_snapshots(records: list):
             now,
             today
         ))
+    logger.info(f"Inserting {len(rows)} technical score records into technical_scores_history.")
     with _conn() as c:
         c.executemany("""
             INSERT INTO technical_scores_history

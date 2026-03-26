@@ -15,6 +15,8 @@ import logging
 import os
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
+import yfinance as yf
+import pandas as pd
 
 from . import db
 from . import signals_legacy as Signals
@@ -435,37 +437,48 @@ async def technical_snapshot_loop():
     log.info("Technical snapshot loop started (5 min interval).")
     while True:
         try:
-            if _is_market_open_fn and _is_market_open_fn():
+            market_open = _is_market_open_fn() if _is_market_open_fn else True
+            log.info(f"Technical snapshot check: Market Open = {market_open}")
+            if market_open:
                 log.info("Taking technical score snapshot... (5-min interval)")
                 
                 def _fetch_and_score():
-                    import yfinance as yf
-                    import pandas as pd
                     from .scoring_technical import compute_technical_score
                     from .constants import YFINANCE_TICKER_MAP
                     
                     symbols = _all_symbols_list
                     tickers = [YFINANCE_TICKER_MAP.get(s, f"{s}.NS") for s in symbols]
+                    log.info(f"📊 Starting Technical Snapshot fetch for {len(tickers)} symbols...")
                     
                     df = yf.download(tickers, period="5d", interval="5m", progress=False, threads=True)
-                    if df is None or df.empty:
+                    log.info(f"yf.download returned df of shape: {df.shape if df is not None else 'None'}")
+                    if df is None or df.empty or len(df.columns) == 0:
+                        log.warning("yf.download returned empty or invalid dataframe.")
                         return []
                         
                     if not isinstance(df.index, pd.DatetimeIndex):
                          df.index = pd.to_datetime(df.index)
-                         
-                    df_15m = df.resample('15min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
-                    df_30m = df.resample('30min').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
                     
                     records = []
                     
                     def _extract(data_df, tick):
                         try:
+                            # Robust extraction for MultiIndex [Metric, Ticker] or [Ticker, Metric]
                             if isinstance(data_df.columns, pd.MultiIndex):
-                                c = data_df["Close"][tick].dropna().tolist()
-                                h = data_df["High"][tick].dropna().tolist()
-                                l = data_df["Low"][tick].dropna().tolist()
-                                v = data_df["Volume"][tick].dropna().tolist()
+                                # Level 0 is Metric (Close, High, etc) and Level 1 is Ticker
+                                if tick in data_df.columns.get_level_values(1):
+                                    c = data_df["Close"][tick].dropna().tolist()
+                                    h = data_df["High"][tick].dropna().tolist()
+                                    l = data_df["Low"][tick].dropna().tolist()
+                                    v = data_df["Volume"][tick].dropna().tolist()
+                                # Level 0 is Ticker and Level 1 is Metric
+                                elif tick in data_df.columns.get_level_values(0):
+                                    c = data_df[tick]["Close"].dropna().tolist()
+                                    h = data_df[tick]["High"].dropna().tolist()
+                                    l = data_df[tick]["Low"].dropna().tolist()
+                                    v = data_df[tick]["Volume"].dropna().tolist()
+                                else:
+                                    return [], [], [], []
                             else:
                                 c = data_df["Close"].dropna().tolist()
                                 h = data_df["High"].dropna().tolist()
@@ -481,9 +494,21 @@ async def technical_snapshot_loop():
                         except Exception:
                             return [], [], [], []
                             
+                    # Resample per ticker for accuracy
                     for sym, tick in zip(symbols, tickers):
                         try:
-                            c15, h15, l15, v15 = _extract(df_15m, tick)
+                            c5, h5, l5, v5 = _extract(df, tick)
+                            if len(c5) < 10: continue
+                            
+                            # Extract the corresponding timestamps for this ticker's data
+                            # (In case some tickers have missing bars, though yf.download aligns them)
+                            ticker_index = df.index[-len(c5):]
+                            temp_df = pd.DataFrame({'Close': c5, 'High': h5, 'Low': l5, 'Volume': v5}, index=ticker_index)
+                            
+                            df_15m = temp_df.resample('15min').agg({'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
+                            df_30m = temp_df.resample('30min').agg({'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
+
+                            c15, h15, l15, v15 = df_15m['Close'].tolist(), df_15m['High'].tolist(), df_15m['Low'].tolist(), df_15m['Volume'].tolist()
                             if len(c15) > 10:
                                 res15 = compute_technical_score(c15, h15, l15, v15)
                                 res15_dict = res15.to_dict()
@@ -497,7 +522,7 @@ async def technical_snapshot_loop():
                                     "adx": res15_dict.get("indicators", {}).get("adx", {}).get("adx", 0)
                                 })
 
-                            c30, h30, l30, v30 = _extract(df_30m, tick)
+                            c30, h30, l30, v30 = df_30m['Close'].tolist(), df_30m['High'].tolist(), df_30m['Low'].tolist(), df_30m['Volume'].tolist()
                             if len(c30) > 10:
                                 res30 = compute_technical_score(c30, h30, l30, v30)
                                 res30_dict = res30.to_dict()
@@ -510,14 +535,14 @@ async def technical_snapshot_loop():
                                     "direction_strength": res30_dict.get("direction_strength", "UNKNOWN"),
                                     "adx": res30_dict.get("indicators", {}).get("adx", {}).get("adx", 0)
                                 })
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log.debug(f"Technical score failed for {sym}: {e}")
                     return records
 
                 records = await asyncio.to_thread(_fetch_and_score)
                 if records:
                     db.save_technical_score_snapshots(records)
-                    log.info(f"Saved {len(records)} tech snapshots.")
+                    log.info(f"Saved {len(records)} tech snapshots to database.")
                     
                     # ── Technical Auto-Trading Trigger (Score >= 70) ──
                     rel = [r for r in records if r["timeframe"] == "15m"]
@@ -712,10 +737,6 @@ async def start_all():
     # asyncio.create_task(bulk_deals_loop())         # Scanner
     # asyncio.create_task(auto_trade_loop())         # F&O Trade
     asyncio.create_task(db_cleanup_loop())
-    # asyncio.create_task(accuracy_sampler_loop())
-    # asyncio.create_task(accuracy_price_updater_loop())
     asyncio.create_task(technical_snapshot_loop())
-    # Previous periodic technical Telegram report disabled in favor of good-entry alerts only.
-    # asyncio.create_task(technical_report_loop())
     asyncio.create_task(ml_retrain_loop())
-    log.info("Scheduler started (scanner/trade loops disabled).")
+    log.info("Scheduler started (Technical Snapshot + Cleanup + ML Retrain active).")
