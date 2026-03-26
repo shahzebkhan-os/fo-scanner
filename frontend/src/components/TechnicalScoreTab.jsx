@@ -964,13 +964,14 @@ export default function TechnicalScoreTab({ theme, scanData }) {
       await Promise.allSettled(chunk.map(async (sym) => {
         try {
           const data = await apiFetch(`/api/score-technical/${sym}`);
-          if (data?.error || data?.technical_score?.score == null) {
-            failures.push({ symbol: sym, reason: data?.error || "Invalid technical score response" });
+          const hasMissingTechnicalScore = data?.technical_score?.score === null || data?.technical_score?.score === undefined;
+          if (data?.error || hasMissingTechnicalScore) {
+            failures.push({ symbol: sym, reason: data?.error || "Missing technical score value" });
             return;
           }
           results.push({ symbol: sym, data });
         } catch (e) {
-          failures.push({ symbol: sym, reason: e?.message || "Request failed" });
+          failures.push({ symbol: sym, reason: e?.message || "Network request failed" });
         } finally {
           processed += 1;
           setBatchProgress(processed);
