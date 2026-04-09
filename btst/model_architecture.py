@@ -178,14 +178,13 @@ class EnsemblePredictor:
                 probs_lr = lr_model.predict_proba(X_va)
                 oof_preds_train[val_idx] += probs_lr / n_folds
 
-        # Train TFT on full train set
-        log.info("Training TFT on full train set...")
+        # Train TFT on full train set (if data format is compatible)
+        log.info("Attempting TFT training on full train set...")
         if TORCH_AVAILABLE and PYTORCH_FORECASTING_AVAILABLE:
-            try:
-                self.tft_model = self._train_tft(X_train, y_train_norm, X_val, y_val_norm)
-            except Exception as e:
-                log.warning(f"TFT training failed: {e}. Falling back to zeros.")
-                self.tft_model = None
+            self.tft_model = self._train_tft(X_train, y_train_norm, X_val, y_val_norm)
+        else:
+            log.info("PyTorch or pytorch-forecasting not available. Skipping TFT.")
+            self.tft_model = None
 
         # Train meta-learner on OOF predictions
         log.info("Training meta-learner...")
@@ -261,30 +260,39 @@ class EnsemblePredictor:
         """
         Train Temporal Fusion Transformer for 3-class classification.
 
-        FIXED: Use single output with CrossEntropyLoss instead of MultiLoss.
+        Note: TFT requires time-series structured data with proper time_idx and group identifiers.
+        Since our data is tabular (not time-series format), we skip TFT training gracefully.
         """
         if not PYTORCH_FORECASTING_AVAILABLE:
-            raise ImportError("pytorch-forecasting not available")
+            log.info("pytorch-forecasting not available. Skipping TFT training.")
+            return None
 
         # Detect hardware
         if torch.backends.mps.is_available():
             num_workers = 4
             batch_size = 32
-            log.info("Detected Apple Silicon: using 4 DataLoader workers")
-            log.info(f"Detected Apple Silicon: using batch size {batch_size}")
+            log.info(f"Detected Apple Silicon: using 4 DataLoader workers with batch size {batch_size}")
         else:
             num_workers = 0
             batch_size = self.params.get('batch_size', 64)
 
-        try:
-            # Create time series dataset
-            # For TFT, we need a DataFrame with time_idx, group_ids, and features
-            # Since we don't have proper time series structure, skip TFT training
-            raise RuntimeError("MultiLoss not compatible with single target")
-
-        except Exception as e:
-            log.warning(f"TFT training failed: {e}. Falling back to zeros.")
-            return None
+        # TFT requires structured time-series data with:
+        # - time_idx: integer time index for each observation
+        # - group_ids: identifiers for different time series
+        # - target: the value to predict
+        # - static features: features that don't change over time
+        # - time-varying features: features that change over time
+        #
+        # Our current data is tabular (not time-series structured), so we cannot use TFT directly.
+        # To use TFT, we would need to:
+        # 1. Reshape data into time-series format (e.g., daily sequences per symbol)
+        # 2. Create proper time_idx column (sequential integers)
+        # 3. Define group identifiers (e.g., symbol names)
+        # 4. Separate static vs time-varying features
+        #
+        # For now, we skip TFT training and rely on LGBM, XGB, and LR models.
+        log.info("TFT training skipped: data is not in time-series format. Using LGBM+XGB+LR ensemble instead.")
+        return None
 
     def _calibrate_temperature(self, logits: np.ndarray, y_true: np.ndarray) -> float:
         """Calibrate temperature using validation set."""
@@ -312,23 +320,8 @@ class EnsemblePredictor:
             lr_preds = np.mean([model.predict_proba(X) for model in self.lr_models], axis=0)
             all_preds.append(lr_preds)
 
-        # TFT predictions
-        if self.tft_model is not None:
-            try:
-                # Detect hardware
-                if TORCH_AVAILABLE and torch.backends.mps.is_available():
-                    num_workers = 4
-                    batch_size = 32
-                    log.info("Detected Apple Silicon: using 4 DataLoader workers")
-                    log.info(f"Detected Apple Silicon: using batch size {batch_size}")
-
-                # TFT prediction would go here
-                raise RuntimeError("TFT model not built.")
-            except Exception as e:
-                log.error(f"TFT model not built.")
-                tft_preds = np.zeros((len(X), self.n_classes))
-                log.warning(f"TFT prediction failed: {e}. Falling back to zeros.")
-                all_preds.append(tft_preds)
+        # TFT predictions (TFT is None if training was skipped)
+        # TFT is currently not used because data is not in time-series format
 
         # Average base model predictions
         if all_preds:
